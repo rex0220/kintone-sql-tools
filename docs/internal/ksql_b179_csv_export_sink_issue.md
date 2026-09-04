@@ -139,6 +139,27 @@ codex（workspace-write）が実装を終え **最終報告を書く直前にワ
 
 Claude ゲート＝flow-library＋export の jest PASS、`build:flow` + `flow:bundle-guard` PASS、`dist-flow/flow-library/exportSinks.d.ts` は `./publicTypes` のみ参照（`../execute` の漏れなし）、`dist-flow/export/types.d.ts` が配布物に含まれる。全 suite は §6.4 に記載。
 
-### 6.3 PR 3: CLI（未着手）
+### 6.3 PR 3: CLI（Claude 実装）
 
-`--export-csv` / `--export-encoding` / `--export-timezone`、`executeBatch` の内部 entry point、CLI 限定の `encoding-japanese` bundle＋round-trip 検査、atomic write（Windows `EPERM` 契約）、README・言語リファレンス・CHANGELOG。
+codex がクレジット切れのため Claude が実装した（仕様 R2 §4.3〜4.6・§7.4・§7.5）。
+
+| ファイル | 要旨 |
+|---|---|
+| `src/execute.ts` | 内部 seam `withBatchCompletionObserver(options, observer)`（private symbol・公開 `ExecuteOptions` 不変）。`executeBatch` は最終結果を組み立てた直後・scope 解放前に observer へ `{ result, tempTables }` を渡す |
+| `src/cli/index.ts` | `--export-csv <name>=<path>` / `--export-csv <path>` / `--export-encoding` / `--export-timezone` の parse（最初の `=` で分割・`=` を含む引数は必ず名前付き・左辺が識別子でなければ ArgumentError）。実行前検査 `buildCliExportPlan`（`--dry-run` 併用不可・名前付き／名前なし混在不可・名前なしは単文 SELECT のみ・sink 宣言は `/flow` と同じ `normalizeExportSinkDeclarations`・path 重複と `--output` 衝突・timezone の事前検証）。batch は observer で temp table を受け取り、`writeBatchOutput` の後に全 sink を serialize してから file を書く。単文 SELECT は `captureColumnMeta: true` で実行し engine 付随 meta を使う |
+| `src/cli/shiftJisEncoder.ts`（新規） | `encoding-japanese`（devDependency・CLI bundle 限定）で encode → `TextDecoder("shift_jis")` で decode → code unit 完全一致でなければ最初の不一致の code point と offset を message に含めて throw |
+| `src/cli/exportCsvFiles.ts`（新規） | 同一 directory の一時 file（`.<name>.<random>.tmp`）を `wx` で作成 → 全量 write → fsync → close → `renameSync`。失敗時は handle を close し一時 file を削除して `ExportSinkWriteError`（旧 file 維持） |
+| `src/cli/encoding-japanese.d.ts`（新規） | `@types` が無いため最小の module 宣言 |
+| `src/flow-library/exportSinkContext.ts` | `isExportSinkName` を export（CLI と同じ識別子規則） |
+| `src/cli/__tests__/exportCsv.e2e.test.ts`（新規） | R2 §7.4 の matrix 19 test（named 成功・単文 SELECT の列 meta・複文／DML の名前なし拒否・sink 不存在／DROP 済み／DML target の実行前拒否＝API 0 回・構文 error 3 形・`=` を含む path・重複／`--output` 衝突／`--dry-run`・失敗時の既存 file 不変と一時 file なし・EXIT 前 CREATE で file なし＝exit 0・SUBTABLE で全 sink 未作成・SJIS 成功と U+301C の fail-closed・timezone 変換と invalid zone・`--format csv` の stdout golden 不変・既存 file の置換と **Windows の open handle で EPERM＝旧 file 維持**） |
+| `CHANGELOG.md` / `README.md` / `docs/ksql_language_reference.md` §18.2（新設）/ CLI help | 文書 |
+
+**実測**: CLI bundle（非 minify）は 1,426,387 → 1,850,046 bytes（+424 KB。minify 相当 231 KB）。`/flow` bundle に encoding-japanese の混入なし（guard PASS）。`package.json.dependencies` は空のまま。
+
+**Claude ゲート**: exportCsv e2e 19/19 PASS、`npx tsc --noEmit`（`src/ui/desktop.ts` の既存エラーを除き 0）、`npm test` 全 suite PASS（§6.4）、`build:cli` / `build:flow` / `flow:bundle-guard` PASS。
+
+**codex が担うはずだった自己チェックの代替**: 仕様 §3.4「全 sink を serialize してから最初の file」＝`runNamedCliExports` が serialize ループ完了後に `writeCliExportFiles` を呼ぶ（SUBTABLE テストで good.csv も未作成を固定）。§3.3「batch 失敗時は serialize 0 回」＝`batchCode !== 0` で早期 return。§4.4 の `=` 規則＝parse で固定。不変契約＝`--format csv` golden をテストで固定。
+
+### 6.4 全 suite（PR 3 時点）
+
+`npm test`（version:check + docs:check + 全 suite + e2e）PASS。件数は §7 のリリース記録で確定する。

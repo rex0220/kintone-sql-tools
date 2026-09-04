@@ -796,12 +796,24 @@ const statementEvaluationContextKey: unique symbol = Symbol("statementEvaluation
 const importSourceMaterializedCallbackKey: unique symbol = Symbol("importSourceMaterializedCallback");
 const nativeUpsertExecutionKey: unique symbol = Symbol("nativeUpsertExecution");
 const nativeUpsertExplainCapabilityKey: unique symbol = Symbol("nativeUpsertExplainCapability");
+const batchCompletionObserverKey: unique symbol = Symbol("batchCompletionObserver");
+/** @internal B179 CLI export seam: observes the final batch result and its temp tables before executeBatch returns. */
+export type BatchCompletionObserver = (completion: {
+  readonly result: BatchExecuteResult;
+  readonly tempTables: ReadonlyMap<string, MaterializedTable>;
+}) => void;
 type InternalExecuteOptions = ExecuteOptions & {
   [statementEvaluationContextKey]?: EvaluationContext;
   [importSourceMaterializedCallbackKey]?: (info: Omit<ManagedImportSourceMaterializedInfo, "statementIndex">) => void | Promise<void>;
   [nativeUpsertExecutionKey]?: boolean;
   [nativeUpsertExplainCapabilityKey]?: boolean;
+  [batchCompletionObserverKey]?: BatchCompletionObserver;
 };
+
+/** @internal CLI `--export-csv` plumbing. Not exposed on the public ExecuteOptions surface. */
+export function withBatchCompletionObserver<T extends ExecuteOptions>(options: T, observer: BatchCompletionObserver): T {
+  return { ...options, [batchCompletionObserverKey]: observer } as T;
+}
 
 /** @internal Phase 2 の CLI plumbing からも使う、公開 ExecuteOptions に露出しない設定 seam。 */
 export function withNativeUpsertExecutionOption<T extends ExecuteOptions>(
@@ -1830,7 +1842,7 @@ export async function executeBatch(
     }
 
     metrics.elapsedMs = Date.now() - startedAt;
-    return {
+    const batchResult: BatchExecuteResult = {
       ok: results.every((r) => r.status === "success" || r.skippedReason === "exit"),
       statementCount: statements.length,
       statements: results,
@@ -1838,6 +1850,10 @@ export async function executeBatch(
       metrics,
       ...(dialect1Warnings.length > 0 ? { warnings: dialect1Warnings } : {}),
     };
+    // B179: the CLI export seam reads temp tables here, before the batch scope is released.
+    const observer = (options as InternalExecuteOptions)[batchCompletionObserverKey];
+    if (observer) observer({ result: batchResult, tempTables });
+    return batchResult;
   } finally {
     releaseMetadataCacheScope(cacheContext);
   }

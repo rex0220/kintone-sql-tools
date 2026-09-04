@@ -3,6 +3,28 @@
 リリースごとの変更点。**本ファイルは v3.45.0 以降だけを保持する。**
 それ以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) の各タグを参照。
 
+## Unreleased
+
+### 機能追加（B179: CSV export — 名前付きシンク・engine 層 serializer・`/flow` 公開 API・CLI `--export-csv`）**※ 純加法・既定動作は不変**
+
+- engine 層に CSV serializer を 1 実装しました（RFC 4180・`"` `,` CR LF を quoting・CRLF・header あり・BOM なし）。
+  列名は result 列名そのもの（直接 field 参照は正式 field code）。重複 header は serialize 前にエラー。
+- 値表現は cli-kintone 互換: 複数値（CHECK_BOX / MULTI_SELECT / CATEGORY）は LF 連結、USER / ORGANIZATION / GROUP /
+  STATUS_ASSIGNEE は `code` の LF 連結、空・NULL は空文字、数値は生値（計算列の指数表記は丸めなしで 10 進展開）、
+  DATETIME は既定 UTC のまま・`timezone` 指定時だけ offset 付き ISO。SUBTABLE / FILE 列は拒否（`APP$明細` を SELECT）。
+- `/flow`: `createExecutionContext({ exportSinks: [{ name }] })` で temp table `#name` を sink として事前宣言
+  （不存在・重複・DROP 済み・DML 指定は context 作成時に同期拒否）。`exportSinkStatus(context, name)` が
+  `materialized | not-created | failed | incomplete` を返し、`serializeExportSink` は `materialized` のときだけ
+  `{ text, data, receipt: { rows, columns, bytes, encoding } }` を返します。単文 SELECT は
+  `serializeSelectResultAsCsv(statementResult)`、任意入力は `serializeCsvExport(input)`。engine は path を持たず
+  file を書きません。Shift_JIS は `FlowExportTextEncoder` を注入（表現不能文字で throw する義務）。
+- CLI: `--export-csv <name>=<path>`（反復可・temp table `#name`）／`--export-csv <path>`（単文 SELECT）／
+  `--export-encoding utf8|sjis`／`--export-timezone <zone>`。SQL 全文成功後に全 sink をメモリで確定してから、
+  同一 directory の一時 file → fsync → close → rename で書きます（失敗時は旧 file 維持・一時 file 削除）。
+  Shift_JIS は CLI bundle 限定の encoding-japanese を使い、encode 後に decode して完全一致しない文字は fail-closed。
+  既存の `--format csv` / `--output` は不変です。
+- MCP・プラグインへの export 配線は対象外。既存 consumer の移行は不要です。
+
 ## v3.76.0（2026-09-04）
 
 ### 機能追加（B178: `/flow` IMPORT source materialize receipt）**※ 純加法・既定動作は不変**

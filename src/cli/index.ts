@@ -32,8 +32,17 @@ import {
   type KintoneClient,
   type SelectResult,
 } from "../core";
-import { withNativeUpsertExecutionOption } from "../execute";
+import {
+  getSelectColumnMeta,
+  withBatchCompletionObserver,
+  withNativeUpsertExecutionOption,
+  type BatchCompletionObserver,
+} from "../execute";
 import { FlowImportProviderError } from "../flow-library/importSources";
+import { isExportSinkName, normalizeExportSinkDeclarations } from "../flow-library/exportSinkContext";
+import { serializeCsvExport, type CsvExportOptions, type CsvExportResult } from "../export/csvSerializer";
+import { createCliShiftJisEncoder } from "./shiftJisEncoder";
+import { resolveExportTargetPath, writeExportFileAtomically } from "./exportCsvFiles";
 import { extractTypedPushdownCandidates } from "../core/optimization/wherePredicatePushdown";
 import { statementUsesRelativeDateResolution } from "../core/optimization/relativeDatePushdownGuard";
 import type { SelectStatement } from "../types/ast";
@@ -94,6 +103,10 @@ Options:
   --var <name=value>         Override a DECLARE variable (repeatable; not for secrets)
   --import-csv <name=path>   Supply named CSV and enable IMPORT (repeatable)
   --import-json <name=path>  Supply named JSON and enable IMPORT (repeatable)
+  --export-csv <name=path>   Export temp table #<name> as RFC 4180 CSV after the batch succeeds (repeatable)
+  --export-csv <path>        Export the result of a single SELECT as CSV (no name; path must not contain '=')
+  --export-encoding <type>   CSV export encoding: utf8 | sjis (default: utf8; unrepresentable characters fail)
+  --export-timezone <zone>   IANA timezone for DATETIME cells in CSV export (default: keep UTC)
   --format <type>            Output format: table | json | jsonl | csv | markdown | md
                              (batch + json: prints one JSON envelope for the whole batch)
   --max-records <n>          Max records to fetch (default: 500)
@@ -293,6 +306,9 @@ interface ParsedArgs {
   attachmentFormat: DisplayOptions["attachmentFormat"] | null;
   importCsv: Record<string, string>;
   importJson: Record<string, string>;
+  exportCsv: CliExportRequest[];
+  exportEncoding: "utf8" | "sjis" | null;
+  exportTimezone: string | null;
 }
 
 export function parseArgs(argv: string[]): ParsedArgs {
@@ -354,6 +370,9 @@ export function parseArgs(argv: string[]): ParsedArgs {
     attachmentFormat: null,
     importCsv: Object.create(null) as Record<string, string>,
     importJson: Object.create(null) as Record<string, string>,
+    exportCsv: [],
+    exportEncoding: null,
+    exportTimezone: null,
   };
 
   for (let i = 0; i < argv.length; i++) {
@@ -409,6 +428,24 @@ export function parseArgs(argv: string[]): ParsedArgs {
         throw new Error(`ArgumentError: import source \"${name}\" is specified more than once.`);
       }
       out.importJson[name] = raw.slice(eq + 1);
+      i++;
+      continue;
+    }
+    if (a === "--export-csv") {
+      out.exportCsv.push(parseExportCsvArg(v ?? ""));
+      i++;
+      continue;
+    }
+    if (a === "--export-encoding") {
+      const x = (v ?? "").trim().toLowerCase();
+      if (x !== "utf8" && x !== "sjis") throw new Error("ArgumentError: --export-encoding must be utf8|sjis.");
+      out.exportEncoding = x;
+      i++;
+      continue;
+    }
+    if (a === "--export-timezone") {
+      if (!v || !v.trim()) throw new Error("ArgumentError: --export-timezone requires an IANA timezone name.");
+      out.exportTimezone = v.trim();
       i++;
       continue;
     }
@@ -931,6 +968,167 @@ function normalizeOutputFormat(v: string | null | undefined): OutputFormat | nul
   if (x === "md") return "markdown";
   if (x === "table" || x === "json" || x === "jsonl" || x === "csv" || x === "markdown") return x;
   return null;
+}
+
+// ------------------------------------------------------------
+// B179 --export-csv（仕様 R2 §3.2〜3.6 / §4.3〜4.6）
+//   - engine serializer（src/export）で bytes を作り、CLI 層だけが file を書く
+//   - 全 sink を serialize してから最初の file を書く。失敗時は完成 file を作らない
+// ------------------------------------------------------------
+
+export interface CliExportRequest {
+  readonly name: string | null;
+  readonly path: string;
+}
+
+interface CliExportPlan {
+  readonly requests: readonly CliExportRequest[];
+  readonly named: boolean;
+  readonly options: CsvExportOptions;
+}
+
+type CliExportTable = { readonly columns: readonly string[]; readonly rows: readonly Readonly<Record<string, string>>[]; readonly columnMeta?: ReadonlyMap<string, { readonly fieldType?: string }> };
+
+export function parseExportCsvArg(raw: string): CliExportRequest {
+  if (raw === "") throw new Error("ArgumentError: --export-csv requires <name>=<path> or <path>.");
+  const eq = raw.indexOf("=");
+  if (eq < 0) return { name: null, path: raw };
+  const name = raw.slice(0, eq);
+  const path = raw.slice(eq + 1);
+  if (!isExportSinkName(name)) {
+    throw new Error(
+      `ArgumentError: --export-csv sink name ${JSON.stringify(name)} is not a temp table identifier `
+      + "(use <name>=<path>; a path containing '=' must be given with a name)."
+    );
+  }
+  if (path === "") throw new Error("ArgumentError: --export-csv path must not be empty.");
+  return { name, path };
+}
+
+function buildCliExportPlan(
+  args: ParsedArgs,
+  parsedStatements: ReturnType<typeof parseSqlStatementsForScript>["statements"],
+  isBatchSql: boolean,
+  stmtType: string | null,
+  outputPath: string | null
+): CliExportPlan | null {
+  const requests = args.exportCsv;
+  if (requests.length === 0) return null;
+  if (args.dryRun) throw new Error("ArgumentError: --export-csv cannot be combined with --dry-run.");
+  const unnamed = requests.filter((request) => request.name === null);
+  if (unnamed.length > 0 && unnamed.length !== requests.length) {
+    throw new Error("ArgumentError: --export-csv cannot mix <name>=<path> and <path> forms.");
+  }
+  if (unnamed.length > 1) throw new Error("ArgumentError: --export-csv <path> without a name can be given only once.");
+  const named = unnamed.length === 0;
+  if (!named) {
+    if (isBatchSql) {
+      throw new Error("ArgumentError: --export-csv <path> without a name requires a single SELECT; use <name>=<path> for a batch.");
+    }
+    if (stmtType !== "SELECT" && stmtType !== "UNION" && stmtType !== "WITH") {
+      throw new Error("ArgumentError: --export-csv <path> without a name requires a SELECT statement.");
+    }
+  } else {
+    const names = new Set<string>();
+    for (const request of requests) {
+      if (names.has(request.name!)) throw new Error(`ArgumentError: export sink "${request.name}" is specified more than once.`);
+      names.add(request.name!);
+    }
+    normalizeExportSinkDeclarations(parsedStatements, requests.map((request) => ({ name: request.name! })));
+  }
+  const targets = new Set<string>();
+  const outputTarget = outputPath ? resolveExportTargetPath(outputPath) : null;
+  for (const request of requests) {
+    const resolved = resolveExportTargetPath(request.path);
+    const key = process.platform === "win32" ? resolved.toLowerCase() : resolved;
+    if (targets.has(key)) throw new Error(`ArgumentError: export path ${JSON.stringify(resolved)} is specified more than once.`);
+    if (outputTarget !== null && (process.platform === "win32" ? outputTarget.toLowerCase() : outputTarget) === key) {
+      throw new Error("ArgumentError: --export-csv path must differ from --output.");
+    }
+    targets.add(key);
+  }
+  const encoding = args.exportEncoding ?? "utf8";
+  const options: CsvExportOptions = {
+    encoding,
+    ...(args.exportTimezone ? { timezone: args.exportTimezone } : {}),
+    ...(encoding === "sjis" ? { encoder: createCliShiftJisEncoder() } : {}),
+  };
+  if (options.timezone) {
+    try {
+      serializeCsvExport({ columns: [], rows: [] }, { encoding: "utf8", timezone: options.timezone });
+    } catch (err) {
+      throw new Error(`ArgumentError: --export-timezone ${JSON.stringify(options.timezone)} is not a supported IANA timezone.`);
+    }
+  }
+  return { requests, named, options };
+}
+
+function writeExportError(error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  const cause = (error as { cause?: unknown } | null)?.cause;
+  const detail = cause instanceof Error && cause.message !== message ? ` (${cause.message})` : "";
+  process.stderr.write(`${message}${detail}\n`);
+}
+
+function writeCliExportFiles(
+  serialized: ReadonlyArray<{ request: CliExportRequest; result: CsvExportResult }>,
+  quiet: boolean
+): number {
+  try {
+    for (const item of serialized) writeExportFileAtomically(item.request.path, item.result.data);
+  } catch (error) {
+    writeExportError(error);
+    return 1;
+  }
+  if (!quiet) {
+    for (const { request, result } of serialized) {
+      const { rows, bytes, encoding } = result.receipt;
+      process.stderr.write(`export: ${request.name ?? "(select)"} -> ${resolveExportTargetPath(request.path)} rows=${rows} bytes=${bytes} encoding=${encoding}\n`);
+    }
+  }
+  return 0;
+}
+
+function runNamedCliExports(
+  plan: CliExportPlan,
+  tempTables: ReadonlyMap<string, CliExportTable> | null,
+  quiet: boolean
+): number {
+  if (tempTables === null) {
+    process.stderr.write("ExportSinkExecutionFailedError: batch completion was not observed; no file written.\n");
+    return 1;
+  }
+  const serialized: Array<{ request: CliExportRequest; result: CsvExportResult }> = [];
+  try {
+    for (const request of plan.requests) {
+      const table = tempTables.get(`#${request.name}`);
+      if (!table) {
+        if (!quiet) process.stderr.write(`export: ${request.name} not created (skipped before CREATE TEMP TABLE); no file written\n`);
+        continue;
+      }
+      serialized.push({ request, result: serializeCsvExport({ columns: table.columns, rows: table.rows, columnMeta: table.columnMeta }, plan.options) });
+    }
+  } catch (error) {
+    writeExportError(error);
+    return 1;
+  }
+  return writeCliExportFiles(serialized, quiet);
+}
+
+function runSingleSelectCliExport(plan: CliExportPlan, result: SelectResult, quiet: boolean): number {
+  const columnMeta = getSelectColumnMeta(result);
+  if (columnMeta === undefined) {
+    process.stderr.write("ExportSinkInvalidTargetError: the SELECT result has no engine column metadata; no file written.\n");
+    return 1;
+  }
+  let serialized: CsvExportResult;
+  try {
+    serialized = serializeCsvExport({ columns: result.columns, rows: result.rows, columnMeta }, plan.options);
+  } catch (error) {
+    writeExportError(error);
+    return 1;
+  }
+  return writeCliExportFiles([{ request: plan.requests[0], result: serialized }], quiet);
 }
 
 function toExitCodeFromError(err: unknown): number {
@@ -2078,6 +2276,15 @@ async function run(): Promise<number> {
     }
   }
 
+  // B179 --export-csv: sink 宣言・path・option を実行 API より前に検査する（仕様 R2 §3.2）
+  let exportPlan: CliExportPlan | null = null;
+  try {
+    exportPlan = buildCliExportPlan(args, parsedStatements, isBatchSql, stmtType, outputPath);
+  } catch (err) {
+    process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+    return 2;
+  }
+
   if (isDmlStatement) {
     if (hasProfileSyntax && stmtType === "DELETE") {
       process.stderr.write("ArgumentError: @profile is not supported for DELETE yet.\n");
@@ -2501,7 +2708,12 @@ async function run(): Promise<number> {
       // バッチ実行。timeout はバッチ合計として扱う（仕様 §5.7）。
       // DML 文には文ごとの --dml-max-rows ガードを confirm 経由で適用
       //（バッチ全体の確認は上で済んでいるため、ここでは件数ガードのみ）
-      let batchResult = await executeBatch(sql!, client, withNativeUpsertExecutionOption({
+      let exportCapture: Parameters<BatchCompletionObserver>[0]["tempTables"] | null = null;
+      type CliBatchOptions = NonNullable<Parameters<typeof executeBatch>[2]>;
+      const withExportObserver = (options: CliBatchOptions): CliBatchOptions => exportPlan
+        ? withBatchCompletionObserver(options, ({ tempTables }) => { exportCapture = new Map(tempTables); })
+        : options;
+      let batchResult = await executeBatch(sql!, client, withExportObserver(withNativeUpsertExecutionOption({
         maxRecords,
         fetchParallel,
         onLimitReached: effectiveOnLimit,
@@ -2509,6 +2721,7 @@ async function run(): Promise<number> {
         continueOnError: args.continueOnError,
         tempTableMaxRows,
         timeoutMs: timeout,
+        captureColumnMeta: exportPlan !== null,
         cursorMaxActive,
         recursiveCteMaxDepth,
         recursiveCteMaxRows,
@@ -2538,7 +2751,7 @@ async function run(): Promise<number> {
             return true;
           }
           : undefined,
-      }, args.nativeUpsert, true));
+      }, args.nativeUpsert, true)));
       if (sqlDiagnosticContext) {
         batchResult = {
           ...batchResult,
@@ -2555,7 +2768,10 @@ async function run(): Promise<number> {
           ),
         };
       }
-      return writeBatchOutput(batchResult, { format, noHeader, pretty, displayOptions, outputPath, quiet });
+      const batchCode = writeBatchOutput(batchResult, { format, noHeader, pretty, displayOptions, outputPath, quiet });
+      // B179: serialize + write only after the whole batch succeeded（仕様 R2 §3.3〜3.5）
+      if (batchCode !== 0 || !exportPlan) return batchCode;
+      return runNamedCliExports(exportPlan, exportCapture, quiet);
     }
 
     let result = args.dryRun
@@ -2570,6 +2786,7 @@ async function run(): Promise<number> {
         fetchParallel,
         onLimitReached: effectiveOnLimit,
         confirm: isDmlStatement ? confirm : undefined,
+        captureColumnMeta: exportPlan !== null,
         cacheContext,
         cursorMaxActive,
         recursiveCteMaxDepth,
@@ -2618,6 +2835,10 @@ async function run(): Promise<number> {
 
     if (!quiet) {
       process.stderr.write(`${buildSelectSummary(result)}\n`);
+    }
+    if (exportPlan) {
+      const exportCode = runSingleSelectCliExport(exportPlan, result, quiet);
+      if (exportCode !== 0) return exportCode;
     }
     if (shouldExitOnEmpty(args.dryRun, exitOnEmpty, result.rowCount)) return 1;
     return 0;
