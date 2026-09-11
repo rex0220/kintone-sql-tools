@@ -1481,8 +1481,21 @@ JOIN APP200 AS b ON a.顧客ID = b.顧客ID
 
 実体化済みの CTE・一時テーブル・先に取得した物理 APP から、alias 付き物理 APP へ
 `INNER JOIN` する場合、kSQL は結合キーの実値を使って JOIN 先の取得候補を絞ります。
-JOIN 先フィールドが `in` を受ける型では従来どおり `in (...)` を使い、50キー単位・最大300キーで
-取得します。
+ただし、JOIN 先に押し下げ可能な単一 alias の述語がある場合、この絞り込みは行いません。
+JOIN 先はその述語で独立に取得して FROM 側と並列に読みます。結合キーで絞るのは、JOIN 先に
+押し下げる述語がなく、FROM 側の取得完了後に JOIN 先を取得する場合だけです。
+
+JOIN 先フィールドが `in` を受ける型では、重複を除いたキーを `in (...)` に載せ、50キー単位・
+最大300キーで取得します。`SINGLE_LINE_TEXT` / `LINK` / `NUMBER` / `CALC` / `DROP_DOWN` /
+`RADIO_BUTTON` / `CHECK_BOX` / `MULTI_SELECT` / `STATUS` は `in ("")` を受けるため、FROM 側の
+キーに空値があっても空値を含めて絞り込みを維持します。それ以外の型（レコード番号 `$id` を含む）
+では、空値が1件でもあれば JOIN 先を全件取得します。この判定は FROM 側の取得後に行われるため、
+`EXPLAIN` では `join key prefilter: runtime candidate` のままで事前には分からず、実行時にも警告は
+出ません（キー数の上限超過とは異なります）。
+
+重複を除いたキーが300件を超える場合も、絞り込みを行わず JOIN 先を全件取得します。この場合は
+`JOINキーが N 件のため ON 最適化をスキップし、JOIN先を全件取得します（上限 300 件）。`
+という警告を返します。
 
 `DATE` / `TIME` / `DATETIME` / `CREATED_TIME` / `UPDATED_TIME` は `in` を受けないため、
 すべてのキーが型に対応する正規形式なら最小値・最大値による範囲 prefilter を使います。
@@ -1492,15 +1505,27 @@ JOIN 先フィールドが `in` を受ける型では従来どおり `in (...)` 
 ```
 
 この範囲は候補を広めに取得する `relation: superset` です。範囲内に実際のキー集合にない値が
-含まれても、既存の JOIN 後照合が最終結果から除外します。キーに空値または正規形式でない値が
-1件でも含まれる場合、または対象フィールドが `in` と範囲比較のどちらも受けない場合は、
-不適切な演算子を推測せず JOIN 先を全件取得します。正規形式は `DATE` が `YYYY-MM-DD`、
-`TIME` が `HH:mm`、日時系が `YYYY-MM-DDTHH:mm:ssZ` です。
+含まれても、既存の JOIN 後照合が最終結果から除外します。この範囲方式では、キーに空値または
+正規形式でない値が1件でも含まれる場合、JOIN 先を全件取得します。対象フィールドが `in` と
+範囲比較のどちらも受けない場合も、不適切な演算子を推測せず JOIN 先を全件取得します。
+正規形式は `DATE` が `YYYY-MM-DD`、`TIME` が `HH:mm`、日時系が
+`YYYY-MM-DDTHH:mm:ssZ` です。
+
+JOIN の `WHERE` に `キー != ''` を加えても、空値による全件取得は防げません。JOIN 文脈では
+この述語を records API へ押し下げず、`join pushdown not applied: UNSAFE_RELATION` を表示して
+JOIN 後に評価します。一方、結合キーは FROM 側の取得直後の行から集めるため、この述語による
+空値除外より先に取得方式が決まります。単表の `WHERE キー != ''` は records API へ押し下がり、
+`fetch: EXACT` になります。空値を除いて絞り込みを維持するには、FROM 側をこの単表 SELECT で
+一時テーブルへ実体化してから、その一時テーブルを FROM 側として物理 APP へ `INNER JOIN`
+します。実体化済み一時テーブルから物理 APP への結合キーによる絞り込みは有効です。
 
 方式選択は records API 呼び出し前に行います。選択済みの query に対して kintone が返した認証・
 権限・値受理・検索打ち切り・通信エラーを、空 query や全件取得で silent retry はしません。
-`EXPLAIN` では `join key prefilter: in | range | not applied`、適用時の `relation`、
-フォールバック時の `join key prefilter reason` を確認できます。
+`EXPLAIN` では `join key prefilter: in`、`join key prefilter: range`、
+`join key prefilter: not applied`、実行前には `join key prefilter: runtime candidate`、
+適用時の `relation`、フォールバック時の `join key prefilter reason` を確認できます。
+JOIN 先の述語を独立に押し下げて並列取得する場合は、結合キーによる絞り込みを試さないため
+`join key prefilter` 行を表示しません。取得範囲は各 source の `fetch:` 行で確認します。
 
 ### LEFT JOIN
 
