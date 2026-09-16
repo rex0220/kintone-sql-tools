@@ -23,7 +23,7 @@ B65 の計画（`validateGroupingPlanning`）は SELECT 列・HAVING・ORDER BY 
 
 `validateGroupingStatic` と `validateGroupingPlanning` の収集対象を `[...stmt.columns, ...(stmt.hiddenWindows ?? [])]` に変更。あわせて `execute.ts` の `validateSelectGroupingPlanning` が B65 計画を起動する判定（`GROUPING_` ノードの有無）にも `hiddenWindows` を加えた＝これが無いと `ROLLUP` なしで式の中に `GROUPING()` を書いた形が計画を素通りし、評価時に「GROUPING() evaluation requires B65 grouping row membership」の内部エラーになる。純加法・結果と EXPLAIN 不変。
 
-同型の検査を `stmt.columns` 単独で歩く箇所を棚卸しした（B190・B191 の型）。残り 2 件は **警告・表示の穴で別課題候補**（結果は正しい）:
+同型の検査を `stmt.columns` 単独で歩く箇所を棚卸しした（B190・B191 の型）。残り 2 件は **警告・表示の穴で [B192](ksql_b192_hidden_window_range_warning_issue.md) として起票**（2026-09-16・結果は正しい）:
 
 - `collectDefaultRangeWindowWarnings`（`execute.ts` 3772 行付近）は出力列のウィンドウだけを見る。式の中の `SUM(x) OVER (ORDER BY y)`（フレーム省略＝既定 RANGE）には **RANGE 警告が出ない**。第 3 回の 1 段版は `ROWS` を明示しているので影響しないが、省略した書き手に合図が無い
 - EXPLAIN の `window 別名: …` / `frame:` 行（`execute.ts` 14474 行付近）は出力列のウィンドウだけ。式の中のウィンドウはフレームが EXPLAIN に出ない（B184-B の「EXPLAIN 不変」は意図どおりだが、上の警告の穴と合わせると RANGE かどうかを事前に知る手段が無い）
