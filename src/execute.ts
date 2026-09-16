@@ -65,6 +65,7 @@ import type { NumberPrecision } from "./core/numberPrecision";
 import { validateDeclaredBatchVariables } from "./core/batchVariables";
 import { isOuterJoinNonPreservedTable, statementContainsOuterJoin } from "./core/outerJoinSearchAbortGuard";
 import { compareCanonicalValues, compareScalarValues } from "./core/scalarCompare";
+import { stringFunctionSemanticKind } from "./core/expressionSemantics";
 import { parseExactDecimal } from "./core/exactDecimal";
 import { validateKlikePushdownPlan } from "./core/klikeValidation";
 import { validateStatementStatic } from "./core/statementValidation";
@@ -182,6 +183,7 @@ import {
   buildOrderByAliasEvaluator,
   applyLimit,
   applyWindow,
+  hasAggregateColumns,
   OptionOrderMap,
   FieldSortKindMap,
   type AggregateSortKindResolver,
@@ -3420,8 +3422,7 @@ async function evaluateScalarSubquery(
  */
 function withScalarProbeLimit(query: SelectStatement): { query: SelectStatement; probed: boolean } {
   const hasAgg =
-    normalizeGroupingSpec(query).type !== "NONE" ||
-    query.columns.some((c) => c.type === "AGGREGATE" || c.type === "ARITH_AGG_COL");
+    isAggregateQueryBlock(query);
   if (hasAgg || query.distinct || query.limit !== null) return { query, probed: false };
   return { query: { ...query, limit: 2 }, probed: true };
 }
@@ -3766,7 +3767,10 @@ function buildHavingFieldSemanticsResolver(
         semantics = column.func === "GROUP_CONCAT" ? syntheticSemantics("string") : syntheticSemantics("number");
       }
     } else if (column.type === "STRFUNC_COL") {
-      semantics = stringFunctionColumnMeta(column.expr).semantics;
+      semantics = stringFunctionColumnMeta(column.expr, (ref) => {
+        const resolved = rowResolver(ref);
+        return resolved ? { compareMode: resolved.compareMode } : undefined;
+      }).semantics;
     } else if (column.type === "LITERAL_COL" || column.type === "SCALAR_SUBQUERY_COL" || column.type === "CASE_COL" || column.type === "SCALAR_VALUE_COL") {
       semantics = syntheticSemantics("string");
     }
@@ -5337,7 +5341,7 @@ function collectScalarAggregateRefs(expr: ScalarValueExpr, out: FieldRef[]): voi
   }
 }
 
-function collectCaseAggregateRefs(expr: CaseWhenExpr, out: FieldRef[]): void {
+function collectNestedAggregateRefs(expr: unknown, out: FieldRef[]): void {
   const visit = (node: unknown): void => {
     if (node === null || typeof node !== "object") return;
     if (Array.isArray(node)) {
@@ -5363,12 +5367,14 @@ function collectSelectAggregateSortRefs(columns: SelectColumn[]): FieldRef[] {
       collectAggregateRef(column.func, column.arg, refs);
     } else if (column.type === "ARITH_AGG_COL") {
       collectAggregateOperandRefs(column.expr, refs);
+    } else if (column.type === "ARITH_COL") {
+      collectNestedAggregateRefs(column.expr, refs);
     } else if (column.type === "STRFUNC_COL") {
       collectStringFuncAggregateRefs(column.expr, refs);
     } else if (column.type === "SCALAR_VALUE_COL") {
       collectScalarAggregateRefs(column.expr, refs);
     } else if (column.type === "CASE_COL") {
-      collectCaseAggregateRefs(column.expr, refs);
+      collectNestedAggregateRefs(column.expr, refs);
     }
   }
   return refs;
@@ -5547,22 +5553,16 @@ function systemColumnMeta(field: string): MaterializedColumnMeta | undefined {
   return undefined;
 }
 
-const NUMBER_RETURNING_STRING_FUNCTIONS = new Set([
-  "LENGTH", "LENGTH_CHAR", "INSTR", "ROUND", "FLOOR", "CEIL", "TRUNCATE",
-  "YEAR", "MONTH", "DAY", "DATEDIFF", "ABS", "MOD", "POWER", "SQRT",
-  "DAYOFWEEK", "QUARTER", "WEEK",
-]);
-
-function stringFunctionColumnMeta(expr: StringFuncExpr): MaterializedColumnMeta {
-  if (expr.func === "CAST") {
-    const target = expr.args[1];
-    return target?.type === "STRING" && target.value === "NUMBER"
-      ? syntheticColumnMeta("number")
-      : syntheticColumnMeta("string");
-  }
-  return NUMBER_RETURNING_STRING_FUNCTIONS.has(expr.func)
-    ? syntheticColumnMeta("number")
-    : syntheticColumnMeta("string");
+function stringFunctionColumnMeta(
+  expr: StringFuncExpr,
+  resolveField?: (ref: FieldRef) => MaterializedColumnMeta | { compareMode: string } | undefined
+): MaterializedColumnMeta {
+  return syntheticColumnMeta(stringFunctionSemanticKind(expr, (ref) => {
+    const resolved = resolveField?.(ref);
+    if (!resolved) return undefined;
+    if ("compareMode" in resolved) return resolved;
+    return resolved.semantics;
+  }));
 }
 
 function caseResultColumnMeta(
@@ -5581,7 +5581,7 @@ function caseResultColumnMeta(
   }
   if (result.type === "AGG_ARITH") return syntheticColumnMeta("number");
   if (result.type === "NUMBER" || result.type === "ARITH" || result.type === "SCALAR_ARITH") return syntheticColumnMeta("number");
-  if (result.type === "STRING_FUNC") return stringFunctionColumnMeta(result);
+  if (result.type === "STRING_FUNC") return stringFunctionColumnMeta(result, resolveField);
   if (result.type === "FIELD_REF") return resolveField(aggregateFieldRef(result.field)) ?? unknownStringColumnMeta();
   if (result.type === "FIELD") return resolveField(result) ?? unknownStringColumnMeta();
   return unknownStringColumnMeta();
@@ -5621,7 +5621,7 @@ function inferAggregateArgMeta(
   if (arg.type === "FIELD") return resolveField(arg) ?? unknownStringColumnMeta();
   if (arg.type === "NUMBER" || arg.type === "ARITH" || arg.type === "SCALAR_ARITH") return syntheticColumnMeta("number");
   if (arg.type === "STRING" || arg.type === "CONCAT_OP" || arg.type === "VARIABLE") return syntheticColumnMeta("string");
-  if (arg.type === "STRING_FUNC") return stringFunctionColumnMeta(arg);
+  if (arg.type === "STRING_FUNC") return stringFunctionColumnMeta(arg, resolveField);
   const results = arg.branches.map((branch) => caseResultColumnMeta(branch.result, resolveField));
   if (arg.elseResult) results.push(caseResultColumnMeta(arg.elseResult, resolveField));
   return mergeExpressionColumnMeta(results);
@@ -5789,12 +5789,12 @@ async function inferSelectColumnMeta(
         meta = syntheticColumnMeta("string");
       } else if (column.type === "SCALAR_VALUE_COL") {
         const expr = column.expr;
-        if (expr.type === "STRING_FUNC") meta = stringFunctionColumnMeta(expr);
+        if (expr.type === "STRING_FUNC") meta = stringFunctionColumnMeta(expr, resolveField);
         else if (expr.type === "NUMBER" || expr.type === "SCALAR_ARITH") meta = syntheticColumnMeta("number");
         else if (expr.type === "FIELD") meta = resolveField(expr);
         else meta = syntheticColumnMeta("string");
       } else if (column.type === "STRFUNC_COL") {
-        meta = stringFunctionColumnMeta(column.expr);
+        meta = stringFunctionColumnMeta(column.expr, resolveField);
       } else if (column.type === "WINDOW_COL") {
         meta = inferWindowColumnMeta(column, resolveField);
       } else if (column.type === "CASE_COL") {
@@ -8188,7 +8188,7 @@ async function buildOrderSemanticsForSelect(
     } else if (column.type === "GROUPING_COL") {
       meta = syntheticColumnMeta("number");
     } else if (column.type === "LITERAL_COL" || column.type === "SCALAR_VALUE_COL") meta = syntheticColumnMeta("string");
-    else if (column.type === "STRFUNC_COL") meta = stringFunctionColumnMeta(column.expr);
+    else if (column.type === "STRFUNC_COL") meta = stringFunctionColumnMeta(column.expr, resolveField);
     else if (column.type === "SCALAR_SUBQUERY_COL") meta = unknownStringColumnMeta();
     else if (column.type === "CASE_COL") {
       const candidates = column.expr.branches.map((branch) => caseResultColumnMeta(branch.result, resolveField));
@@ -11611,7 +11611,10 @@ function compareByOrder(
       : item.key.type === "ARITH_KEY"
         ? syntheticSemantics("number")
         : item.key.type === "FUNC_KEY"
-          ? stringFunctionColumnMeta(item.key.expr).semantics ?? syntheticSemantics("string")
+          ? stringFunctionColumnMeta(item.key.expr, (ref) => {
+            const semantics = resolveSemantics(ref);
+            return semantics ? { compareMode: semantics.compareMode } : undefined;
+          }).semantics ?? syntheticSemantics("string")
           : syntheticSemantics("number");
     const cmp = compareCanonicalValues(av, bv, semantics ?? syntheticSemantics("string"));
     if (cmp !== 0) return item.direction === "ASC" ? cmp : -cmp;
@@ -14631,7 +14634,9 @@ function collectFullScanReasons(stmt: SelectStatement): string[] {
     );
   if (stmt.distinct)
     r.push("DISTINCT あり");
-  if (stmt.columns.some((c) => c.type === "AGGREGATE" || c.type === "ARITH_AGG_COL"))
+  // B182: 集計「列」の有無で判定する。isAggregateQueryBlock は GROUP BY だけの文も true にするため、
+  // ここで使うと「GROUP BY あり」の文に「集計関数あり」が新たに付き、EXPLAIN の文言契約が変わる
+  if (hasAggregateColumns(stmt.columns))
     r.push("集計関数（COUNT / SUM 等）あり");
   if (stmt.columns.some((c) => c.type === "WINDOW_COL"))
     r.push("ウィンドウ関数あり");
