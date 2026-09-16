@@ -58,8 +58,28 @@ test.each([
   "SELECT k, ROW_NUMBER() OVER (ORDER BY d) AS rn FROM APP1 GROUP BY k",
   "SELECT SUM(v), ROW_NUMBER() OVER (ORDER BY d) AS rn FROM APP1",
   "SELECT FORMAT(SUM(v), '#'), ROW_NUMBER() OVER () AS rn FROM APP1",
-])("GROUP BY / 集計との同一 SELECT 混在を拒否する: %s", (sql) => {
-  expect(() => parseSelect(sql)).toThrow(/GROUP BY \/ 集計関数/);
+])("B184-A: GROUP BY / 集計との同一 SELECT 混在を受け付ける: %s", (sql) => {
+  expect(() => parseSelect(sql)).not.toThrow();
+});
+
+test("B184-A: ウィンドウ内の集計式と GROUPING() を専用 AST に保持する", () => {
+  const stmt = parseSelect(
+    "SELECT k, SUM(v) AS total, RANK() OVER (PARTITION BY GROUPING(k) ORDER BY SUM(v) DESC) AS r, " +
+      "SUM(SUM(v)) OVER () AS grand FROM APP1 GROUP BY ROLLUP(k)"
+  );
+  expect(stmt.columns[2]).toMatchObject({
+    type: "WINDOW_COL",
+    partitionBy: [{ type: "GROUPING_REF", field: { field: "k" } }],
+    orderBy: [{
+      key: { type: "FIELD_NAME", name: "SUM(v)", aggregateRef: { type: "AGG_REF", func: "SUM" } },
+      direction: "DESC",
+    }],
+  });
+  expect(stmt.columns[3]).toMatchObject({
+    type: "WINDOW_COL",
+    windowKind: "AGGREGATE",
+    arg: { type: "FIELD", field: "SUM(v)", aggregateRef: { type: "AGG_REF", func: "SUM" } },
+  });
 });
 
 test("B125: 集計ウィンドウと既定・明示フレームを AST に変換する", () => {
@@ -202,12 +222,12 @@ describe("B128: LAG / LEAD value windows", () => {
     )).not.toThrow();
   });
 
-  test("VALUE window と GROUP BY / 集計関数の同一 SELECT 併用を拒否する", () => {
+  test("B184-A: VALUE window と GROUP BY / 集計関数の同一 SELECT 併用を構文上受け付ける", () => {
     expect(() => parseSelect(
       "SELECT k, LAG(x) OVER (ORDER BY d) AS prev FROM APP1 GROUP BY k"
-    )).toThrow(/GROUP BY \/ 集計関数/);
+    )).not.toThrow();
     expect(() => parseSelect(
       "SELECT SUM(x), LAG(x) OVER (ORDER BY d) AS prev FROM APP1"
-    )).toThrow(/GROUP BY \/ 集計関数/);
+    )).not.toThrow();
   });
 });

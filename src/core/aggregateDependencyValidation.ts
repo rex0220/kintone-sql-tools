@@ -291,7 +291,25 @@ export function validateAggregateDependencies(
 ): void {
   const aliases = aliasesByName(stmt.columns);
   for (const column of stmt.columns) {
-    if (column.type === "WINDOW_COL") continue;
+    if (column.type === "WINDOW_COL") {
+      const windowExpressions: unknown[] = [
+        ...column.partitionBy,
+        ...column.orderBy.map((order) => order.key.type === "FIELD_NAME"
+          ? order.key.aggregateRef ?? refFromName(order.key.name)
+          : order.key),
+        ...(column.windowKind === "AGGREGATE" || column.windowKind === "VALUE" ? [column.arg] : []),
+      ];
+      for (const expression of windowExpressions) {
+        walkDependency(expression, {
+          clause: "ORDER BY",
+          expression,
+          policy,
+          aliases,
+          resolvingAliases: new Set(),
+        });
+      }
+      continue;
+    }
     walkDependency(column, {
       clause: "SELECT",
       expression: column,

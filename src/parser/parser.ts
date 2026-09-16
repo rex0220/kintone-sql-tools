@@ -1349,11 +1349,6 @@ export class Parser {
       ? this.parseUnsignedInt()
       : null;
 
-    const hasWindow = columns.some((column) => column.type === "WINDOW_COL");
-    const hasAggregate = columns.some((column) => this.selectColumnHasAggregate(column));
-    if (hasWindow && (groupBy.length > 0 || grouping !== undefined || hasAggregate)) {
-      throw new ParseError("ウィンドウ関数は GROUP BY / 集計関数と同じ SELECT では使用できません", this.peek());
-    }
     if (grouping && orderMode === "KINTONE_NATIVE") {
       throw new ParseError("B65: KORDER BY cannot be combined with grouping sets in Phase1.", this.peek());
     }
@@ -1754,9 +1749,12 @@ export class Parser {
     // 後続に算術演算子があれば → ARITH_AGG_COL (例: SUM(金額) * 1.1)
     const aggFunc = this.tryAggregateFunc();
     if (aggFunc !== null) {
-      const ref = this.parseAggregateRef(aggFunc);
+      const ref = this.parseAggregateRef(aggFunc, true);
       if (this.isSoftKeyword("OVER")) {
         return this.parseAggregateWindowColumn(ref);
+      }
+      if (ref.arg.type === "FIELD" && ref.arg.aggregateRef !== undefined) {
+        throw new ParseError("集計関数の引数内に集計関数は使用できません", this.peek());
       }
       if (this.isArithOp(this.peek().kind)) {
         const expr = this.continueAggArith(ref);
@@ -1871,6 +1869,12 @@ export class Parser {
     return false;
   }
 
+  private parseWindowPartitionKey(): WindowColumn["partitionBy"][number] {
+    if (this.isGroupingFunctionStart()) return this.parseGroupingRef();
+    const ref = this.parseQualifiedIdent();
+    return { type: "FIELD", tableAlias: ref.tableAlias, field: ref.field };
+  }
+
   private parseWindowColumn(func: WindowFunc): WindowColumn {
     this.advance();
     this.expect(TokenKind.LPAREN);
@@ -1881,18 +1885,17 @@ export class Parser {
     this.expectSoftKeyword("OVER", `${func} には OVER (...) が必要です`);
     this.expect(TokenKind.LPAREN);
 
-    const partitionBy: FieldRef[] = [];
+    const partitionBy: WindowColumn["partitionBy"] = [];
     if (this.isSoftKeyword("PARTITION")) {
       this.advance();
       this.expect(TokenKind.BY, "PARTITION の後には BY が必要です");
       do {
-        const ref = this.parseQualifiedIdent();
-        partitionBy.push({ type: "FIELD", tableAlias: ref.tableAlias, field: ref.field });
+        partitionBy.push(this.parseWindowPartitionKey());
       } while (this.consume(TokenKind.COMMA));
     }
 
     const orderBy = this.consume(TokenKind.ORDER)
-      ? (this.expect(TokenKind.BY), this.parseOrderBy(false))
+      ? (this.expect(TokenKind.BY), this.parseOrderBy())
       : [];
     this.expect(TokenKind.RPAREN);
 
@@ -1906,7 +1909,18 @@ export class Parser {
   private parseValueWindowColumn(valueFunc: ValueWindowFunc): ValueWindowColumn {
     this.advance(); // LAG / LEAD (soft keyword IDENT)
     this.expect(TokenKind.LPAREN);
-    const arg = this.parseScalarValueExpr({ allowCase: true, allowAggregateArgs: false });
+    const aggregateFunc = this.tryAggregateFunc();
+    const arg: ScalarValueExpr = aggregateFunc === null
+      ? this.parseScalarValueExpr({ allowCase: true, allowAggregateArgs: false })
+      : (() => {
+        const ref = this.parseAggregateRef(aggregateFunc);
+        return {
+          type: "FIELD",
+          tableAlias: null,
+          field: aggregateSyntheticName(ref.func, ref.distinct, ref.arg),
+          aggregateRef: ref,
+        } satisfies FieldRef;
+      })();
     let offset = 1;
     if (this.consume(TokenKind.COMMA)) {
       const token = this.expect(TokenKind.NUMBER, `${valueFunc} の offset は非負の整数リテラルだけです`);
@@ -1919,20 +1933,19 @@ export class Parser {
     this.expectSoftKeyword("OVER", `${valueFunc} には OVER (...) が必要です`);
     this.expect(TokenKind.LPAREN);
 
-    const partitionBy: FieldRef[] = [];
+    const partitionBy: WindowColumn["partitionBy"] = [];
     if (this.isSoftKeyword("PARTITION")) {
       this.advance();
       this.expect(TokenKind.BY, "PARTITION の後には BY が必要です");
       do {
-        const field = this.parseQualifiedIdent();
-        partitionBy.push({ type: "FIELD", tableAlias: field.tableAlias, field: field.field });
+        partitionBy.push(this.parseWindowPartitionKey());
       } while (this.consume(TokenKind.COMMA));
     }
     if (!this.consume(TokenKind.ORDER)) {
       throw new ParseError(`${valueFunc} の OVER には ORDER BY が必要です`, this.peek());
     }
     this.expect(TokenKind.BY);
-    const orderBy = this.parseOrderBy(false);
+    const orderBy = this.parseOrderBy();
     this.expect(TokenKind.RPAREN);
 
     if (this.isArithOp(this.peek().kind) || this.peek().kind === TokenKind.CONCAT_OP) {
@@ -1962,18 +1975,17 @@ export class Parser {
 
     this.advance(); // OVER
     this.expect(TokenKind.LPAREN);
-    const partitionBy: FieldRef[] = [];
+    const partitionBy: WindowColumn["partitionBy"] = [];
     if (this.isSoftKeyword("PARTITION")) {
       this.advance();
       this.expect(TokenKind.BY, "PARTITION の後には BY が必要です");
       do {
-        const field = this.parseQualifiedIdent();
-        partitionBy.push({ type: "FIELD", tableAlias: field.tableAlias, field: field.field });
+        partitionBy.push(this.parseWindowPartitionKey());
       } while (this.consume(TokenKind.COMMA));
     }
 
     const orderBy = this.consume(TokenKind.ORDER)
-      ? (this.expect(TokenKind.BY), this.parseOrderBy(false))
+      ? (this.expect(TokenKind.BY), this.parseOrderBy())
       : [];
     let frame: WindowFrame | null = orderBy.length > 0
       ? { unit: "RANGE", source: "DEFAULT" }
@@ -2697,7 +2709,7 @@ export class Parser {
   }
 
   /** 集計関数参照を読む。SELECT 列の alias は呼び出し側で式全体の後に処理する。 */
-  private parseAggregateRef(func: AggregateFunc): AggregateRef {
+  private parseAggregateRef(func: AggregateFunc, allowMaterializedAggregateArg = false): AggregateRef {
     this.advance(); // 関数名トークンを消費
     this.expect(TokenKind.LPAREN);
 
@@ -2708,7 +2720,15 @@ export class Parser {
     }
 
     let arg: AggregateColumn["arg"];
-    if (this.consume(TokenKind.STAR)) {
+    if (allowMaterializedAggregateArg && this.tryAggregateFunc() !== null) {
+      const nested = this.parseAggregateRef(this.tryAggregateFunc()!);
+      arg = {
+        type: "FIELD",
+        tableAlias: null,
+        field: aggregateSyntheticName(nested.func, nested.distinct, nested.arg),
+        aggregateRef: nested,
+      };
+    } else if (this.consume(TokenKind.STAR)) {
       if (!aggregateAcceptsWildcard(func)) {
         throw new ParseError(`${func}(*) は使用できません。フィールドまたは式を指定してください`, this.prev());
       }
@@ -3756,6 +3776,13 @@ export class Parser {
       const ref = this.parseAggregateRef(aggregateStart);
       if (this.isSoftKeyword("OVER")) {
         throw new ParseError("ウィンドウ関数は SELECT 列にのみ記述できます", this.peek());
+      }
+      if (!this.isArithOp(this.peek().kind)) {
+        return {
+          type: "FIELD_NAME",
+          name: aggregateSyntheticName(ref.func, ref.distinct, ref.arg),
+          aggregateRef: ref,
+        };
       }
       this.pos = start;
       void ref;

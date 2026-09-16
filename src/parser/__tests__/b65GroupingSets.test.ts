@@ -92,9 +92,6 @@ describe("B65 Phase1 Step 1 parser", () => {
     ["GROUPING expression", "SELECT GROUPING(a||b) FROM APP1 GROUP BY ROLLUP(a,b)"],
     ["GROUPING_ID", "SELECT GROUPING_ID(a) FROM APP1 GROUP BY ROLLUP(a)"],
     ["WHERE GROUPING", "SELECT a FROM APP1 WHERE GROUPING(a)=0 GROUP BY ROLLUP(a)"],
-    ["window ORDER GROUPING", "SELECT ROW_NUMBER() OVER (ORDER BY GROUPING(a)) AS n FROM APP1"],
-    ["window PARTITION GROUPING", "SELECT ROW_NUMBER() OVER (PARTITION BY GROUPING(a)) AS n FROM APP1"],
-    ["window with B65", "SELECT ROW_NUMBER() OVER (ORDER BY a) AS n FROM APP1 GROUP BY ROLLUP(a)"],
     ["aggregate argument", "SELECT SUM(GROUPING(a)) FROM APP1 GROUP BY ROLLUP(a)"],
     [
       "HAVING aggregate argument",
@@ -110,6 +107,16 @@ describe("B65 Phase1 Step 1 parser", () => {
     ["GROUP BY DISTINCT", "SELECT a FROM APP1 GROUP BY DISTINCT ROLLUP(a)"],
   ])("B65-P04: %s を明示拒否する", (_name, sql) => {
     expect(() => parse(sql)).toThrow(ParseError);
+  });
+
+  // B184-A（v3.81.0）: ウィンドウの ORDER BY / PARTITION BY に GROUPING() と B65 の併用はパーサで受理する
+  //（v3.80.0 以前は B65-P04 で明示拒否していた。意味の検証は planning 側）
+  test.each([
+    ["window ORDER GROUPING", "SELECT ROW_NUMBER() OVER (ORDER BY GROUPING(a)) AS n FROM APP1 GROUP BY ROLLUP(a)"],
+    ["window PARTITION GROUPING", "SELECT ROW_NUMBER() OVER (PARTITION BY GROUPING(a)) AS n FROM APP1 GROUP BY ROLLUP(a)"],
+    ["window with B65", "SELECT ROW_NUMBER() OVER (ORDER BY a) AS n FROM APP1 GROUP BY ROLLUP(a)"],
+  ])("B184-A: %s はパーサで受理する", (_name, sql) => {
+    expect(() => parse(sql)).not.toThrow();
   });
 
   test.each([

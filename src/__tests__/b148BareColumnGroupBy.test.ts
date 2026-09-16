@@ -254,13 +254,19 @@ describe("B148 bare-column aggregate dependency", () => {
     expect(result.rowCount).toBe(3);
   });
 
-  test("aggregate と window の同一 SELECT は既存 ParseError のまま", async () => {
-    const error = await rejection(
+  test("aggregate と window の同一 SELECT はグループキー参照なら通る（B184-A）", async () => {
+    // v3.80.0 以前は ParseError（ウィンドウ関数は GROUP BY / 集計関数と同じ SELECT では使用できません）。
+    // B184-A で門番を外し、ウィンドウの ORDER BY がグループキーを参照する形は評価される
+    const result = await execute(
       "SELECT 製品名, SUM(個数) AS 合計, ROW_NUMBER() OVER (ORDER BY 製品名) AS 順位 " +
-      "FROM APP4228 GROUP BY 製品名"
-    );
-    expect(error.name).toBe("ParseError");
-    expect(error.message).not.toContain("B65_NON_GROUPED_DEPENDENCY");
+      "FROM APP4228 GROUP BY 製品名 ORDER BY 製品名",
+      client({ 4228: app4228 }),
+      { cacheContext: "b148-window-with-aggregate" }
+    ) as SelectResult;
+    expect(result).toMatchObject({
+      columns: ["製品名", "合計", "順位"],
+      rows: [{ 製品名: "パン", 合計: "30", 順位: "1" }, { 製品名: "米", 合計: "5", 順位: "2" }],
+    });
   });
 
   test("AST-only batch validation も GROUP BY なしの明白な違反を拒否する", () => {

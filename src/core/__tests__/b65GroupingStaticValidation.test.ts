@@ -50,11 +50,6 @@ const staticRejections = [
     "ArgumentError: KORDER BY is not supported with extended grouping.",
   ],
   [
-    "B65-SV03",
-    withWindowGrouping,
-    "ArgumentError: window functions are not supported with extended grouping.",
-  ],
-  [
     "B65-SV04",
     () => parseSelect("SELECT *, SUM(売上) FROM APP1 GROUP BY ROLLUP(会社名)"),
     "ArgumentError: SELECT wildcard は集計 query では使用できません。必要な grouping 列を明示してください (reason=B65_NON_GROUPED_DEPENDENCY).",
@@ -88,6 +83,11 @@ test.each(staticRejections)(
     expect(() => validateGroupingPlanning(stmt, resolve)).toThrow(message);
   }
 );
+
+test("B184-A: grouping set とウィンドウの併用は静的検証で拒否しない（v3.80.0 以前は B65-SV03 で拒否）", () => {
+  // ウィンドウの ORDER BY 会社名 は grouping 列。意味の検証は aggregateDependencyValidation 側
+  expect(() => validateGroupingStatic(withWindowGrouping())).not.toThrow();
+});
 
 test("B65-SV06: forbidden context の GROUPING() も static/planning 共通で拒否する", () => {
   const stmt = parseSelect(

@@ -42,6 +42,7 @@ import type {
   AggregateArgExpr,
   CaseResult,
   AggregateRef,
+  WindowPartitionKey,
 } from "../types/ast";
 import { planCrossJoinRows } from "../core/optimization/crossJoinRowPlan";
 import { isAggregateWindow, isRankingWindow, isValueWindow, numberLiteralText } from "../types/ast";
@@ -438,7 +439,11 @@ export function hasAggregateColumns(columns: SelectColumn[]): boolean {
     (c.type === "ARITH_COL" && containsAggregate(c.expr)) ||
     (c.type === "CASE_COL" && containsAggregate(c.expr)) ||
     (c.type === "STRFUNC_COL" && hasAggregateInStringFuncExpr(c.expr)) ||
-    (c.type === "SCALAR_VALUE_COL" && scalarValueHasAggregate(c.expr))
+    (c.type === "SCALAR_VALUE_COL" && scalarValueHasAggregate(c.expr)) ||
+    (c.type === "WINDOW_COL" && (
+      ((c.windowKind === "AGGREGATE" || c.windowKind === "VALUE") && containsAggregate(c.arg))
+      || c.orderBy.some((item) => item.key.type === "FIELD_NAME" && item.key.aggregateRef !== undefined)
+    ))
   );
 }
 
@@ -512,6 +517,13 @@ export function applyGroupBy(
       outRow,
       groupRows,
       having,
+      resolveAggSortKind,
+      aliasEvaluationContext.evaluationContext
+    );
+    materializeAggregateDependencies(
+      outRow,
+      groupRows,
+      columns.filter((column) => column.type === "WINDOW_COL"),
       resolveAggSortKind,
       aliasEvaluationContext.evaluationContext
     );
@@ -606,6 +618,13 @@ export function applyGroupingSets(
       );
       materializeAggregateDependencies(
         outRow, groupRows, having, resolveAggSortKind, limits.evaluationContext
+      );
+      materializeAggregateDependencies(
+        outRow,
+        groupRows,
+        columns.filter((column) => column.type === "WINDOW_COL"),
+        resolveAggSortKind,
+        limits.evaluationContext
       );
       attachGroupingRowMeta(outRow, includedCanonicalIds);
       result.push(outRow);
@@ -987,7 +1006,9 @@ function resolveAggregateArgSemantics(
   resolver?: AggregateSortKindResolver
 ): "number" | "string" | ResolvedFieldSemantics | undefined {
   if (arg.type === "FIELD_REF") return resolver?.(toAggregateFieldRef(arg.field)) ?? "string";
-  if (arg.type === "FIELD") return resolver?.(arg) ?? "string";
+  if (arg.type === "FIELD") return arg.aggregateRef
+    ? aggregateResultSemantics(arg.aggregateRef, resolver)
+    : resolver?.(arg) ?? "string";
   if (arg.type === "NUMBER" || arg.type === "ARITH" || arg.type === "SCALAR_ARITH") return "number";
   if (arg.type === "STRING" || arg.type === "CONCAT_OP" || arg.type === "VARIABLE") return "string";
   if (arg.type === "STRING_FUNC") {
@@ -1362,7 +1383,7 @@ export function applyWindow(
   for (const { column: window, columnIndex } of windows) {
     const partitions = new Map<string, ProcessRow[]>();
     for (const row of rows) {
-      const key = JSON.stringify(window.partitionBy.map((ref) => resolveWindowField(row, ref)));
+      const key = JSON.stringify(window.partitionBy.map((ref) => resolveWindowPartitionKey(row, ref)));
       const partition = partitions.get(key);
       if (partition) partition.push(row);
       else partitions.set(key, [row]);
@@ -1411,7 +1432,7 @@ function evaluateValueWindowArg(
   evaluationContext: EvaluationContext = {}
 ): string {
   const value = evalScalarValueExprNullable(
-    arg, sourceRowForEvaluation(row), undefined, undefined, evaluationContext
+    arg, havingEvaluationRow(row), undefined, undefined, evaluationContext
   );
   if (value === null || value === undefined) return "";
   if (typeof value === "number" && !Number.isFinite(value)) return "";
@@ -1450,7 +1471,7 @@ function applyAggregateWindow(
   const values = window.arg.type === "WILDCARD"
     ? null
     : aggregateRowValues(
-      window.aggFunc, window.arg, sorted.map((item) => item.row), evaluationContext
+      window.aggFunc, window.arg, sorted.map((item) => havingEvaluationRow(item.row)), evaluationContext
     );
   const comparison = window.arg.type === "WILDCARD"
     ? undefined
@@ -1516,9 +1537,10 @@ function applyAggregateWindow(
   }
 }
 
-function resolveWindowField(row: ProcessRow, ref: FieldRef): string {
+function resolveWindowPartitionKey(row: ProcessRow, ref: WindowPartitionKey): string {
+  if (ref.type === "GROUPING_REF") return evalGroupingRef(ref, row);
   const name = ref.tableAlias ? `${ref.tableAlias}.${ref.field}` : ref.field;
-  return resolveFieldRef(sourceRowForEvaluation(row), name);
+  return resolveFieldRef(havingEvaluationRow(row), name);
 }
 
 // ============================================================
@@ -2250,6 +2272,25 @@ function deriveOutputOrderSemantics(
 ): Map<string, ResolvedFieldSemantics> {
   const result = new Map<string, ResolvedFieldSemantics>();
   for (const column of columns) {
+    if (column.type === "AGGREGATE") {
+      result.set(
+        aggregateSyntheticName(column.func, column.distinct, column.arg),
+        aggregateResultSemantics({
+          type: "AGG_REF",
+          func: column.func,
+          distinct: column.distinct,
+          arg: column.arg,
+          ...(column.separator !== undefined ? { separator: column.separator } : {}),
+        }, resolveAggSortKind)
+      );
+    }
+    if (column.type === "WINDOW_COL") {
+      for (const item of column.orderBy) {
+        if (item.key.type === "FIELD_NAME" && item.key.aggregateRef) {
+          result.set(item.key.name, aggregateResultSemantics(item.key.aggregateRef, resolveAggSortKind));
+        }
+      }
+    }
     if (!("alias" in column) || !column.alias) continue;
     if (column.type === "ARITH_COL" || column.type === "ARITH_AGG_COL") {
       result.set(column.alias, syntheticSemantics("number"));
