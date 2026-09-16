@@ -135,5 +135,5 @@ codex の実装は依頼どおり helper を通していたが、**実行時の�
 
 ### 3. 範囲外として確認した既存挙動（B181 以前から同じ・別課題候補）
 
-- **HAVING に SELECT に無い集計を書くと空結果**（`SELECT grp, COUNT(*) AS n … HAVING SUM(Amount) > 950` が 0 行）。言語リファレンス「SELECT にない集計を HAVING 専用で追加計算はしません」の契約どおりだが、エラーではなく静かに 0 行になる
+- **HAVING に SELECT に無い集計を書くと空結果**（`SELECT grp, COUNT(*) AS n … HAVING SUM(Amount) > 950` が 0 行）。言語リファレンス「SELECT にない集計を HAVING 専用で追加計算はしません」の契約どおり。→ B187 として起票。**同日訂正**: エンジンは `warnings` に「比較条件で参照した集計値を確認できません…」を出しており、「静かに」は CLI テキスト表示の穴（B189）だった
 - **混在 JOIN の WHERE に未修飾の CTE 列を書くと EXPLAIN が `WHERE_FIELD_UNRESOLVED`**（小文字で書いても同じ・v3.77.0 の MCP でも同じ）。実行は通るので EXPLAIN と実行の非対称。修飾（`s.Amount`）すれば EXPLAIN も通る

@@ -547,7 +547,9 @@ test("EXPLAIN INSERT — 複数行（バッチ分割）", async () => {
 
 test("EXPLAIN INSERT SELECT — SELECT 部分のプランも表示", async () => {
   const plan = await explain(
-    "EXPLAIN INSERT INTO APP88 (顧客名, 案件名) SELECT 顧客名, 案件名 FROM APP88 WHERE 確度 in ('0%')"
+    // B185: source SELECT の列は mock のフォーム定義に実在する名前にする（案件名 は定義に無く、
+    // EXPLAIN も実行と同じ unknown field code(s) で止まるようになった。プラン形状の検査意図は不変）
+    "EXPLAIN INSERT INTO APP88 (顧客名, 件名) SELECT 顧客名, 件名 FROM APP88 WHERE 確度 in ('0%')"
   );
   expect(plan.some((l) => l.includes("[INSERT SELECT]"))).toBe(true);
   expect(plan.find((l) => l.includes("target:"))).toContain("APP88 (88)");
