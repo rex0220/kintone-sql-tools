@@ -82,6 +82,7 @@ export function resolveSelectMode(stmt: SelectStatement): SelectMode {
   if (stmt.columns.some((c) =>
     c.type === "AGGREGATE" ||
     c.type === "ARITH_AGG_COL" ||
+    (c.type === "ARITH_COL" && containsAggregate(c.expr)) ||
     c.type === "SCALAR_SUBQUERY_COL" ||
     (c.type === "CASE_COL" && containsAggregate(c.expr)) ||
     (c.type === "STRFUNC_COL" && hasAggregateInStringFuncExpr(c.expr)) ||
@@ -236,7 +237,9 @@ function convertOrderBy(item: OrderByItem): string {
 function extractFields(columns: SelectColumn[]): string[] {
   // * / 集計関数 / CASE WHEN が含まれる場合は全フィールド取得
   const hasWildcard = columns.some(
-    (c) => c.type === "WILDCARD" || c.type === "AGGREGATE" || c.type === "ARITH_AGG_COL" || c.type === "CASE_COL" || c.type === "SCALAR_SUBQUERY_COL"
+    (c) => c.type === "WILDCARD" || c.type === "AGGREGATE" || c.type === "ARITH_AGG_COL"
+      || (c.type === "ARITH_COL" && containsAggregate(c.expr))
+      || c.type === "CASE_COL" || c.type === "SCALAR_SUBQUERY_COL"
   );
   if (hasWildcard) return [];
 

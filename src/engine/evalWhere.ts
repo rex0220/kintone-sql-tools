@@ -47,6 +47,7 @@ import {
   WHERE_RELATIVE_DATE_REQUIRES_EXACT_PUSHDOWN,
 } from "../core/relativeDateFunction";
 import { aggregateOperandLabel, aggregateSyntheticName } from "../core/aggregateExpression";
+import { stringFunctionSemanticKind } from "../core/expressionSemantics";
 
 /**
  * サブクエリを事前実行済みの IN リスト。
@@ -182,12 +183,6 @@ function evalOp(
   return compareScalarValues(op, leftStr, rightStr, semantics);
 }
 
-const NUMERIC_STRING_FUNCTIONS = new Set([
-  "LENGTH", "LENGTH_CHAR", "INSTR", "ROUND", "FLOOR", "CEIL", "TRUNCATE",
-  "YEAR", "MONTH", "DAY", "DATEDIFF", "ABS", "MOD", "POWER", "SQRT",
-  "DAYOFWEEK", "QUARTER", "WEEK",
-]);
-
 function semanticsForLeft(
   left: FieldValue,
   fieldType?: string,
@@ -199,7 +194,7 @@ function semanticsForLeft(
   }
   if (left.type === "ARITH_FIELD" || left.type === "AGG_FIELD") return syntheticSemantics("number");
   if (left.type === "FUNC_FIELD") {
-    return syntheticSemantics(NUMERIC_STRING_FUNCTIONS.has(left.expr.func) ? "number" : "string");
+    return syntheticSemantics(stringFunctionSemanticKind(left.expr, (ref) => resolveSemantics?.(ref)));
   }
   if (left.type === "CASE_FIELD") {
     const results = [
@@ -209,7 +204,7 @@ function semanticsForLeft(
     const modes = results.map((result): ResolvedFieldSemantics => {
       if (result.type === "NUMBER" || result.type === "ARITH") return syntheticSemantics("number");
       if (result.type === "STRING_FUNC") {
-        return syntheticSemantics(NUMERIC_STRING_FUNCTIONS.has(result.func) ? "number" : "string");
+        return syntheticSemantics(stringFunctionSemanticKind(result, (ref) => resolveSemantics?.(ref)));
       }
       if (result.type === "FIELD_REF") {
         const dot = result.field.indexOf(".");

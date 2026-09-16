@@ -78,6 +78,7 @@ import {
   getGroupingRowMeta,
 } from "./groupingRowMeta";
 import { containsAggregate } from "../core/groupingValidation";
+import { stringFunctionSemanticKind } from "../core/expressionSemantics";
 
 export { ProcessRow };
 
@@ -428,11 +429,12 @@ export function applyFilter(
 // 4. groupBy + 集計
 // ============================================================
 
-/** SELECT 句に集計（AGGREGATE / ARITH_AGG_COL / 集計入り STRFUNC_COL）が含まれるか */
+/** SELECT 句に集計（集計列または式内の集計参照）が含まれるか */
 export function hasAggregateColumns(columns: SelectColumn[]): boolean {
   return columns.some((c) =>
     c.type === "AGGREGATE" ||
     c.type === "ARITH_AGG_COL" ||
+    (c.type === "ARITH_COL" && containsAggregate(c.expr)) ||
     (c.type === "CASE_COL" && containsAggregate(c.expr)) ||
     (c.type === "STRFUNC_COL" && hasAggregateInStringFuncExpr(c.expr)) ||
     (c.type === "SCALAR_VALUE_COL" && scalarValueHasAggregate(c.expr))
@@ -633,6 +635,16 @@ function materializeAggregateColumns(
         outRow,
         columnIndex,
         String(evalAggArithExpr(col.expr, groupRows, resolveAggSortKind, evaluationContext)),
+        [outputKey]
+      );
+    } else if (col.type === "ARITH_COL" && containsAggregate(col.expr)) {
+      materializeAggregateDependencies(outRow, groupRows, col.expr, resolveAggSortKind, evaluationContext);
+      const outputKey = col.alias ?? arithColDefaultKey(col.expr);
+      const resolvedExpr = resolveAggInArithNode(col.expr, groupRows, resolveAggSortKind);
+      setMaterializedSelectValue(
+        outRow,
+        columnIndex,
+        String(evalArithExpr(resolvedExpr, outRow, evaluationContext)),
         [outputKey]
       );
     } else if (col.type === "STRFUNC_COL" && hasAggregateInStringFuncExpr(col.expr)) {
@@ -966,9 +978,7 @@ function resolveAggregateArgSemantics(
   if (arg.type === "NUMBER" || arg.type === "ARITH" || arg.type === "SCALAR_ARITH") return "number";
   if (arg.type === "STRING" || arg.type === "CONCAT_OP" || arg.type === "VARIABLE") return "string";
   if (arg.type === "STRING_FUNC") {
-    const numeric = new Set(["LENGTH", "LENGTH_CHAR", "INSTR", "ROUND", "FLOOR", "CEIL", "TRUNCATE", "YEAR", "MONTH", "DAY", "DATEDIFF", "ABS", "MOD", "POWER", "SQRT", "DAYOFWEEK", "QUARTER", "WEEK"]);
-    if (arg.func === "CAST") return arg.args[1]?.type === "STRING" && arg.args[1].value === "NUMBER" ? "number" : "string";
-    return numeric.has(arg.func) ? "number" : "string";
+    return stringFunctionSemanticKind(arg, (field) => resolver?.(field));
   }
   const results = [...arg.branches.map((branch) => branch.result), ...(arg.elseResult === null ? [] : [arg.elseResult])]
     .filter((result) => result.type !== "ARRAY")
@@ -1147,7 +1157,9 @@ function sortDecoratedRows(
   const keyMeta: SortKeyMeta[] = orderBy.map(({ key }) => {
     if (key.type === "ARITH_KEY") return { semantics: syntheticSemantics("number") };
     if (key.type === "FUNC_KEY") {
-      return { semantics: syntheticSemantics(NUMERIC_ORDER_FUNCTIONS.has(key.expr.func) ? "number" : "string") };
+      return { semantics: syntheticSemantics(stringFunctionSemanticKind(key.expr, (field) =>
+        fieldSemantics?.get(field.tableAlias ? `${field.tableAlias}.${field.field}` : field.field)
+      )) };
     }
     if (key.type === "GROUPING_KEY") return { semantics: syntheticSemantics("number") };
     const semantics = fieldSemantics?.get(key.name);
@@ -1208,12 +1220,6 @@ function compareSortKeys(a: SortKey, b: SortKey, meta: SortKeyMeta): number {
   return compareCanonicalValues(a.s, b.s, meta.semantics);
 }
 
-const NUMERIC_ORDER_FUNCTIONS = new Set([
-  "LENGTH", "LENGTH_CHAR", "INSTR", "ROUND", "FLOOR", "CEIL", "TRUNCATE",
-  "YEAR", "MONTH", "DAY", "DATEDIFF", "ABS", "MOD", "POWER", "SQRT",
-  "DAYOFWEEK", "QUARTER", "WEEK",
-]);
-
 function evalOrderKey(
   key: OrderByKey,
   row: ProcessRow,
@@ -1263,9 +1269,9 @@ export function buildOrderByAliasEvaluator(
         evaluators.set(alias, (row) => getMaterializedSelectValue(row, columnIndex) ?? "");
         break;
       case "ARITH_COL":
-        evaluators.set(alias, (row) => String(evalArithExpr(
-          column.expr, sourceRowForEvaluation(row), evaluationContext
-        )));
+        evaluators.set(alias, (row) => containsAggregate(column.expr)
+          ? getMaterializedSelectValue(row, columnIndex) ?? ""
+          : String(evalArithExpr(column.expr, sourceRowForEvaluation(row), evaluationContext)));
         break;
       case "STRFUNC_COL": {
         const source = stringFuncDefaultKey(column.expr);
@@ -1587,7 +1593,11 @@ export function evaluateSelectColumnValue(
         ?? "0";
     }
     case "ARITH_COL":
-      return String(evalArithExpr(column.expr, sourceRow, context.evaluationContext));
+      return containsAggregate(column.expr)
+        ? getMaterializedSelectValue(row, columnIndex)
+          ?? getMaterializedLookupValue(row, column.alias ?? arithColDefaultKey(column.expr))
+          ?? ""
+        : String(evalArithExpr(column.expr, sourceRow, context.evaluationContext));
     case "CASE_COL":
       return containsAggregate(column.expr)
         ? getMaterializedSelectValue(row, columnIndex)
@@ -2070,6 +2080,22 @@ function resolveAggInScalarValue(
   return expr;
 }
 
+function resolveAggInArithNode(
+  expr: ArithNode,
+  rows: ProcessRow[],
+  resolveAggSortKind?: AggregateSortKindResolver
+): ArithNode {
+  if (expr.type === "STRING_FUNC") return resolveAggInStringFuncExpr(expr, rows, resolveAggSortKind);
+  if (expr.type === "ARITH") {
+    return {
+      ...expr,
+      left: resolveAggInArithNode(expr.left, rows, resolveAggSortKind),
+      right: resolveAggInArithNode(expr.right, rows, resolveAggSortKind),
+    };
+  }
+  return expr;
+}
+
 function resolveAggInCaseResult(
   result: CaseResult,
   rows: ProcessRow[],
@@ -2230,7 +2256,10 @@ function deriveOutputOrderSemantics(
     } else if (column.type === "LITERAL_COL" || column.type === "CASE_COL" || column.type === "SCALAR_SUBQUERY_COL" || column.type === "SCALAR_VALUE_COL") {
       result.set(column.alias, syntheticSemantics("string"));
     } else if (column.type === "STRFUNC_COL") {
-      result.set(column.alias, syntheticSemantics(NUMERIC_ORDER_FUNCTIONS.has(column.expr.func) ? "number" : "string"));
+      result.set(column.alias, syntheticSemantics(stringFunctionSemanticKind(
+        column.expr,
+        (field) => resolveAggSortKind?.(field)
+      )));
     }
   }
   return result;
