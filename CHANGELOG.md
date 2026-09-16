@@ -3,6 +3,43 @@
 リリースごとの変更点。**本ファイルは v3.45.0 以降だけを保持する。**
 それ以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) の各タグを参照。
 
+## v3.79.0（2026-09-16）
+
+診断と警告の穴 4 件。**実行結果・取得列・kintone API の回数はすべて不変**で、EXPLAIN が止める形が増え、警告が届く面が増えます。
+
+### 修正（B185: `EXPLAIN` が SELECT 列の存在を検査しない）**※ EXPLAIN が失敗する形が増える（実行は不変）**
+
+- 存在しない列を SELECT・GROUP BY・集計引数・CASE・関数引数・ORDER BY・ウィンドウの PARTITION / ORDER BY に書いた SQL は、
+  これまで `ksql_validate` も `EXPLAIN` も通り、実行で初めて `unknown field code(s)` になっていました（WHERE 側だけは EXPLAIN で止まっていた）。
+- 修正後: `EXPLAIN` が計画作成のためにフォーム定義を読む文（型付き WHERE・ORDER BY・GROUP BY・相対日付など）では、
+  **実行時と同じ文言** `ArgumentError: unknown field code(s): <列> (<source>)` で EXPLAIN が失敗します。追加の API は呼ばず、
+  EXPLAIN の出力行は変わりません。フォーム定義を読まない文（`SELECT COUNT(*) FROM APP100` や単純な列だけの SELECT）は従来どおり実行で検出します。
+- MCP `ksql_explain`・CLI `--dry-run`・プラグインの EXPLAIN・`/flow` の `explainScript` で同じです。
+
+### 修正（B186: 混在 JOIN の WHERE に未修飾の CTE 列があると `EXPLAIN` だけが `WHERE_FIELD_UNRESOLVED`）**※ EXPLAIN 面のみ・実行は不変**
+
+- 物理 APP と CTE / 一時テーブルを結合した文の WHERE に、未修飾の CTE 列（`WHERE amount > 1000`）を書くと、実行は通るのに
+  `EXPLAIN` が `WHERE predicate is unsupported (… reason=WHERE_FIELD_UNRESOLVED)` で失敗していました（v3.77.0 以前から）。
+- 修正後: `EXPLAIN` も実行と同じ解決規則（実体化列の完全一致 → 物理フィールド → CTE 列）で計画を出し、
+  修飾した形（`s.amount`）と同じ計画になります。本当に存在しない列は従来どおり `WHERE_FIELD_UNRESOLVED`。
+
+### 修正（B188: `CREATE TEMP TABLE … AS SELECT` 経由で実行時警告が消える）**※ 純加法**
+
+- 一時テーブルに実体化した SELECT の警告（ウィンドウの既定フレーム RANGE、JOIN キー 300 件超の全件取得など）が捨てられ、
+  直接の SELECT と CTE では出る警告が一時テーブル経由では出ませんでした。
+- 修正後: `BatchStatementResult.warnings`（任意プロパティ）に載ります。`INSERT / UPSERT … SELECT` と `IMPORT` の projection の
+  source 警告も同じ扱い。後段で一時テーブルを参照する文には重複しません。CLI のバッチ文サマリに `warning=<文言>`、
+  MCP / CLI JSON の envelope に `statements[].warnings`、`/flow` の statement result に到達します。
+  バッチ全体の `warnings` は dialect 1 の警告 + 結果セットを持たない文の警告（SELECT の警告は従来どおり `results[].warnings` のみ）。
+  プラグイン UI のサマリは `result` の無い文を除外するため表示されません（別途対応）。
+
+### 修正（B189: CLI の table / csv / markdown が単文 SELECT の `warnings` を出さない）**※ 表示のみ・stdout 不変**
+
+- 単文 SELECT の警告は `--format json` でしか見えず、テキスト表示では RANGE 警告も「比較条件で参照した集計値を確認できません」
+  （HAVING に SELECT に無い集計）も届いていませんでした。
+- 修正後: 結果の後に stderr へ `warning=<文言>` を 1 行ずつ出します（`--quiet` で抑止。json は従来どおり `warnings` 配列のみ）。
+  stdout（table / csv / markdown / jsonl / `--output`）は 1 バイトも変わりません。
+
 ## v3.78.0（2026-09-16）
 
 ### 修正（B182: `COALESCE` / `ISNULL` / `NULLIF` で包んだ集計値が静かに間違う）**※ 結果が変わる修正（エラーも警告も出ていなかった）**

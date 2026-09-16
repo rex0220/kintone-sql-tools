@@ -1,22 +1,22 @@
-ksql 配布パッケージ (v3.78.0)
+ksql 配布パッケージ (v3.79.0)
 
 release 成果物:
-- ksql-plugin-v3.78.0.zip
-- ksql-mcp.mcpb (manifest version 3.78.0)
-- ksql-mcp.js (MCP server version 3.78.0)
+- ksql-plugin-v3.79.0.zip
+- ksql-mcp.mcpb (manifest version 3.79.0)
+- ksql-mcp.js (MCP server version 3.79.0)
 
-修正 (B182: COALESCE / ISNULL / NULLIF で包んだ集計値が静かに間違う・結果が変わる修正):
-- COALESCE(SUM(x), 0) + 0 のように関数で包んだ集計を算術に使うと 0 になり、
-  COALESCE(SUM(x), 0) AS 合計 の列で ORDER BY / RANK / 累計を取ると文字列順になっていました。
-  全引数が数値なら number として扱い、算術では集計値そのものを使います。
-  SUM(x) を直接使う形・CASE / SUM(COALESCE(x, 0)) / CAST の推奨形は元から正しく不変。
-修正 (B181: SELECT 別名の小文字正規化と参照解決の非対称・純加法):
-- AS Amount / AS 顧客No を次の段や ORDER BY から元の表記で参照すると実行時にだけ
-  unknown field code になっていました。完全一致 → 小文字正規名の順で解決します。
-  結果列名の小文字化と物理フィールドコードの区別は不変 (物理と同名なら物理が優先)。
-機能追加 (B183: MCP instructions に Writing rules 8 行・エンジン不変):
-- 実測で踏んだ失敗から作った 8 行を initialize 応答の instructions に追加 (5,722 → 7,369 文字)。
-  ツールの description / スキーマ / resources は不変。正本は src/mcp/index.ts。
+診断と警告の穴 4 件 (実行結果・取得列・API 回数は不変):
+- B185: EXPLAIN が SELECT / GROUP BY / 集計引数 / ORDER BY などの列名もフォーム定義と突き合わせ、
+  無い列は実行時と同じ unknown field code(s) で失敗します (EXPLAIN が定義を読む文に限る・追加 API なし)。
+- B186: 物理 APP と CTE の混在 JOIN の WHERE に未修飾の CTE 列を書いても EXPLAIN が通ります
+  (以前は実行は通るのに EXPLAIN だけ WHERE_FIELD_UNRESOLVED)。
+- B188: CREATE TEMP TABLE / INSERT・UPSERT … SELECT で実体化した SELECT の警告 (RANGE 既定フレームなど) を
+  文結果の warnings に載せます。CLI バッチ表示・MCP envelope・/flow に到達。
+- B189: CLI の table / csv / markdown で単文 SELECT の警告を stderr に warning= で出します
+  (--quiet で抑止・json は warnings 配列のまま・stdout は不変)。
+
+v3.78.0 の節は畳みました (B182 COALESCE で包んだ集計値の修正 = 結果が変わる /
+  B181 別名の参照解決 = 純加法 / B183 MCP instructions に Writing rules 8 行)。
 
 v3.77.0 の節は畳みました (B179 CSV export = 名前付きシンク・engine 層 serializer・
   /flow 公開 API・CLI --export-csv・純加法。既存の --format csv / --output は不変)。
@@ -111,12 +111,15 @@ B124 集計算術式 / B125 集計のウィンドウ関数 / B123 GROUP BY だ�
 - CHANGELOG.md と GitHub Releases に版ごとの内容と移行案内があります。
   https://github.com/rex0220/kintone-sql-tools/releases
 
-1. ksql-plugin-v3.78.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.79.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.78.0): B182 COALESCE で包んだ集計値が静かに間違う修正 (結果が変わります)、
+本リリース (v3.79.0): 診断と警告の穴 4 件 = B185 EXPLAIN の SELECT 列検査 / B186 混在 JOIN の
+EXPLAIN 偽陽性 / B188 一時テーブル経由の警告伝播 / B189 CLI 単文 SELECT の警告表示 (実行結果は不変)。
+
+前リリース (v3.78.0): B182 COALESCE で包んだ集計値が静かに間違う修正 (結果が変わります)、
 B181 別名の参照解決 (純加法)、B183 MCP instructions に Writing rules 8 行 (エンジン不変)。
 
 前リリース (v3.77.0): B179 CSV export (名前付きシンク・CLI --export-csv・/flow 公開 API・純加法)
