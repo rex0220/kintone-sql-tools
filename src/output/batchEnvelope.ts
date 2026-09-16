@@ -128,6 +128,7 @@ export function buildBatchEnvelope(
     if (s.status === "skipped" && s.skippedReason) entry.skippedReason = s.skippedReason;
     if (s.tempTable !== undefined) entry.tempTable = s.tempTable;
     if (s.rowCount !== undefined) entry.rowCount = s.rowCount;
+    if (s.warnings?.length) entry.warnings = s.warnings;
 
     if (s.status === "success" && s.result?.type === "SELECT") {
       totalRows += s.result.rowCount;
@@ -186,7 +187,8 @@ export function buildBatchEnvelope(
     statementCount: batch.statementCount,
     statements,
     results,
-    // バッチ全体の警告（仕様 §6.2）。文ごとの警告は results[].warnings に入る
-    warnings: [],
+    // バッチ全体の警告（仕様 §6.2）＝dialect 1 の警告 + 結果セットを持たない文（CREATE TEMP TABLE・
+    // SELECT-based DML）の実行時警告（B188・文順・重複なし）。SELECT の文ごとの警告は従来どおり results[].warnings
+    warnings: batch.warnings ?? [],
   };
 }

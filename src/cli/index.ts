@@ -1187,6 +1187,10 @@ export function buildBatchStatementSummary(s: BatchStatementResult): string {
     }
   }
   if (s.status === "skipped" && s.skippedReason) parts.push(`reason=${s.skippedReason}`);
+  const warnings = s.warnings ?? (s.result?.type === "SELECT" ? s.result.warnings : undefined);
+  if (s.status === "success" && warnings) {
+    for (const warning of warnings) parts.push(`warning=${warning}`);
+  }
   return parts.join(" ");
 }
 

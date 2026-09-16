@@ -4012,6 +4012,8 @@ SELECT 部門 FROM APP200;
 
 `CREATE TEMP TABLE #名前 AS SELECT ...` で SELECT 結果をバッチ内に実体化し、後続の文から `FROM` / `JOIN` / サブクエリで参照できます。
 
+`CREATE TEMP TABLE ... AS SELECT` の実行時警告（ウィンドウの既定フレームなど）は、その文の結果の `warnings` に載ります（v3.79.0〜）。後段で一時テーブルを参照する文には、この警告は重複して載りません。
+
 source は `SELECT` と `WITH` のどちらでも、その SELECT の `WHERE` 全体を kintone クエリへ exact に押し下げられる場合に相対日付関数を使用できます。物理アプリ同士の INNER JOIN も、JOIN の全入力が alias 付き物理 APP で第5-W / 第5-L を満たせば、server-only 関数で絞ってから実体化できます。
 
 一方、**入力に一時テーブルが1つでもあれば文全体が server-only 関数の対象外**です。
