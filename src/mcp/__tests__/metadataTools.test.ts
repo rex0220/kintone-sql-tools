@@ -124,19 +124,25 @@ describe("ksql_app_metadata MCP surface", () => {
       // B158: SELECT syntax catalog に CROSS JOIN 分岐を追加。
       // B168 Stage 6b: Flow dialect 1 の 6 文型と opt-in 案内を追加。
       // B53 出荷時に文型カタログから内部用語「Phase1 forms」を除去（-2 tokens・意図した縮小）
-      expect(budget).toEqual({ total: 663, catalog: 347, prose: 316 });
+      // B183: Writing rules 8 行を追加（+272 語。レビューで除数ガードを §5 の `= '' OR = 0` 形に、
+      // JOIN の行を §7 が保証する「INNER JOIN のみ・FROM → JOIN 先」の範囲に揃えた）。
+      expect(budget).toEqual({ total: 935, catalog: 347, prose: 588 });
 
       // 以下の上限値には外部根拠がない（B81 §7）。MCP 仕様は instructions を
       // "Optional instructions for the client" と書くだけでサイズ規定を持たず、
-      // SDK も z.string().optional() で長さ制約がない。実コストも毎セッション
-      // 約 1,000 トークンで、上限まで使っても増分は数百トークンにとどまる。
+      // SDK も z.string().optional() で長さ制約がない。B183 起票時の実測では
+      // instructions は 5,722 文字（約 1,430 トークン）、追加後は約 6,900 文字
+      // （約 1,730 トークン）で約 20% 増。同じ接続で常時渡る 13 ツールの
+      // スキーマ 31,054 文字（約 7,800 トークン）を含む MCP 固定コンテキスト
+      // 全体では約 3% 増にとどまる。
       // したがってこれは「守るべき制約」ではなく
       // 「超えたら妥当性を再検討するトリガー」である。超過時に機械的に圧縮せず、
-      // まず上限そのものが妥当かを問い直すこと。
-      expect(budget.prose).toBeLessThanOrEqual(320);
+      // まず上限そのものが妥当かを問い直すこと。新上限は今回の実測値に
+      // 約 1 割の余裕を置き、次に再検討するトリガーとする。
+      expect(budget.prose).toBeLessThanOrEqual(635);
       expect(budget.catalog).toBeLessThanOrEqual(420);
-      expect(budget.total).toBeLessThanOrEqual(700);
-      expect(instructions?.trim().split(/\n\n/)).toHaveLength(6);
+      expect(budget.total).toBeLessThanOrEqual(1015);
+      expect(instructions?.trim().split(/\n\n/)).toHaveLength(7);
       for (const key of [
         "not generic SQL",
         "VALIDATE ONLY",

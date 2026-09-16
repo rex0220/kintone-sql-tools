@@ -182,6 +182,9 @@ kSQL MCP の ksql_validate で SELECT 'ok' AS result を検証して
 2. `ok: true` が返る
 3. statement type が `SELECT` になる
 
+接続時の instructions には、実測で判明した失敗を避けるための Writing rules 8 行が含まれる。
+全文の正本は `src/mcp/index.ts` の `KSQL_MCP_INSTRUCTIONS` とする。
+
 kintone 接続まで確認する場合:
 
 ```text
