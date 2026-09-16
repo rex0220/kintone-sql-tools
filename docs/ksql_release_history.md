@@ -1,6 +1,6 @@
 # kSQL リリース済み履歴（版数・効果）
 
-- 最終更新: 2026-09-16（v3.83.0）
+- 最終更新: 2026-09-16（v3.84.0）
 - 目的: 出荷済みの各版が**何を変え・なぜそう決めたか**を1か所に残す。進行中の課題は [課題台帳](ksql_issue_tracker.md) を参照。
 - 本書は [`ksql_issue_tracker.md`](ksql_issue_tracker.md) の §2 を分割したもの（2026-07-27）。台帳が 102KB まで肥大し、進行中の課題を見るのに履歴を毎回読む状態だったため。
 
@@ -16,6 +16,7 @@
 
 | バージョン | 内容 | 効果 | 文書 |
 |---|---|---|---|
+| **v3.84.0** | **B191 式の中のウィンドウの `PARTITION BY GROUPING(...)` が「internal error: GROUPING() reference was not resolved during B65 planning.」で落ちる修正（2026-09-16・minor・純加法）**＝B184-B の取りこぼし 2 例目。B65 の計画（`validateGroupingStatic` / `validateGroupingPlanning`）と `execute.ts` の計画起動判定が `stmt.columns` だけを歩き、別配列の `hiddenWindows` にある `GROUPING()` を束縛していなかった。列として出す形は v3.81.0 から通っていた。**発見の経緯**: 第 3 回の「ROLLUP とウィンドウの併用は可」に kSQL 版を添えるため、順位だけでなく構成比まで 1 文に書いて dev に流した。**判断**: B190 の直後に同じ型が出たので、`stmt.columns` を単独で歩く箇所を棚卸し（execute.ts 等 30 か所）。結果に関わるのはこの 1 件で、残り 2 件は警告・表示の穴（式の中のウィンドウに RANGE 警告なし／EXPLAIN に `frame:` 行なし）として別課題候補に記録。**教訓**: 新しい AST の置き場（`hiddenWindows`）を足したら、既存の「出力列を歩く」検査を全部 grep する。 | 正しさ | [B191](internal/ksql_b191_grouping_in_hidden_window_partition_issue.md) |
 | **v3.83.0** | **B190 CTE／一時テーブルを元にした SELECT で、CASE 条件の左辺に置いたウィンドウ関数が `unknown field code(s): __ksql_window_0` で落ちる修正（2026-09-16・minor・純加法）**＝v3.81.0（B184-B）の取りこぼし。隠しウィンドウ参照の除外が `walkArith` / `walkScalar` にはあり、CASE 条件左辺の `walkFieldValue` だけに無かった（1 行）。物理アプリでは内部名が kintone の `fields` に混ざるだけで通り、集計 SELECT では別経路で通っていたため、**B184 のリリース確認（集計 SELECT の 1 段版・物理アプリの CASE）では出なかった**。**発見の経緯**: 公開済み第 3 回に付ける「v3.81.0 で 1 段版が通る」注記の裏取りで、記事の「標準 SQL ならこう書く」（`base` CTE + 次段の `CASE WHEN … OVER () = 0`）をそのまま dev に流して落ちた。**判断**: 1 行修正・テスト 2 本（CTE・一時テーブル）で Claude が直接修正し、単独 minor で即日出荷（注記を載せる前に直す）。教訓＝「直った」と書く前に、読者が最初に書く形（記事の標準 SQL 形）をそのまま流す。 | 正しさ | [B190](internal/ksql_b190_hidden_window_in_case_condition_over_materialized_source_issue.md) |
 | **v3.82.0** | **B188 残務 プラグインの実行画面に先行文の警告を表示（2026-09-16・minor・UI のみ・エンジン不変）**＝v3.79.0 の B188 で文結果の `warnings` に載せた一時テーブル文の警告が、プラグインだけ画面に出なかった（最終結果だけ表示する契約 §8.4 と、`result` を持たない文をサマリ行から除く既存仕様の組み合わせ）。**判断**: サマリ行に足す案（CLI と同じ流儀）ではなく、単文の警告と同じ**警告欄に `[文番号]` 付きで集約**する案を採った＝利用者が見る場所を 1 か所にする。codex 版は修正なし（44 行・既定引数が空なので既存表示は不変）。同日 5 本目のリリースで、B181〜B189 の engine / 表示の残務がすべて無くなった。 | 正しさ | [B188](internal/ksql_b188_temp_table_window_range_warning_not_surfaced_issue.md)・[UI 報告](internal/ksql_b188_plugin_ui_codex_impl_report.md) |
 | **v3.81.0** | **B184 ウィンドウ関数を集計と同じ SELECT に書ける（A）・ウィンドウ結果を式の中で使える（B・隠しウィンドウ列）（2026-09-16・minor・純加法）**＝第 0 回の差分早見表「集計とウィンドウは同じ SELECT に書けない・段を分ける」を消せる変更。起票時の「拒否はパーサのみ・規模 中」は codex 調査で「AST と隠し列の内部モデルが要る・規模 L」に訂正され、A → B の 2 PR・同一 minor で出した。**判断**: 当初「連載公開後」としていたが、user が「記事に関係なく先に実装」と決め、v3.80.0 の直後に着手（記事側は版注記で追随）。**codex の停止条件が機能した例**: A で旧契約（同一 SELECT の拒否・GROUPING SETS とウィンドウの拒否）を固定していたテスト 7 件に当たり、依頼書 §1.3 どおり止めて報告 → Claude が「契約を変えるのが目的」と判断して新契約へ書き換え。B は修正なし。**副作用の記録**: 文レベル `ORDER BY SUM(x)` が止まる層がパース時から実行時（`ORDER_KEY_UNRESOLVED`）へ移った（どちらも拒否）。実機: 第 3 回の 1 段版が 3 段版と 10 行完全一致、第 2 回の `LAG` 1 段版も同一。 | 機能 | [B184](internal/ksql_b184_window_in_same_select_issue.md)・[A 報告](internal/ksql_b184a_codex_impl_report.md)・[B 報告](internal/ksql_b184b_codex_impl_report.md) |
