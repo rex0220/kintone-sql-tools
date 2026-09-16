@@ -3828,6 +3828,8 @@ kintone API のエラーはわかりやすく表示されます。フィール�
 
 `EXPLAIN` を先頭に付けると、schema-awareな実行計画を表示します。フォーム定義と、canonical STATUS順に必要な場合だけプロセス状態定義を読みます。レコード取得・書き込みAPIは呼びません。
 
+`EXPLAIN` は SELECT・GROUP BY・集計引数・CASE・関数引数・ORDER BY・ウィンドウの列名も、フォーム定義と突き合わせます。存在しない列は実行時と同じ `ArgumentError: unknown field code(s): <列> (<source label>)` で失敗します（v3.79.0〜）。対象は、WHERE の型付き述語・ORDER BY・GROUP BY など、`EXPLAIN` が計画作成のためにフォーム定義を読む文です。`SELECT COUNT(*) FROM APP100` や、フォーム定義を必要としない単純な SELECT 列だけの文ではフォーム定義の取得を増やさず、存在しない列は従来どおり実行時に検出します。
+
 ```sql
 EXPLAIN SELECT * FROM APP100 WHERE ステータス = '完了'
 EXPLAIN UPDATE APP100 SET 状態 = '完了' WHERE $id = 1

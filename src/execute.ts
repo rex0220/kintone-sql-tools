@@ -5106,10 +5106,12 @@ async function validateB86SelectFieldCodes(
   stmt: SelectStatement,
   client: KintoneClient,
   cteCache: Map<string, MaterializedTable>,
-  cacheContext: string
+  cacheContext: string,
+  cachedPhysicalFieldsOnly = false
 ): Promise<void> {
   const tables = [stmt.from, ...stmt.joins.map((join) => join.table)];
   const materializedByTable = new Map<TableRef, MaterializedTable>();
+  const unavailableMaterializedTables = new Set<TableRef>();
   const effectiveAliases = new Set<string>();
 
   for (const table of tables) {
@@ -5125,6 +5127,10 @@ async function validateB86SelectFieldCodes(
     if (table.cteName === null || table.cteName === NO_FROM_CTE_NAME) continue;
     const materialized = cteCache.get(table.cteName);
     if (!materialized) {
+      if (cachedPhysicalFieldsOnly) {
+        unavailableMaterializedTables.add(table);
+        continue;
+      }
       throw new Error(`ArgumentError: materialized source ${table.cteName} is not available.`);
     }
     if (materialized.rows.length > 0 && materialized.columns.length === 0) {
@@ -5142,6 +5148,16 @@ async function validateB86SelectFieldCodes(
 
   const schemas = new Map<TableRef, B86SourceSchema>();
   await Promise.all(tables.map(async (table) => {
+    if (unavailableMaterializedTables.has(table)) {
+      schemas.set(table, {
+        table,
+        label: b86SourceLabel(table),
+        validCodes: new Set(),
+        authoritative: false,
+        schemaUnavailable: true,
+      });
+      return;
+    }
     const materialized = materializedByTable.get(table);
     if (materialized) {
       schemas.set(table, {
@@ -5154,12 +5170,14 @@ async function validateB86SelectFieldCodes(
       return;
     }
     if (table.cteName === NO_FROM_CTE_NAME) return;
-    const defs = await getFieldsCached(table.appId, client, cacheContext);
+    const defs = cachedPhysicalFieldsOnly
+      ? await getFieldsIfCached(table.appId, cacheContext)
+      : await getFieldsCached(table.appId, client, cacheContext);
     schemas.set(table, {
       table,
       label: b86SourceLabel(table),
-      validCodes: new Set(defs.map((def) => def.code)),
-      authoritative: defs.length > 0,
+      validCodes: new Set((defs ?? []).map((def) => def.code)),
+      authoritative: defs !== null && defs.length > 0,
       schemaUnavailable: false,
     });
   }));
@@ -12365,6 +12383,8 @@ async function buildExplainWhereAnalysis(
   const capabilities = new Map<SelectStatement, PredicateCapabilityResult>();
   const orderPlans = new Map<SelectStatement, CanonicalOrderPlan>();
   const plainGroupByPlans = new Map<SelectStatement, PlainGroupByResolutionPlan>();
+  // B185: 計画作成の最後に、キャッシュ済みのフォーム定義だけで列の存在をもう一度検査する SELECT
+  const explainSelectsForColumnCheck: SelectStatement[] = [];
   const seen = new Set<object>();
   const sharedRelativeDatePlan = relativeDatePlan
     ?? await resolveRelativeDateExecutionPlan(query as Statement, tracedClient, cacheContext);
@@ -12511,6 +12531,14 @@ async function buildExplainWhereAnalysis(
     if (typed["type"] === "WITH") {
       const withStatement = node as WithStatement;
       for (const cte of withStatement.ctes) {
+        if (cte.recursiveSpec) {
+          const columns = recursiveOutputColumns(cte);
+          if (cte.recursiveSpec.cycle) columns.push(cte.recursiveSpec.cycle.markColumn);
+          // 自己参照項の preflight より先に宣言済み schema を公開する。
+          explainRelations.set(cte.name, { rows: [], columns });
+          await preflightExplainRelations(cte.query);
+          continue;
+        }
         await preflightExplainRelations(cte.query);
         if (cte.query.type === "GENERATE_SERIES") {
           if (cte.query.args.some((arg) => arg.type === "VARIABLE")) {
@@ -12546,6 +12574,8 @@ async function buildExplainWhereAnalysis(
     if (typed["type"] === "SELECT") {
       const select = node as SelectStatement;
       await bindProjectedNamesForSelectWithSchemas(select, explainRelations, tracedClient, cacheContext);
+      await validateB86SelectFieldCodes(select, tracedClient, explainRelations, cacheContext, true);
+      explainSelectsForColumnCheck.push(select);
       analyzeStaticSelectRows(select);
       for (const column of select.columns) {
         if (column.type === "SCALAR_SUBQUERY_COL") await preflightExplainRelations(column.query);
@@ -12845,6 +12875,12 @@ async function buildExplainWhereAnalysis(
         hasKlike: whereHasKlike(inlined.where),
       }));
     }
+  }
+  // B185: 束縛直後の早期検査は、その時点でキャッシュにある物理定義しか見られない。型付き WHERE・
+  // ORDER BY・GROUP BY の解析で初めてフォーム定義を読む文は、計画作成が終わった今ここで初めて
+  // 突き合わせられる。追加の API は呼ばず（キャッシュ済みだけ）、文言は実行時と同じ
+  for (const select of explainSelectsForColumnCheck) {
+    await validateB86SelectFieldCodes(select, tracedClient, explainRelations, cacheContext, true);
   }
   return {
     capabilities,
