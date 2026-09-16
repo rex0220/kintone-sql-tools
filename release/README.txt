@@ -1,14 +1,16 @@
-ksql 配布パッケージ (v3.82.0)
+ksql 配布パッケージ (v3.83.0)
 
 release 成果物:
-- ksql-plugin-v3.82.0.zip
-- ksql-mcp.mcpb (manifest version 3.82.0)
-- ksql-mcp.js (MCP server version 3.82.0)
+- ksql-plugin-v3.83.0.zip
+- ksql-mcp.mcpb (manifest version 3.83.0)
+- ksql-mcp.js (MCP server version 3.83.0)
 
-改善 (B188 残務: プラグインの実行画面に先行文の警告を表示・プラグイン UI のみ・エンジン不変):
-- バッチで表示中の最終結果の警告欄に、先行文の警告 (一時テーブルや INSERT/UPSERT … SELECT の実体化警告、
-  表示されない途中の SELECT の警告) が [文番号] 付きで前置されます。dialect 1 の警告は接頭辞なし。
-  単文の表示・サマリ行・警告文・エンジンは不変。
+修正 (B190: CTE／一時テーブルを元にした SELECT で CASE 条件の左辺に置いたウィンドウ関数が落ちる・純加法):
+- 元が CTE か一時テーブルの非集計 SELECT で `CASE WHEN SUM(x) OVER () = 0 THEN …` のように CASE 条件の
+  左辺にウィンドウ関数を書くと `unknown field code(s): __ksql_window_0` で止まっていました (v3.81.0 の B184-B の漏れ)。
+  修正後は通ります。算術・THEN/ELSE の中・物理アプリ・集計と同じ SELECT の形は元から通っていて不変。
+
+v3.82.0 の節は畳みました (B188 残務 プラグインの実行画面に先行文の警告を [文番号] 付きで表示 = UI のみ・エンジン不変)。
 
 v3.81.0 / v3.80.0 の節は畳みました (B184 ウィンドウ関数を集計と同じ SELECT に・ウィンドウ結果を式の中で = 純加法 /
   B187 HAVING に直接書いた集計を SELECT 列に無くても評価 = 結果が変わる修正)。
@@ -105,16 +107,18 @@ B124 集計算術式 / B125 集計のウィンドウ関数 / B123 GROUP BY だ�
 - CHANGELOG.md と GitHub Releases に版ごとの内容と移行案内があります。
   https://github.com/rex0220/kintone-sql-tools/releases
 
-1. ksql-plugin-v3.82.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.83.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.82.0): B188 残務 = プラグインの実行画面に先行文の警告を [文番号] 付きで表示 (UI のみ・
-エンジン不変)。
+本リリース (v3.83.0): B190 CTE／一時テーブルを元にした SELECT で CASE 条件の左辺に置いたウィンドウ関数が
+落ちる修正 (純加法)。
+
+前リリース (v3.82.0): B188 残務 = プラグインの実行画面に先行文の警告を [文番号] 付きで表示 (UI のみ)。
 
 前リリース (v3.81.0): B184 ウィンドウ関数を集計と同じ SELECT に書ける (A)・ウィンドウ結果を式の中で
-使える (B)。純加法。既存の 3 段版と同じ結果。
+使える (B)。純加法。
 
 前リリース (v3.80.0): B187 HAVING に直接書いた集計を SELECT 列に無くても評価 (結果が変わります)。
 前リリース (v3.79.0): 診断と警告の穴 4 件 = B185 / B186 / B188 / B189 (実行結果は不変)。
@@ -122,13 +126,8 @@ B124 集計算術式 / B125 集計のウィンドウ関数 / B123 GROUP BY だ�
 前リリース (v3.78.0): B182 COALESCE で包んだ集計値が静かに間違う修正 (結果が変わります)、
 B181 別名の参照解決 (純加法)、B183 MCP instructions に Writing rules 8 行 (エンジン不変)。
 
-前リリース (v3.77.0): B179 CSV export (名前付きシンク・CLI --export-csv・/flow 公開 API・純加法)
-
-前リリース (v3.76.0): B178 /flow IMPORT source の materialize 通知 onImportSourceMaterialized (純加法)
-
-前リリース (v3.75.0): B177 /flow named IMPORT source 公開 API (既定 OFF・純加法)
-
-前リリース (v3.74.0): B176 EXPLAIN の native UPSERT 適格性が常に UNKNOWN だった修正
+前リリース (v3.77.0〜v3.74.0): B179 CSV export (--export-csv・/flow 公開 API) / B178 /flow IMPORT の
+materialize 通知 / B177 /flow named IMPORT source 公開 API (既定 OFF) / B176 EXPLAIN の native UPSERT 適格性の修正。
 
 前リリース (v3.73.0 以前) の節は畳みました (B173 native UPSERT = /flow 既定 ON・挙動が変わります /
 B171 ASSERT 大小比較の修正 = 結果が変わります / B170 previewStatement・/flow 純加法 4 件 /

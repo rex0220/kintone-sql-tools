@@ -29765,7 +29765,7 @@ var import_docsResourceBuilder = __toESM(require_docsResourceBuilder());
 
 // src/mcp/serverVersion.ts
 init_define_KSQL_DOCS();
-var SERVER_VERSION = true ? "3.82.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "3.83.0" : "0.0.0-dev";
 
 // src/mcp/docsResources.ts
 function loadFromRepoDocs() {
@@ -37574,6 +37574,7 @@ function collectRequiredFieldsByTable(stmt, plainGroupByPlan, sourceAware) {
   };
   const walkFieldValue = (fv, phase = "select") => {
     if (fv.type === "FIELD") {
+      if (fv.hiddenWindowRef) return;
       if (fv.aggregateRef) {
         walkAgg(fv.aggregateRef, phase);
         return;
