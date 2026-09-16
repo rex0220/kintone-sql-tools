@@ -1,8 +1,8 @@
 # kSQL 課題・改善案・Issue 一括管理
 
-- 最終更新: 2026-09-16（B188 のプラグイン UI 表示を実装・レビュー済み＝v3.82.0 候補。v3.81.0 リリース＝B184 を §1 から履歴へ。同日に v3.78.0（B181〜B183）・v3.79.0（B185・B186・B188・B189）・v3.80.0（B187）も出荷。残る engine 課題は B188 のプラグイン UI 表示のみ）
-- 現在の最新リリース: **v3.81.0**（2026-09-16・**B184**＝ウィンドウ関数を集計と同じ SELECT に（A）・ウィンドウ結果を式の中で（B）。純加法・既存 SQL 不変。同日の v3.80.0 = B187、v3.79.0 = B185・B186・B188・B189、v3.78.0 = B182・B181・B183）。→ [リリース履歴](ksql_release_history.md)
-- 次回リリース計画: **B188 のプラグイン UI 表示（残務）を v3.82.0 で出す**（codex が実装・Claude レビュー済み・`b188ui/dev`・[報告](internal/ksql_b188_plugin_ui_codex_impl_report.md)＝最終結果の警告欄に先行文の警告を `[文番号]` 付きで集約。エンジン不変・プラグイン zip の差し替え）。これで B181〜B189 の engine / 表示の残務は無くなる。文書・保留は **B180**（中・文書のみ＝§7 結合キー prefilter の 4 点追記・Qiita 実践 #1 の正本）／**B143**（低）／**B141**（散文の穴・2026-08-25 に 6 回目を記録＝古い記述が判断そのものを誤らせた初の例）。**B174**（F-5 bulkRequest）と **B175**（KLIKE 索引ラグ）は ❌ クローズ。B53 の残務＝依頼元の依頼書 §6 への返信・fixture の循環/空キールート変種。B177 の残務＝kSQL-Flow 向け回答文書（仕様 §5.3・flownet 側対応）と `flow:declaration-smoke`（任意）。クローズ済みは §3。
+- 最終更新: 2026-09-16（v3.82.0 リリース＝B188 残務のプラグイン UI 表示。v3.81.0 リリース＝B184 を §1 から履歴へ。同日に v3.78.0（B181〜B183）・v3.79.0（B185・B186・B188・B189）・v3.80.0（B187）も出荷。残る engine 課題は B188 のプラグイン UI 表示のみ）
+- 現在の最新リリース: **v3.82.0**（2026-09-16・**B188 残務**＝プラグインの実行画面に先行文の警告を `[文番号]` 付きで表示。UI のみ・エンジン不変。同日の v3.81.0 = B184、v3.80.0 = B187、v3.79.0 = B185・B186・B188・B189、v3.78.0 = B182・B181・B183）。→ [リリース履歴](ksql_release_history.md)
+- 次回リリース計画: **engine・表示の残務なし**（B181〜B189 は v3.78.0〜v3.82.0 で出荷済み）。次の起票待ち。文書・保留は **B180**（中・文書のみ＝§7 結合キー prefilter の 4 点追記・Qiita 実践 #1 の正本）／**B143**（低）／**B141**（散文の穴・2026-08-25 に 6 回目を記録＝古い記述が判断そのものを誤らせた初の例）。**B174**（F-5 bulkRequest）と **B175**（KLIKE 索引ラグ）は ❌ クローズ。B53 の残務＝依頼元の依頼書 §6 への返信・fixture の循環/空キールート変種。B177 の残務＝kSQL-Flow 向け回答文書（仕様 §5.3・flownet 側対応）と `flow:declaration-smoke`（任意）。クローズ済みは §3。
 - 目的: 課題・改善案・Issue の**進捗 / 効果 / リリースバージョン**を1か所で俯瞰する。個別の詳細は各文書へリンク。
 
 ## 運用ルール
@@ -63,11 +63,11 @@
 
 | バージョン | 内容 |
 |---|---|
+| **v3.82.0** | B188 残務 **プラグインの実行画面に先行文の警告を表示**（一時テーブル・SELECT-based DML・途中の SELECT の警告を最終結果の警告欄に `[文番号]` 付きで前置、dialect 1 は接頭辞なし。UI のみ・エンジン不変。2026-09-16） |
 | **v3.81.0** | B184 **ウィンドウ関数を集計 / GROUP BY と同じ SELECT に書ける（A）・ウィンドウ結果を関数の引数・算術・CASE の中で使える（B・隠しウィンドウ列 `hiddenWindows`）**＝第 3 回の順位・構成比・累積構成比・区分が 1 段で書け 3 段版と同じ 10 行。参照はグループキー・集計別名・集計式・`GROUPING()` に限定、全グループキーが ORDER BY にあれば RANGE 警告なし。純加法・取得列と EXPLAIN 不変（2026-09-16） |
 | **v3.80.0** | B187 **HAVING に直接書いた集計を SELECT 列に無くても評価**（結果が変わる＝以前は 0 行 + 警告。`applyGroupBy` / `applyGroupingSets` で HAVING の集計依存も B182 の helper で実体化・出力列にしない・取得列と EXPLAIN 不変。§9 の契約文を書き換え。2026-09-16） |
 | **v3.79.0** | B185 **EXPLAIN が SELECT 列の存在を検査**（計画のためにフォーム定義を読む文で、実行と同じ `unknown field code(s)`・追加 API なし）／B186 **混在 JOIN の未修飾 CTE 列で EXPLAIN だけ落ちる非対称を解消**／B188 **一時テーブル・SELECT-based DML の実体化警告を文結果へ伝播**（`BatchStatementResult.warnings?`）／B189 **CLI の table / csv / markdown で単文 SELECT の警告を stderr に `warning=`**。4 件とも実行結果・取得列・API 回数は不変（2026-09-16） |
 | **v3.78.0** | B182 **`COALESCE` / `ISNULL` / `NULLIF` で包んだ集計値が静かに間違う修正（結果が変わる）**＝関数で包んだ集計の算術が 0・並び順が文字列順だった。全引数が数値なら number（共通 helper `expressionSemantics`）・`ARITH_COL` 内の集計を実体化。**B181 別名の参照解決（純加法）**＝`AS Amount` / `AS 顧客No` を元の表記で参照しても解決（完全一致 → 小文字正規名。結果列名の小文字化・物理フィールドの区別は不変・混在 JOIN は物理優先）。**B183 MCP instructions に Writing rules 8 行**（5,722 → 7,369 文字・エンジン不変）。3 件とも Qiita「kSQL 実践」の実機検証で発見（2026-09-16） |
-| **v3.77.0** | B179 **CSV export（名前付きシンク・engine serializer・`/flow` 公開 API・CLI `--export-csv`・純加法）**＝header は result 列名（重複と SUBTABLE/FILE は拒否）・複数値 LF 連結・user 系 code・指数は 10 進展開・DATETIME は timezone 指定時だけ変換・RFC 4180 CRLF BOM なし。sink は `#name` を事前宣言し同期検査、`exportSinkStatus` 4 状態で EXIT 交差を判別、receipt は同期戻り値。Shift_JIS は encoder 注入（CLI は encoding-japanese＋往復検査で fail-closed）。CLI は全文成功後に一時 file → fsync → rename。 |
 | **v3.69.0** | B168 **Flow dialect 1 完成（Stage 4-6・新機能・opt-in・正式提供）**＝CLI/MCP/プラグインで実行可（v3.68.0 の到達面の穴を解消）・@時刻関数と `asOf`/`timezone` 注入・validate 拡張（updateKey/複合キー/サブテーブル DML/strict・診断コード KSQL1xxx）・EXPLAIN 分解形推定・公式 API `/flow`（文単位実行・書込可能クライアント）・MCP diagnostics/scriptMeta・§27/R18/README。dialect 0 は完全不変。 |
 | **v3.68.0** | B168 **Flow dialect 1 の解析基盤（Stage 1-3・新機能・opt-in・実験的）**＝`-- @ksql dialect: 1` 宣言時のみ有効。ヘッダ解析・`ASSERT , 'msg'`/WARN・`EXIT SUCCESS IF`・エイリアス（TEMP 裸名・`KEY()`・`MERGE`→UPSERT 正規化＝AST 痕跡ゼロ）。既存構文は完全不変。公式 API/MCP/文書対応は Stage 4-6 で。 |
 

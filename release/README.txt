@@ -1,18 +1,17 @@
-ksql 配布パッケージ (v3.81.0)
+ksql 配布パッケージ (v3.82.0)
 
 release 成果物:
-- ksql-plugin-v3.81.0.zip
-- ksql-mcp.mcpb (manifest version 3.81.0)
-- ksql-mcp.js (MCP server version 3.81.0)
+- ksql-plugin-v3.82.0.zip
+- ksql-mcp.mcpb (manifest version 3.82.0)
+- ksql-mcp.js (MCP server version 3.82.0)
 
-機能 (B184: ウィンドウ関数を集計と同じ SELECT に・ウィンドウ結果を式の中で・純加法):
-- A: GROUP BY / 集計と同じ SELECT にウィンドウ関数を書けます (RANK() OVER (ORDER BY SUM(売上) DESC) など)。
-  参照できるのはグループキー・集計の別名・集計式・GROUPING()。評価は GROUP BY → HAVING → ウィンドウ。
-- B: 関数の引数・算術・CASE の中にウィンドウ関数を書けます (ROUND(SUM(売上) * 100.0 / SUM(SUM(売上)) OVER (), 1) など)。
-  順位・構成比・累積構成比・ABC 区分が 1 つの SELECT で書け、既存の 3 段版と同じ結果です。
-- 既存 SQL の結果・警告・EXPLAIN・取得列・API 回数は不変。WHERE / HAVING でのウィンドウは従来どおり拒否。
+改善 (B188 残務: プラグインの実行画面に先行文の警告を表示・プラグイン UI のみ・エンジン不変):
+- バッチで表示中の最終結果の警告欄に、先行文の警告 (一時テーブルや INSERT/UPSERT … SELECT の実体化警告、
+  表示されない途中の SELECT の警告) が [文番号] 付きで前置されます。dialect 1 の警告は接頭辞なし。
+  単文の表示・サマリ行・警告文・エンジンは不変。
 
-v3.80.0 の節は畳みました (B187 HAVING に直接書いた集計を SELECT 列に無くても評価 = 結果が変わる修正)。
+v3.81.0 / v3.80.0 の節は畳みました (B184 ウィンドウ関数を集計と同じ SELECT に・ウィンドウ結果を式の中で = 純加法 /
+  B187 HAVING に直接書いた集計を SELECT 列に無くても評価 = 結果が変わる修正)。
 
 v3.79.0 の節は畳みました (診断と警告の穴 4 件 = B185 EXPLAIN の SELECT 列検査 / B186 混在 JOIN の
   EXPLAIN 偽陽性 / B188 一時テーブル経由の警告伝播 / B189 CLI 単文 SELECT の警告表示。実行結果は不変)。
@@ -106,19 +105,19 @@ B124 集計算術式 / B125 集計のウィンドウ関数 / B123 GROUP BY だ�
 - CHANGELOG.md と GitHub Releases に版ごとの内容と移行案内があります。
   https://github.com/rex0220/kintone-sql-tools/releases
 
-1. ksql-plugin-v3.81.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.82.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.81.0): B184 ウィンドウ関数を集計と同じ SELECT に書ける (A)・ウィンドウ結果を式の中で
+本リリース (v3.82.0): B188 残務 = プラグインの実行画面に先行文の警告を [文番号] 付きで表示 (UI のみ・
+エンジン不変)。
+
+前リリース (v3.81.0): B184 ウィンドウ関数を集計と同じ SELECT に書ける (A)・ウィンドウ結果を式の中で
 使える (B)。純加法。既存の 3 段版と同じ結果。
 
-前リリース (v3.80.0): B187 HAVING に直接書いた集計を SELECT 列に無くても評価 (結果が変わります =
-以前は 0 行 + 警告)。
-
-前リリース (v3.79.0): 診断と警告の穴 4 件 = B185 EXPLAIN の SELECT 列検査 / B186 混在 JOIN の
-EXPLAIN 偽陽性 / B188 一時テーブル経由の警告伝播 / B189 CLI 単文 SELECT の警告表示 (実行結果は不変)。
+前リリース (v3.80.0): B187 HAVING に直接書いた集計を SELECT 列に無くても評価 (結果が変わります)。
+前リリース (v3.79.0): 診断と警告の穴 4 件 = B185 / B186 / B188 / B189 (実行結果は不変)。
 
 前リリース (v3.78.0): B182 COALESCE で包んだ集計値が静かに間違う修正 (結果が変わります)、
 B181 別名の参照解決 (純加法)、B183 MCP instructions に Writing rules 8 行 (エンジン不変)。
