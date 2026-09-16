@@ -3,6 +3,28 @@
 リリースごとの変更点。**本ファイルは v3.45.0 以降だけを保持する。**
 それ以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) の各タグを参照。
 
+## v3.81.0（2026-09-16）
+
+### 機能（B184: ウィンドウ関数を集計と同じ SELECT に書ける・ウィンドウ結果を式の中で使える）**※ 純加法（既存 SQL の結果・警告・EXPLAIN は不変。構文の意味が広がる）**
+
+- **A. 集計 / GROUP BY と同じ SELECT のウィンドウ**: `SELECT 会社名, SUM(売上) AS 売上合計, RANK() OVER (ORDER BY SUM(売上) DESC) AS 順位 FROM APP4149 GROUP BY 会社名`
+  のような形が通ります（以前は `ウィンドウ関数は GROUP BY / 集計関数と同じ SELECT では使用できません`）。
+  ウィンドウの引数・`PARTITION BY`・`ORDER BY` が参照できるのは、グループキー・同じ SELECT の集計の別名・集計式（`SUM(売上)`・`SUM(SUM(売上)) OVER ()`）・
+  `GROUPING()` です。グループ化されていない生のフィールドは従来の非グループ依存エラー（`B65_NON_GROUPED_DEPENDENCY`）で止まります。
+  評価順は `GROUP BY` → `HAVING` → ウィンドウ（`HAVING` で除外されたグループは順位・累計に入りません）。SELECT に無い集計をウィンドウだけが使う形も通ります（出力列にはなりません）。
+  同じ SELECT のグループキーがすべて `ORDER BY` に含まれるウィンドウは、入力行を一意と扱い、既定 `RANGE` フレームの警告を出しません（CTE 経由の従来形は従来どおり警告）。
+- **B. ウィンドウ結果を式の中で使う**: `ROUND(SUM(売上) * 100.0 / SUM(SUM(売上)) OVER (), 1)`・`件数 - LAG(件数) OVER (ORDER BY 年月)`・`CASE WHEN … OVER () <= 80 THEN 'A' …` のように、
+  関数の引数・算術・`CASE`・`||` の中にウィンドウ関数を書けます（以前は B129 の診断 `ウィンドウ関数の結果は同じ SELECT の式では使えません`）。
+  同じウィンドウ式を複数箇所に書いても 1 回だけ評価します。内部の隠し列は結果の `columns`・行キー・`DISTINCT` の比較・CSV・Dashboard の列に現れません。
+  `WHERE` / `HAVING` / `JOIN ON` / `GROUP BY` / 文レベルの `ORDER BY` でのウィンドウ参照と、ウィンドウの中のウィンドウは従来どおり拒否します。
+- 第 3 回「ランキングと構成比」の順位・構成比・累積構成比・ABC 区分は 1 つの SELECT で書け、既存の 3 段（CTE）版と同じ 10 行になります（実測）。
+  既存の 3 段の書き方は「段ごとに確かめたいときの書き方」として残り、結果は同じです。
+- 取得列・kintone API の回数・EXPLAIN の行は変わりません（`complete input reason` に `WINDOW_ORDER` / `AGGREGATE_WINDOW` が併記されます）。
+  文レベルの `ORDER BY SUM(売上)`（ウィンドウではない）は従来どおり通りません（止まる層がパース時から実行時の `ORDER_KEY_UNRESOLVED` へ移りました）。
+- 言語リファレンス §10.1、レシピ R15 / R16 を 1 段版へ更新しました（3 段版も併記）。
+- `OVER (ORDER BY …)` から参照できる同一 SELECT の別名は**集計を含む列の別名だけ**です。集計を含まない別名（`売上 * 2 AS 倍`・グループキーの別名）は従来どおり実行前に `unknown field code(s)` で止まります（言語リファレンス §10）。
+- MCP の instructions（B183 の Writing rules 5 行目）を「集計とウィンドウは同じ SELECT に書ける。OVER の参照はグループキー・集計別名・集計式・`GROUPING()` に限る」へ更新しました。
+
 ## v3.80.0（2026-09-16）
 
 ### 機能（B187: `HAVING` に直接書いた集計を SELECT 列に無くても評価する）**※ 結果が変わる修正（以前は 0 行 + 警告）**

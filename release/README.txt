@@ -1,30 +1,26 @@
-ksql 配布パッケージ (v3.80.0)
+ksql 配布パッケージ (v3.81.0)
 
 release 成果物:
-- ksql-plugin-v3.80.0.zip
-- ksql-mcp.mcpb (manifest version 3.80.0)
-- ksql-mcp.js (MCP server version 3.80.0)
+- ksql-plugin-v3.81.0.zip
+- ksql-mcp.mcpb (manifest version 3.81.0)
+- ksql-mcp.js (MCP server version 3.81.0)
 
-機能 (B187: HAVING に直接書いた集計を SELECT 列に無くても評価・結果が変わる修正):
-- SELECT に無い集計を HAVING に直接書いた文 (例: … GROUP BY 商談フェーズ HAVING SUM(売上) > 1000000) は、
-  以前は 0 行 + 警告でした。標準 SQL と同じ意味で評価されます (上の例は 3 行)。
-  HAVING の集計は出力列にはならず、取得列・API 回数・EXPLAIN は不変。ROLLUP / GROUPING SETS も同じ。
-- SELECT に同じ集計がある文と、SELECT の別名を HAVING で参照する文は元から正しく不変。
+機能 (B184: ウィンドウ関数を集計と同じ SELECT に・ウィンドウ結果を式の中で・純加法):
+- A: GROUP BY / 集計と同じ SELECT にウィンドウ関数を書けます (RANK() OVER (ORDER BY SUM(売上) DESC) など)。
+  参照できるのはグループキー・集計の別名・集計式・GROUPING()。評価は GROUP BY → HAVING → ウィンドウ。
+- B: 関数の引数・算術・CASE の中にウィンドウ関数を書けます (ROUND(SUM(売上) * 100.0 / SUM(SUM(売上)) OVER (), 1) など)。
+  順位・構成比・累積構成比・ABC 区分が 1 つの SELECT で書け、既存の 3 段版と同じ結果です。
+- 既存 SQL の結果・警告・EXPLAIN・取得列・API 回数は不変。WHERE / HAVING でのウィンドウは従来どおり拒否。
+
+v3.80.0 の節は畳みました (B187 HAVING に直接書いた集計を SELECT 列に無くても評価 = 結果が変わる修正)。
 
 v3.79.0 の節は畳みました (診断と警告の穴 4 件 = B185 EXPLAIN の SELECT 列検査 / B186 混在 JOIN の
   EXPLAIN 偽陽性 / B188 一時テーブル経由の警告伝播 / B189 CLI 単文 SELECT の警告表示。実行結果は不変)。
 
-v3.78.0 の節は畳みました (B182 COALESCE で包んだ集計値の修正 = 結果が変わる /
-  B181 別名の参照解決 = 純加法 / B183 MCP instructions に Writing rules 8 行)。
-
-v3.77.0 の節は畳みました (B179 CSV export = 名前付きシンク・engine 層 serializer・
-  /flow 公開 API・CLI --export-csv・純加法。既存の --format csv / --output は不変)。
-
-v3.76.0 の節は畳みました (B178 /flow IMPORT source の materialize 通知 =
-  onImportSourceMaterialized・5 key・mutation 前・throw は mutation 0)。
-v3.75.0 の節は畳みました (B177 /flow named IMPORT source 公開 API = enableImport 既定 OFF・
-  lazy Uint8Array loader・安定 error code。CLI/MCP/プラグインの IMPORT source エラー
-  name/message は細分化)。
+v3.78.0 / v3.77.0 の節は畳みました (B182 COALESCE で包んだ集計値の修正 = 結果が変わる /
+  B181 別名の参照解決 / B183 MCP instructions の Writing rules / B179 CSV export = --export-csv・/flow 公開 API)。
+v3.76.0 / v3.75.0 の節は畳みました (B178 /flow IMPORT source の materialize 通知 /
+  B177 /flow named IMPORT source 公開 API = enableImport 既定 OFF・安定 error code)。
 v3.74.0 の節は畳みました (B176 EXPLAIN の native UPSERT 適格性が常に UNKNOWN だった修正 =
   対象アプリのフォーム定義を 1 回取得して判定。native UPSERT 本体は不変)。
 v3.73.0 の節は畳みました (B173 native UPSERT = /flow は既定 ON・CLI は --native-upsert /
@@ -110,12 +106,15 @@ B124 集計算術式 / B125 集計のウィンドウ関数 / B123 GROUP BY だ�
 - CHANGELOG.md と GitHub Releases に版ごとの内容と移行案内があります。
   https://github.com/rex0220/kintone-sql-tools/releases
 
-1. ksql-plugin-v3.80.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.81.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.80.0): B187 HAVING に直接書いた集計を SELECT 列に無くても評価 (結果が変わります =
+本リリース (v3.81.0): B184 ウィンドウ関数を集計と同じ SELECT に書ける (A)・ウィンドウ結果を式の中で
+使える (B)。純加法。既存の 3 段版と同じ結果。
+
+前リリース (v3.80.0): B187 HAVING に直接書いた集計を SELECT 列に無くても評価 (結果が変わります =
 以前は 0 行 + 警告)。
 
 前リリース (v3.79.0): 診断と警告の穴 4 件 = B185 EXPLAIN の SELECT 列検査 / B186 混在 JOIN の
