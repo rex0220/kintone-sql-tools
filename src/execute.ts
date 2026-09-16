@@ -66,6 +66,7 @@ import { validateDeclaredBatchVariables } from "./core/batchVariables";
 import { isOuterJoinNonPreservedTable, statementContainsOuterJoin } from "./core/outerJoinSearchAbortGuard";
 import { compareCanonicalValues, compareScalarValues } from "./core/scalarCompare";
 import { stringFunctionSemanticKind } from "./core/expressionSemantics";
+import { resolveProjectedName } from "./core/projectedNameResolution";
 import { parseExactDecimal } from "./core/exactDecimal";
 import { validateKlikePushdownPlan } from "./core/klikeValidation";
 import { validateStatementStatic } from "./core/statementValidation";
@@ -462,6 +463,27 @@ export interface MaterializedTable {
   readonly receipt?: import("./import/types").ImportMaterializationReceipt;
   /** 直接の生成 CTE だけが持つ一意列。再実体化時には伝播しない。 */
   readonly uniqueGeneratedColumn?: string;
+}
+
+/**
+ * 実体化列の完全一致だけを見る。B181 の表記ゆれ（`Amount` → `amount`）は実行前の束縛
+ * （bindProjectedNamesForSelect / bindSelectAliasesInHaving / UPDATE FROM の source 束縛）で
+ * AST を正規名へ書き換えて吸収するため、実行時の解決は従来どおり完全一致に保つ。
+ * ここを緩めると、物理フィールド `Amount` と実体化列 `amount` が並ぶ JOIN で未修飾名が曖昧になる。
+ */
+function resolveMaterializedColumn(
+  table: MaterializedTable | undefined,
+  requested: string
+): string | undefined {
+  return table?.columns.includes(requested) ? requested : undefined;
+}
+
+function resolveMaterializedColumnMeta(
+  table: MaterializedTable | undefined,
+  requested: string
+): MaterializedColumnMeta | undefined {
+  const resolved = resolveMaterializedColumn(table, requested);
+  return resolved === undefined ? undefined : table?.columnMeta?.get(resolved);
 }
 
 /** 公開 SelectResult を拡張せず、実体化時だけ列メタを結果オブジェクトへ関連付ける。 */
@@ -3540,21 +3562,21 @@ async function buildWhereFieldSemanticsResolver(
       const table = tables.find((candidate) => effectiveTableAlias(candidate) === field.tableAlias);
       if (!table) return undefined;
       if (table.cteName !== null) {
-        return materializedTables?.get(table.cteName)?.columnMeta?.get(field.field)?.semantics
+        return resolveMaterializedColumnMeta(materializedTables?.get(table.cteName), field.field)?.semantics
           ?? syntheticSemantics("string");
       }
       return fromPhysical(table, field.field, true);
     }
     if (stmt.joins.length === 0) {
       if (stmt.from.cteName !== null) {
-        return materializedTables?.get(stmt.from.cteName)?.columnMeta?.get(field.field)?.semantics
+        return resolveMaterializedColumnMeta(materializedTables?.get(stmt.from.cteName), field.field)?.semantics
           ?? syntheticSemantics("string");
       }
       return fromPhysical(stmt.from, field.field, true);
     }
     const matches = tables.flatMap((table): ResolvedFieldSemantics[] => {
       const semantics = table.cteName !== null
-        ? materializedTables?.get(table.cteName)?.columnMeta?.get(field.field)?.semantics
+        ? resolveMaterializedColumnMeta(materializedTables?.get(table.cteName), field.field)?.semantics
         : fromPhysical(table, field.field, true);
       return semantics ? [semantics] : [];
     });
@@ -3776,9 +3798,11 @@ function buildHavingFieldSemanticsResolver(
     }
     if (semantics) aliases.set(column.alias, semantics);
   }
-  return (field) => field.tableAlias === null && aliases.has(field.field)
-    ? aliases.get(field.field)
-    : rowResolver(field);
+  return (field) => {
+    if (field.tableAlias !== null) return rowResolver(field);
+    const alias = resolveProjectedName(field.field, aliases.keys());
+    return alias === undefined ? rowResolver(field) : aliases.get(alias);
+  };
 }
 
 async function resolveSelectWhereCapability(
@@ -3867,6 +3891,7 @@ async function executeSelect(
   forLibraryCapture = false,
   windowWarningContext: WindowWarningContext = "DIRECT"
 ): Promise<SelectResult> {
+  bindSelectAliasesInHaving(stmt);
   let result: SelectResult;
   const subqueryWarnings = new Set<string>();
   await validateSelectGroupingPlanning(stmt, client, cacheContext, cteCache);
@@ -4267,7 +4292,7 @@ async function buildGroupingFieldResolver(
     const materialized = materializedTables?.get(table.cteName);
     // EXPLAIN cannot materialize CTE/temp rows. Conservatively require qualification
     // when an unqualified B65 field shares a statement with an unknown materialized source.
-    return materialized ? materialized.columns.includes(field) : true;
+    return materialized ? resolveMaterializedColumn(materialized, field) !== undefined : true;
   };
   const resolved = (
     table: TableRef,
@@ -4806,8 +4831,202 @@ function b86PhysicalFieldExists(schema: B86SourceSchema, field: string): boolean
 }
 
 function b86FieldExists(schema: B86SourceSchema, field: string): boolean {
+  // B181: 実体化列も完全一致で判定する。表記ゆれは直前の bindProjectedNamesForSelect が
+  // 正規名へ書き換えているので、ここに残った不一致は「存在しない列」として fail-closed に拒否する
   if (schema.table.cteName !== null) return schema.validCodes.has(field);
   return b86PhysicalFieldExists(schema, field);
+}
+
+/**
+ * Bind references that target a projected/materialized schema to the actual
+ * stored column name. Physical APP fields deliberately stay case-sensitive.
+ */
+/**
+ * 物理 APP がフィールド `field` を持ち得るかを返す probe を作る。
+ * 定義が取れない（defs=[]・サブテーブル source）場合は「持ち得る」と答え、
+ * 未修飾名の小文字フォールバックを抑止する側に倒す（物理フィールドの完全一致を奪わない）。
+ */
+async function buildPhysicalFieldProbe(
+  stmt: SelectStatement,
+  client: KintoneClient,
+  cacheContext: string
+): Promise<(table: TableRef, field: string) => boolean> {
+  const physical = [stmt.from, ...stmt.joins.map((join) => join.table)]
+    .filter((table) => table.cteName === null);
+  const codesByApp = new Map<number, Set<string>>();
+  await Promise.all([...new Set(physical.map((table) => table.appId))].map(async (appId) => {
+    const defs = await getFieldsCached(appId, client, cacheContext);
+    codesByApp.set(appId, new Set(defs.map((def) => def.code)));
+  }));
+  return (table, field) => {
+    if (table.cteName !== null) return false;
+    if (table.subtableCode || isSystemLikeFieldCode(field)) return true;
+    const codes = codesByApp.get(table.appId);
+    if (!codes || codes.size === 0) return true;
+    return codes.has(fieldCodeForTypeLookup(table, field));
+  };
+}
+
+/**
+ * bindProjectedNamesForSelect を、物理フィールド定義が必要になった場合だけ取得して適用する。
+ * 1 回目は「物理側が持ち得る」と答える probe で束縛し、probe が参照されなければそれで確定
+ * （物理だけの文・CTE だけの文では form 定義の取得回数が変わらない）。参照されたときだけ
+ * 定義を取得して束縛し直す（束縛は冪等）。
+ */
+async function bindProjectedNamesForSelectWithSchemas(
+  stmt: SelectStatement,
+  materializedTables: ReadonlyMap<string, MaterializedTable>,
+  client: KintoneClient,
+  cacheContext: string
+): Promise<void> {
+  let consulted = false;
+  bindProjectedNamesForSelect(stmt, materializedTables, () => { consulted = true; return true; });
+  if (!consulted) return;
+  bindProjectedNamesForSelect(
+    stmt,
+    materializedTables,
+    await buildPhysicalFieldProbe(stmt, client, cacheContext)
+  );
+}
+
+function bindProjectedNamesForSelect(
+  stmt: SelectStatement,
+  materializedTables: ReadonlyMap<string, MaterializedTable>,
+  physicalMayHave: (table: TableRef, field: string) => boolean
+): void {
+  const tables = [stmt.from, ...stmt.joins.map((join) => join.table)];
+  const tableByAlias = new Map<string, TableRef>();
+  for (const table of tables) {
+    for (const alias of b86SourceAliases(table)) tableByAlias.set(alias, table);
+  }
+  const aliases = stmt.columns.flatMap((column) =>
+    "alias" in column && column.alias !== null ? [column.alias] : []
+  );
+
+  const materializedColumns = (table: TableRef): readonly string[] =>
+    table.cteName === null || table.cteName === NO_FROM_CTE_NAME
+      ? []
+      : materializedTables.get(table.cteName)?.columns ?? [];
+  const resolveFromTable = (table: TableRef | undefined, requested: string): string | undefined =>
+    table ? resolveProjectedName(requested, materializedColumns(table)) : undefined;
+  // B181: 未修飾名は「完全一致 → 小文字正規名」の順で文全体から解決する。
+  // 実体化列に完全一致があれば書き換えない。小文字正規名が実体化列に一意にあっても、
+  // 物理フィールドが同名を持ち得るなら書き換えない（実行時の完全一致＝物理側に任せる）。
+  // physicalMayHave は正規名の候補があるときだけ呼ぶ（物理だけの文で form 定義を取りに行かない）。
+  const resolveUnqualified = (requested: string): string | undefined => {
+    if (tables.some((table) => materializedColumns(table).includes(requested))) return requested;
+    const matches = tables.flatMap((table) => {
+      const resolved = resolveFromTable(table, requested);
+      return resolved === undefined ? [] : [resolved];
+    });
+    const unique = [...new Set(matches)];
+    if (unique.length !== 1) return undefined;
+    if (tables.some((table) => physicalMayHave(table, requested))) return requested;
+    return unique[0];
+  };
+  const resolveReference = (
+    requested: string,
+    tableAlias: string | null,
+    allowSelectAlias: boolean
+  ): string => {
+    if (allowSelectAlias && tableAlias === null) {
+      const alias = resolveProjectedName(requested, aliases);
+      if (alias !== undefined) return alias;
+    }
+    return tableAlias === null
+      ? (resolveUnqualified(requested) ?? requested)
+      : (resolveFromTable(tableByAlias.get(tableAlias), requested) ?? requested);
+  };
+  const resolveText = (requested: string, allowSelectAlias: boolean): string => {
+    const dot = requested.indexOf(".");
+    if (dot <= 0) return resolveReference(requested, null, allowSelectAlias);
+    const qualifier = requested.slice(0, dot);
+    const field = requested.slice(dot + 1);
+    const resolved = resolveReference(field, qualifier, false);
+    return resolved === field ? requested : `${qualifier}.${resolved}`;
+  };
+
+  for (const join of stmt.joins) {
+    if (join.type === "CROSS") continue;
+    join.on.left.field = resolveReference(join.on.left.field, join.on.left.tableAlias, false);
+    join.on.right.field = resolveReference(join.on.right.field, join.on.right.tableAlias, false);
+  }
+
+  const seen = new Set<object>();
+  const visit = (node: unknown, allowSelectAlias = false): void => {
+    if (node === null || typeof node !== "object") return;
+    if (seen.has(node as object)) return;
+    seen.add(node as object);
+    if (Array.isArray(node)) {
+      for (const child of node) visit(child, allowSelectAlias);
+      return;
+    }
+    const value = node as Record<string, unknown>;
+    if (node !== stmt && (value["type"] === "SELECT" || value["type"] === "UNION")) return;
+    if (value["type"] === "FIELD" && typeof value["field"] === "string") {
+      const tableAlias = typeof value["tableAlias"] === "string" ? value["tableAlias"] : null;
+      value["field"] = tableAlias === null
+        ? resolveText(value["field"], allowSelectAlias)
+        : resolveReference(value["field"], tableAlias, allowSelectAlias);
+    } else if (value["type"] === "FIELD_REF" && typeof value["field"] === "string") {
+      value["field"] = resolveText(value["field"], allowSelectAlias);
+    } else if (value["type"] === "AGG_GROUP_KEY" && typeof value["field"] === "string") {
+      const tableAlias = typeof value["tableAlias"] === "string" ? value["tableAlias"] : null;
+      value["field"] = resolveReference(value["field"], tableAlias, allowSelectAlias);
+    }
+    for (const child of Object.values(value)) visit(child, allowSelectAlias);
+  };
+
+  for (const column of stmt.columns) visit(column);
+  visit(stmt.where);
+  visit(stmt.having, true);
+  visit(stmt.grouping);
+  const grouping = normalizeGroupingSpec(stmt);
+  if (grouping.type === "PLAIN") {
+    for (const item of grouping.allItems) {
+      if (item.type === "FIELD_NAME") item.name = resolveText(item.name, true);
+      else visit(item);
+    }
+  }
+  for (const item of stmt.orderBy) {
+    if (item.key.type === "FIELD_NAME") item.key.name = resolveText(item.key.name, true);
+    else visit(item.key);
+  }
+  for (const column of stmt.columns) {
+    if (column.type !== "WINDOW_COL") continue;
+    for (const ref of column.partitionBy) {
+      ref.field = resolveReference(ref.field, ref.tableAlias, false);
+    }
+    for (const item of column.orderBy) {
+      if (item.key.type === "FIELD_NAME") item.key.name = resolveText(item.key.name, false);
+      else visit(item.key);
+    }
+  }
+}
+
+function bindSelectAliasesInHaving(stmt: SelectStatement): void {
+  const aliases = stmt.columns.flatMap((column) =>
+    "alias" in column && column.alias !== null ? [column.alias] : []
+  );
+  const visit = (node: unknown): void => {
+    if (node === null || typeof node !== "object") return;
+    if (Array.isArray(node)) { node.forEach(visit); return; }
+    const value = node as Record<string, unknown>;
+    // B181: 集計の引数は物理フィールドなので、別名への束縛対象にしない
+    // （SELECT x AS Amount … HAVING SUM(Amount) の Amount は物理フィールド）
+    if (value["type"] === "AGG_REF" || value["type"] === "AGG_ARITH") return;
+    if (
+      value["type"] === "FIELD"
+      && (value["tableAlias"] === null || value["tableAlias"] === undefined)
+      && typeof value["field"] === "string"
+    ) {
+      const resolved = resolveProjectedName(value["field"], aliases);
+      if (resolved !== undefined) value["field"] = resolved;
+    }
+    if (value["type"] === "SELECT" || value["type"] === "UNION") return;
+    Object.values(value).forEach(visit);
+  };
+  visit(stmt.having);
 }
 
 function collectB86Subqueries(stmt: SelectStatement): SelectStatement[] {
@@ -4972,6 +5191,7 @@ async function preflightB86QueryWithCte(
     await preflightB86QueryWithCte(query.right, client, cteCache, cacheContext, seen);
     return;
   }
+  await bindProjectedNamesForSelectWithSchemas(query, cteCache, client, cacheContext);
   await validateB86SelectFieldCodes(query, client, cteCache, cacheContext);
   for (const subquery of collectB86Subqueries(query)) {
     await preflightB86QueryWithCte(subquery, client, cteCache, cacheContext, seen);
@@ -5450,14 +5670,14 @@ async function loadAggregateSortKindResolver(
         const table = tables.find((candidate) => effectiveTableAlias(candidate) === ref.tableAlias);
         if (!table) return undefined;
         if (table.cteName !== null) {
-          return materializedTables?.get(table.cteName)?.columnMeta?.get(ref.field)?.semantics
+          return resolveMaterializedColumnMeta(materializedTables?.get(table.cteName), ref.field)?.semantics
             ?? syntheticSemantics("string");
         }
         info = fieldInfosByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));
       }
     } else if (stmt.joins.length === 0) {
       if (stmt.from.cteName !== null) {
-        return materializedTables?.get(stmt.from.cteName)?.columnMeta?.get(ref.field)?.semantics
+        return resolveMaterializedColumnMeta(materializedTables?.get(stmt.from.cteName), ref.field)?.semantics
           ?? syntheticSemantics("string");
       }
       info = fieldInfosByApp.get(stmt.from.appId)?.get(fieldCodeForTypeLookup(stmt.from, ref.field));
@@ -5465,8 +5685,8 @@ async function loadAggregateSortKindResolver(
       const matches = tables.flatMap((table): Array<ResolvedFieldSemantics | undefined> => {
         if (table.cteName !== null) {
           const materialized = materializedTables?.get(table.cteName);
-          return materialized?.columns.includes(ref.field)
-            ? [materialized.columnMeta?.get(ref.field)?.semantics ?? syntheticSemantics("string")]
+          return resolveMaterializedColumn(materialized, ref.field) !== undefined
+            ? [resolveMaterializedColumnMeta(materialized, ref.field)?.semantics ?? syntheticSemantics("string")]
             : [];
         }
         const candidate = fieldInfosByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));
@@ -5696,13 +5916,13 @@ async function inferSelectColumnMeta(
       }
       const table = tables.find((candidate) => effectiveTableAlias(candidate) === ref.tableAlias);
       if (!table) return undefined;
-      if (table.cteName !== null) return materializedTables?.get(table.cteName)?.columnMeta?.get(ref.field);
+      if (table.cteName !== null) return resolveMaterializedColumnMeta(materializedTables?.get(table.cteName), ref.field);
       const info = physicalInfos.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));
       return info ? materializedMetaFromFieldInfo(info, table.appId) : systemColumnMeta(ref.field);
     }
 
     if (stmt.joins.length === 0) {
-      if (stmt.from.cteName !== null) return materializedTables?.get(stmt.from.cteName)?.columnMeta?.get(ref.field);
+      if (stmt.from.cteName !== null) return resolveMaterializedColumnMeta(materializedTables?.get(stmt.from.cteName), ref.field);
       const info = physicalInfos.get(stmt.from.appId)?.get(fieldCodeForTypeLookup(stmt.from, ref.field));
       return info ? materializedMetaFromFieldInfo(info, stmt.from.appId) : systemColumnMeta(ref.field);
     }
@@ -5710,8 +5930,8 @@ async function inferSelectColumnMeta(
     const matches = tables.flatMap((table): Array<MaterializedColumnMeta | undefined> => {
       if (table.cteName !== null) {
         const materialized = materializedTables?.get(table.cteName);
-        if (!materialized?.columns.includes(ref.field)) return [];
-        return [materialized.columnMeta?.get(ref.field)];
+        if (resolveMaterializedColumn(materialized, ref.field) === undefined) return [];
+        return [resolveMaterializedColumnMeta(materialized, ref.field)];
       }
       const info = physicalInfos.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));
       const meta = info ? materializedMetaFromFieldInfo(info, table.appId) : systemColumnMeta(ref.field);
@@ -6400,7 +6620,7 @@ async function buildRecursiveFieldResolver(
     physical.set(table.appId, new Map(infos.map((info) => [info.code, info])));
   }));
   const resolveInTable = (table: TableRef, field: string): MaterializedColumnMeta | undefined => {
-    if (table.cteName !== null) return materializedTables.get(table.cteName)?.columnMeta?.get(field);
+    if (table.cteName !== null) return resolveMaterializedColumnMeta(materializedTables.get(table.cteName), field);
     const info = physical.get(table.appId)?.get(fieldCodeForTypeLookup(table, field));
     return info ? materializedMetaFromFieldInfo(info, table.appId) : systemColumnMeta(field);
   };
@@ -6670,7 +6890,7 @@ function tableMetaForJoinKey(
   field: string,
   cache: ReadonlyMap<string, MaterializedTable>
 ): MaterializedColumnMeta | undefined {
-  return table.cteName === null ? undefined : cache.get(table.cteName)?.columnMeta?.get(field);
+  return table.cteName === null ? undefined : resolveMaterializedColumnMeta(cache.get(table.cteName), field);
 }
 
 function recursiveJoinKey(value: string, semantics: ResolvedFieldSemantics): string {
@@ -7863,7 +8083,7 @@ async function tryFetchJoinRecordsBySourceKeys(
     : systemColumnMeta(joinField);
   let sourceMeta: MaterializedColumnMeta | undefined;
   if (sourceTable?.cteName !== null && sourceTable?.cteName !== undefined) {
-    sourceMeta = materializedTables?.get(sourceTable.cteName)?.columnMeta?.get(sourceField);
+    sourceMeta = resolveMaterializedColumnMeta(materializedTables?.get(sourceTable.cteName), sourceField);
   } else if (sourceTable) {
     const sourceInfo = (await getFieldsCached(sourceTable.appId, client, cacheContext))
       .find((info) => info.code === fieldCodeForTypeLookup(sourceTable, sourceField));
@@ -8153,19 +8373,19 @@ async function buildOrderSemanticsForSelect(
       }
       const table = tables.find((candidate) => effectiveTableAlias(candidate) === ref.tableAlias);
       if (!table) return undefined;
-      if (table.cteName !== null) return materializedTables?.get(table.cteName)?.columnMeta?.get(ref.field);
+      if (table.cteName !== null) return resolveMaterializedColumnMeta(materializedTables?.get(table.cteName), ref.field);
       const info = infosByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));
       return info ? materializedMetaFromFieldInfo(info, table.appId) : systemColumnMeta(ref.field);
     }
     if (stmt.joins.length === 0) {
-      if (stmt.from.cteName !== null) return materializedTables?.get(stmt.from.cteName)?.columnMeta?.get(ref.field);
+      if (stmt.from.cteName !== null) return resolveMaterializedColumnMeta(materializedTables?.get(stmt.from.cteName), ref.field);
       const info = infosByApp.get(stmt.from.appId)?.get(fieldCodeForTypeLookup(stmt.from, ref.field));
       return info ? materializedMetaFromFieldInfo(info, stmt.from.appId) : systemColumnMeta(ref.field);
     }
     const matches = tables.flatMap((table): MaterializedColumnMeta[] => {
       if (table.cteName !== null) {
         const materialized = materializedTables?.get(table.cteName);
-        const meta = materialized?.columns.includes(ref.field) ? materialized.columnMeta?.get(ref.field) : undefined;
+        const meta = resolveMaterializedColumnMeta(materialized, ref.field);
         return meta ? [meta] : [];
       }
       const info = infosByApp.get(table.appId)?.get(fieldCodeForTypeLookup(table, ref.field));
@@ -8206,7 +8426,9 @@ async function buildOrderSemanticsForSelect(
 
   const result = new Map<string, ResolvedFieldSemantics>();
   for (const name of names) {
-    const base = aliasSemantics.get(name) ?? resolveField(aggregateFieldRef(name))?.semantics;
+    const resolvedAlias = resolveProjectedName(name, aliasSemantics.keys());
+    const base = (resolvedAlias === undefined ? undefined : aliasSemantics.get(resolvedAlias))
+      ?? resolveField(aggregateFieldRef(name))?.semantics;
     if (!base) {
       const ref = aggregateFieldRef(name);
       if (ref.tableAlias === null && ambiguousFields.has(ref.field)) {
@@ -9401,6 +9623,32 @@ async function resolveUpdateFromMatchedRecords(
   tempTables?: Map<string, MaterializedTable>,
   snapshotFields?: readonly string[]
 ): Promise<Array<{ target: KintoneRecord; source: ProcessRow }>> {
+  if (from.cteName !== null) {
+    const materialized = tempTables?.get(from.cteName);
+    // B181: UPDATE … FROM #t の source 列は元表記でも小文字でも正規名へ束縛する
+    const resolveSource = (requested: string): string =>
+      resolveProjectedName(requested, materialized?.columns ?? []) ?? requested;
+    from.joinKeyField = resolveSource(from.joinKeyField);
+    for (const assignment of stmt.assignments) {
+      if (assignment.value.type === "SOURCE_FIELD" && assignment.value.alias === from.alias) {
+        assignment.value.field = resolveSource(assignment.value.field);
+      }
+    }
+    const visitSourceChecks = (node: unknown): void => {
+      if (node === null || typeof node !== "object") return;
+      if (Array.isArray(node)) { node.forEach(visitSourceChecks); return; }
+      const value = node as Record<string, unknown>;
+      if (
+        value["type"] === "FIELD"
+        && value["tableAlias"] === from.alias
+        && typeof value["field"] === "string"
+      ) {
+        value["field"] = resolveSource(value["field"]);
+      }
+      Object.values(value).forEach(visitSourceChecks);
+    };
+    visitSourceChecks(stmt.checkGroups);
+  }
   const joinKind = await resolveUpdateFromTargetJoinKind(stmt, from, client, cacheContext);
   const checkScope = await resolveUpdateFromCheckScope(stmt, from, client, cacheContext, tempTables);
   const sourceFields = [...new Set(stmt.assignments
@@ -9519,7 +9767,7 @@ async function loadUpdateFromSourceRows(
     const table = tempTables?.get(from.cteName);
     if (!table) throw new Error(`ArgumentError: temp table ${from.cteName} is not available.`);
     for (const field of requiredSourceFields) {
-      if (!table.columns.includes(field)) {
+      if (resolveMaterializedColumn(table, field) === undefined) {
         throw new Error(`ArgumentError: UPDATE ... FROM source column ${field} does not exist.`);
       }
     }
@@ -12259,6 +12507,7 @@ async function buildExplainWhereAnalysis(
     }
     if (typed["type"] === "SELECT") {
       const select = node as SelectStatement;
+      await bindProjectedNamesForSelectWithSchemas(select, explainRelations, tracedClient, cacheContext);
       analyzeStaticSelectRows(select);
       for (const column of select.columns) {
         if (column.type === "SCALAR_SUBQUERY_COL") await preflightExplainRelations(column.query);
@@ -12362,7 +12611,7 @@ async function buildExplainWhereAnalysis(
           .find((table) => effectiveTableAlias(table) === sourceAlias);
         let targetMeta: MaterializedColumnMeta | undefined;
         if (join.table.cteName !== null) {
-          targetMeta = explainRelations.get(join.table.cteName)?.columnMeta?.get(joinField);
+          targetMeta = resolveMaterializedColumnMeta(explainRelations.get(join.table.cteName), joinField);
         } else {
           const targetInfo = (await getFieldsCached(join.table.appId, tracedClient, cacheContext))
             .find((info) => info.code === fieldCodeForTypeLookup(join.table, joinField));
@@ -12376,7 +12625,7 @@ async function buildExplainWhereAnalysis(
         let hasEmptyValue: boolean | undefined;
         if (sourceTable?.cteName !== null && sourceTable?.cteName !== undefined) {
           const relation = explainRelations.get(sourceTable.cteName);
-          sourceMeta = relation?.columnMeta?.get(sourceField);
+          sourceMeta = resolveMaterializedColumnMeta(relation, sourceField);
           if (staticExplainRelations.has(sourceTable.cteName) && relation) {
             sourceRowCount = relation.rows.length;
             values = relation.rows.map((row) => toScalarText(row[sourceField]));

@@ -79,6 +79,7 @@ import {
 } from "./groupingRowMeta";
 import { containsAggregate } from "../core/groupingValidation";
 import { stringFunctionSemanticKind } from "../core/expressionSemantics";
+import { resolveProjectedName } from "../core/projectedNameResolution";
 
 export { ProcessRow };
 
@@ -1318,7 +1319,10 @@ export function buildOrderByAliasEvaluator(
         break;
     }
   }
-  return (name, row) => evaluators.get(name)?.(row);
+  return (name, row) => {
+    const resolved = resolveProjectedName(name, evaluators.keys());
+    return resolved === undefined ? undefined : evaluators.get(resolved)?.(row);
+  };
 }
 
 // ============================================================

@@ -288,3 +288,33 @@ test("存在しない ORDER BY key は ORDER_KEY_UNRESOLVED のまま fail-close
     { cacheContext: "b59-unresolved" }
   )).rejects.toThrow(/ORDER_KEY_UNRESOLVED/);
 });
+
+test.each([
+  ["ASC", ["9", "10", "99", "100", "9050000", "20700000"]],
+  ["DESC", ["20700000", "9050000", "100", "99", "10", "9"]],
+] as const)("B181: 元表記の SELECT alias を ORDER BY %s して数値順に並べる", async (direction, expected) => {
+  const rows = ["9", "10", "99", "100", "9050000", "20700000"]
+    .map((amount, index) => record({ $id: String(index + 1), amount }));
+  for (const orderName of ["Amount", "amount"]) {
+    const result = await execute(
+      `SELECT amount AS Amount FROM APP100 ORDER BY ${orderName} ${direction}`,
+      clientFor({ 100: rows }, { amount: "NUMBER" }),
+      { cacheContext: `b181-${direction}-${orderName}` }
+    ) as SelectResult;
+    expect(result.columns).toEqual(["amount"]);
+    expect(result.rows.map((row) => row.amount)).toEqual(expected);
+  }
+});
+
+test("B181: 元表記の ORDER BY でも同名物理列より SELECT alias を優先する", async () => {
+  const rows = [
+    record({ $id: "1", Amount: "1", amount: "100" }),
+    record({ $id: "2", Amount: "2", amount: "9" }),
+  ];
+  const result = await execute(
+    "SELECT $id AS id, amount AS Amount FROM APP100 ORDER BY Amount ASC",
+    clientFor({ 100: rows }, { Amount: "NUMBER", amount: "NUMBER" }),
+    { cacheContext: "b181-alias-before-physical" }
+  ) as SelectResult;
+  expect(result.rows.map((row) => row.id)).toEqual(["2", "1"]);
+});

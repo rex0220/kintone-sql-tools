@@ -37,6 +37,7 @@ import type {
   PlainGroupByResolution,
   PlainGroupByResolutionPlan,
 } from "../core/optimization/plainGroupByPlan";
+import { resolveProjectedName } from "../core/projectedNameResolution";
 
 // ------------------------------------------------------------
 // kintone GET パラメータ
@@ -501,7 +502,10 @@ function collectRequiredFieldsByTable(
     }
 
     // ORDER BY / HAVING の FIELD_NAME は列 alias / 集計合成名を指せるため除外
-    if ((phase === "orderBy" || phase === "having" || phase === "groupBy") && selectAliases.has(rawName)) {
+    if (
+      (phase === "orderBy" || phase === "having" || phase === "groupBy")
+      && resolveProjectedName(rawName, selectAliases) !== undefined
+    ) {
       return;
     }
     if ((phase === "orderBy" || phase === "having" || phase === "groupBy") && isAggregateSyntheticName(rawName)) {

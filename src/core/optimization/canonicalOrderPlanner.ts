@@ -5,6 +5,7 @@ import type {
   PredicateCapability,
   PredicateCapabilityReason,
 } from "./whereCapability";
+import { resolveProjectedName } from "../projectedNameResolution";
 
 export type CanonicalOrderPlanKind =
   | "CANONICAL_REST_TOP_N"
@@ -51,11 +52,16 @@ function fieldSemantics(
   item: OrderByItem,
   semantics: ReadonlyMap<string, ResolvedFieldSemantics>
 ): ResolvedFieldSemantics | undefined {
-  return item.key.type === "FIELD_NAME" ? semantics.get(item.key.name) : undefined;
+  if (item.key.type !== "FIELD_NAME") return undefined;
+  const resolved = resolveProjectedName(item.key.name, semantics.keys());
+  return resolved === undefined ? undefined : semantics.get(resolved);
 }
 
 function hasSelectOutputAlias(stmt: SelectStatement, name: string): boolean {
-  return stmt.columns.some((column) => "alias" in column && column.alias === name);
+  const aliases = stmt.columns.flatMap((column) =>
+    "alias" in column && column.alias !== null ? [column.alias] : []
+  );
+  return resolveProjectedName(name, aliases) !== undefined;
 }
 
 /**
