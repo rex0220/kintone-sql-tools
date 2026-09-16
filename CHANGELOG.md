@@ -3,6 +3,40 @@
 リリースごとの変更点。**本ファイルは v3.45.0 以降だけを保持する。**
 それ以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) の各タグを参照。
 
+## v3.78.0（2026-09-16）
+
+### 修正（B182: `COALESCE` / `ISNULL` / `NULLIF` で包んだ集計値が静かに間違う）**※ 結果が変わる修正（エラーも警告も出ていなかった）**
+
+- 影響していた形（v3.77.0 以前）:
+  - `COALESCE(SUM(x), 0) + 0` / `* 1` / `* 100.0 / 2` のように**関数で包んだ集計を算術に使う**と、集計値が未実体化の空文字として
+    評価され結果が 0 になっていました（直接原因: 関数から始まる算術が `ARITH_COL` に分類され、集計の実体化対象から漏れていた）。
+  - `COALESCE(SUM(x), 0) AS 合計` の列を `ORDER BY 合計` / `RANK() OVER (ORDER BY 合計)` / 累計の `ORDER BY` に使うと、
+    列が文字列型と推定され**コードポイント順**（`9,050,000` が `20,700,000` より後）になっていました。CTE・一時テーブル越しでも同じ。
+- 修正後: `COALESCE` / `ISNULL` / `NULLIF` / `GREATEST` / `LEAST` は**全引数が数値意味型**（NUMBER・数値 CALC・数値集計・数値リテラル・
+  算術式・`CAST(… AS NUMBER)`）なら number として並べ替え・比較され、算術では集計値そのものを使います。判定は共通 helper
+  （`expressionSemantics`）に集約し、同一 SELECT の `ORDER BY`・ウィンドウの `ORDER BY`・CTE / 一時テーブルの列メタ・HAVING / WHERE の比較で同じ規則です。
+- 元から正しく変わらない形: `SUM(x)` を直接使う算術・`ORDER BY`、推奨形 `CASE WHEN SUM(x) = '' THEN 0 ELSE SUM(x) END`・
+  `SUM(COALESCE(x, 0))`・`CAST(COALESCE(SUM(x), 0) AS NUMBER)`。`COALESCE(メモ, '－')` / `COALESCE(SUM(x), 'none')` のように
+  文字列が混ざる形は従来どおり string。結果列名・行キー・`warnings`・EXPLAIN の行は不変（`EXPLAIN` の `reason` 行は GROUP BY のみの文で
+  従来どおり「GROUP BY あり」、集計を包む算術で「集計関数あり」）。
+
+### 修正（B181: SELECT 別名の小文字正規化と参照解決の非対称）**※ 純加法（従来エラーだった形が通る）**
+
+- 英字を含む別名（`AS Amount` / `AS 顧客No` / `AS ABC区分`）は結果列名で小文字へ正規化されますが、次の段（CTE・一時テーブル）や同じ文の
+  `ORDER BY` / `HAVING` から**元の表記で参照すると解決できず**、`ksql_validate` も `EXPLAIN` も通って実行時にだけ
+  `unknown field code(s)` になっていました（物理フィールドと同名の別名 `c.顧客No AS 顧客No` で列名が `顧客no` に変わる形が最も気づきにくい）。
+- 修正後: 別名・実体化列への参照は**完全一致 → 小文字正規名**の順で解決され、元の表記でも小文字でも通ります。結果列名の小文字化は不変。
+  物理 APP のフィールドコードは kintone の定義どおり区別したままで（`顧客no` は従来どおり unknown）、物理アプリと CTE を結合した文で
+  未修飾名が物理フィールドと完全一致するときは物理が優先されます（言語リファレンス §1・§8）。EXPLAIN も実行と同じ束縛を通ります。
+
+### 機能追加（B183: MCP instructions に Writing rules 8 行）**※ 純加法・エンジン不変**
+
+- MCP サーバーの `instructions`（initialize 応答）に、実測で踏んだ失敗から作った Writing rules 8 行を追加しました
+  （フィールドコードの確認・INNER JOIN の向きと結合キー絞り込み・WHERE の日付条件・空セルと除数ガード・集計とウィンドウの段分け・
+  別名の小文字化・依頼された列だけ・validate → explain）。各行は言語リファレンスの該当節で裏づけ、規則どおりの SQL が実行できることをテストで固定。
+- instructions は 5,722 → 7,369 文字（ツールスキーマ込みの固定コンテキストで +4.5%）。ツールの description・スキーマ・resources は不変。
+  全文の正本は `src/mcp/index.ts` の `KSQL_MCP_INSTRUCTIONS`。
+
 ## v3.77.0（2026-09-04）
 
 ### 機能追加（B179: CSV export — 名前付きシンク・engine 層 serializer・`/flow` 公開 API・CLI `--export-csv`）**※ 純加法・既定動作は不変**
