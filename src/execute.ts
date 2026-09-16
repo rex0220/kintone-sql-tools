@@ -3603,8 +3603,14 @@ async function buildWhereFieldSemanticsResolver(
       return fromPhysical(stmt.from, field.field, true);
     }
     const matches = tables.flatMap((table): ResolvedFieldSemantics[] => {
+      const materialized = table.cteName !== null
+        ? materializedTables?.get(table.cteName)
+        : undefined;
       const semantics = table.cteName !== null
-        ? resolveMaterializedColumnMeta(materializedTables?.get(table.cteName), field.field)?.semantics
+        ? resolveMaterializedColumn(materialized, field.field) !== undefined
+          ? resolveMaterializedColumnMeta(materialized, field.field)?.semantics
+            ?? syntheticSemantics("string")
+          : undefined
         : fromPhysical(table, field.field, true);
       return semantics ? [semantics] : [];
     });
@@ -12607,7 +12613,7 @@ async function buildExplainWhereAnalysis(
         physicalApps.forEach((appId) => fieldApps.add(appId));
       }
       const { resolver, rewrites } = await normalizeSelectChoiceEquality(
-        select, tracedClient, cacheContext
+        select, tracedClient, cacheContext, explainRelations
       );
       if (rewrites.length > 0) explainChoiceEqualityRewrites.set(select, rewrites);
       const capability = classifyWhereCapability(select.where, resolver);

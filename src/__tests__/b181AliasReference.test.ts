@@ -226,11 +226,9 @@ test("B181: EXPLAIN は実行と同じ実体化 alias を解決する", async ()
     client()
   )).resolves.toMatchObject({ type: "SELECT" });
   // 物理アプリ混在の未修飾参照も EXPLAIN と実行で同じ束縛（物理定義を見て CTE 列へ寄せる）。
-  // 混在 JOIN の WHERE に未修飾の CTE 列を書くと EXPLAIN は小文字で書いても WHERE_FIELD_UNRESOLVED になる
-  // （v3.77.0 以前からの EXPLAIN 側の制限・B181 の範囲外）ため、ここでは WHERE を置かない
   await expect(execute(
     "EXPLAIN WITH t AS (SELECT 売上 AS Amount, 顧客No AS k FROM APP100) " +
-      "SELECT Amount AS pa FROM t INNER JOIN APP100 AS q ON t.k = q.顧客No ORDER BY pa",
+      "SELECT Amount AS pa FROM t INNER JOIN APP100 AS q ON t.k = q.顧客No WHERE amount > 9 ORDER BY pa",
     mixedClient()
   )).resolves.toMatchObject({ type: "SELECT" });
 });
