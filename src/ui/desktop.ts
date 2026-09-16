@@ -26,7 +26,7 @@ import type {
   Statement,
 } from "../core";
 import { createKintoneClient } from "./kintoneClient";
-import { formatValidateIntoStats, renderBatchResult, renderResult, renderError, renderLoading } from "./renderResult";
+import { collectPrecedingBatchWarnings, formatValidateIntoStats, renderBatchResult, renderResult, renderError, renderLoading } from "./renderResult";
 import type { DisplayOptions } from "./renderResult";
 import { createBrowserImportSource } from "./importFileSource";
 import type { BrowserImportSource } from "./importFileSource";
@@ -2028,6 +2028,7 @@ interface BatchRunOutcome {
   result: SelectResult | DmlValidationResult | null;
   note: string | null;
   statementSummary: string[];
+  precedingWarnings: string[];
   /** 確認ダイアログでキャンセルされた（履歴保存をスキップし note を情報表示する） */
   cancelled: boolean;
 }
@@ -2121,6 +2122,7 @@ async function runBatchSql(
       result: await batchPlansToSelectResult(sql, client, options),
       note: null,
       statementSummary: [],
+      precedingWarnings: [],
       cancelled: false,
     };
   }
@@ -2140,6 +2142,7 @@ async function runBatchSql(
         result: null,
         note: `キャンセルしました（文 [${s.index + 1}/${analysis.statementCount}] の実行前確認。バッチは実行されていません）`,
         statementSummary: [],
+        precedingWarnings: [],
         cancelled: true,
       };
     }
@@ -2178,7 +2181,7 @@ async function runBatchSql(
       const note = failed.index === 0
         ? `キャンセルしました（文 ${pos} で中断。実行された文はありません）`
         : `キャンセルしました（文 ${pos} で中断。[${failed.index}] までの実行結果は反映済みです）`;
-      return { result: null, note, statementSummary, cancelled: true };
+      return { result: null, note, statementSummary, precedingWarnings: [], cancelled: true };
     }
     throw new Error(
       failed?.error
@@ -2201,6 +2204,7 @@ async function runBatchSql(
       result: lastResultSet.result,
       note: statementSummary.some((line) => line.startsWith("[")) ? `バッチ ${batch.statementCount} 文を実行しました。` : null,
       statementSummary,
+      precedingWarnings: collectPrecedingBatchWarnings(batch, lastResultSet.index),
       cancelled: false,
     };
   }
@@ -2208,6 +2212,7 @@ async function runBatchSql(
     result: null,
     note: `バッチ ${batch.statementCount} 文を実行しました（結果セットなし）。`,
     statementSummary,
+    precedingWarnings: collectPrecedingBatchWarnings(batch, null),
     cancelled: false,
   };
 }
@@ -2264,7 +2269,7 @@ async function runSql(
     // 複文バッチ: 最終結果のみ表示（仕様 §8.4）。DML を含むバッチは
     // 文ごとの確認ダイアログ付きで実行（v1.9.0）
     if (isMultiStatementSql(sql)) {
-      const { result: batchResult, note, statementSummary, cancelled } = await runBatchSql(sql, client, {
+      const { result: batchResult, note, statementSummary, precedingWarnings, cancelled } = await runBatchSql(sql, client, {
         maxRecords: runtimeFetch.maxRecords,
         onLimitReached: runtimeFetch.onLimitReached,
         tempTableMaxRows: runtimeFetch.tempTableMaxRows,
@@ -2277,11 +2282,11 @@ async function runSql(
       const infoParts = [note, ...statementSummary].filter((s): s is string => !!s);
       if (batchResult) {
         lastResult = batchResult;
-        resultArea.innerHTML = renderBatchResult(batchResult, infoParts, resolvedOptions);
+        resultArea.innerHTML = renderBatchResult(batchResult, infoParts, resolvedOptions, precedingWarnings);
         bindResultTableFeatures(resultArea);
         return batchResult;
       }
-      resultArea.innerHTML = renderBatchResult(null, infoParts) || `<div class="ksql-info"></div>`;
+      resultArea.innerHTML = renderBatchResult(null, infoParts, {}, precedingWarnings) || `<div class="ksql-info"></div>`;
       return null;
     }
 

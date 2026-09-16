@@ -2,7 +2,7 @@
 // renderResult — ExecuteResult を HTML 文字列に変換する
 // ============================================================
 
-import type { ApplyDiagnostic, ApplyWriteFailureDetail, ExecuteResult, SelectResult, UpsertResult, ProcessRow } from "../core";
+import type { ApplyDiagnostic, ApplyWriteFailureDetail, BatchExecuteResult, ExecuteResult, SelectResult, UpsertResult, ProcessRow } from "../core";
 import { buildApplyConfirmMessage } from "./applyConfirm";
 
 // ============================================================
@@ -79,10 +79,49 @@ export function renderResult(result: ExecuteResult, opts: DisplayOptions = {}): 
 export function renderBatchResult(
   result: ExecuteResult | null,
   infoLines: readonly string[],
-  opts: DisplayOptions = {}
+  opts: DisplayOptions = {},
+  precedingWarnings: readonly string[] = []
 ): string {
   const infoHtml = infoLines.map(renderInfo).join("");
-  return `${infoHtml}${result ? renderResult(result, opts) : ""}`;
+  const warningHtml = precedingWarnings
+    .map((warning) => `<div class="ksql-warn">${escHtml(warning)}</div>`)
+    .join("");
+  return `${infoHtml}${warningHtml}${result ? renderResult(result, opts) : ""}`;
+}
+
+/** 表示対象外の文警告と、文へ帰属しないバッチ警告を表示順に整形する。 */
+export function collectPrecedingBatchWarnings(
+  batch: BatchExecuteResult,
+  displayedStatementIndex: number | null
+): string[] {
+  const warnings: string[] = [];
+  const alreadyDisplayed = new Set<string>();
+
+  for (const statement of batch.statements) {
+    for (const warning of statement.warnings ?? []) {
+      warnings.push(`[${statement.index + 1}] ${warning}`);
+      alreadyDisplayed.add(warning);
+    }
+
+    if (statement.index !== displayedStatementIndex && statement.result?.type === "SELECT") {
+      for (const warning of statement.result.warnings ?? []) {
+        warnings.push(`[${statement.index + 1}] ${warning}`);
+        alreadyDisplayed.add(warning);
+      }
+    }
+  }
+
+  const displayedStatement = displayedStatementIndex === null
+    ? undefined
+    : batch.statements.find((statement) => statement.index === displayedStatementIndex);
+  if (displayedStatement?.result?.type === "SELECT") {
+    for (const warning of displayedStatement.result.warnings ?? []) alreadyDisplayed.add(warning);
+  }
+
+  for (const warning of batch.warnings ?? []) {
+    if (!alreadyDisplayed.has(warning)) warnings.push(warning);
+  }
+  return warnings;
 }
 
 /** VALIDATE INTO は結果表を表示せず、実体化した統計を情報行として表示する。 */
