@@ -199,8 +199,10 @@ function keyDependencies(key: OrderByKey): FieldRef[] {
  */
 export function validateGroupingStatic(stmt: SelectStatement): void {
   const normalized = normalizeGroupingSpec(stmt);
+  // B191: 式の中のウィンドウ（hiddenWindows）にある GROUPING() も出力列と同じく収集・束縛する
+  const projectedColumns = [...stmt.columns, ...(stmt.hiddenWindows ?? [])];
   const groupingRefs: GroupingRef[] = [];
-  for (const column of stmt.columns) {
+  for (const column of projectedColumns) {
     collectGroupingRefs(column, groupingRefs);
   }
   collectGroupingRefs(stmt.having, groupingRefs);
@@ -208,7 +210,7 @@ export function validateGroupingStatic(stmt: SelectStatement): void {
   const forbiddenGroupingRefs: GroupingRef[] = [];
   collectGroupingRefs(stmt.where, forbiddenGroupingRefs);
   collectGroupingRefs(stmt.joins, forbiddenGroupingRefs);
-  collectAggregateArgumentGroupingRefs(stmt.columns, forbiddenGroupingRefs);
+  collectAggregateArgumentGroupingRefs(projectedColumns, forbiddenGroupingRefs);
   collectAggregateArgumentGroupingRefs(stmt.having, forbiddenGroupingRefs);
   if (forbiddenGroupingRefs.length > 0) {
     throw new Error(
@@ -250,7 +252,7 @@ export function validateGroupingPlanning(
   validateGroupingStatic(stmt);
   const normalized = normalizeGroupingSpec(stmt);
   const groupingRefs: GroupingRef[] = [];
-  for (const column of stmt.columns) {
+  for (const column of [...stmt.columns, ...(stmt.hiddenWindows ?? [])]) {
     collectGroupingRefs(column, groupingRefs);
   }
   collectGroupingRefs(stmt.having, groupingRefs);
