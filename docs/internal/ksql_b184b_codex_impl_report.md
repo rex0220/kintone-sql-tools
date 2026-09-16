@@ -228,6 +228,10 @@ codex 版をそのまま採用（修正なし）。設計は依頼どおり「�
 | EXPLAIN | `complete input reason: GROUP_BY, LOCAL_ORDER, WINDOW_ORDER, AGGREGATE_WINDOW, AGGREGATE`・`fields: 会社名, 売上`（新しい行なし） |
 | `WHERE` / `HAVING` の中のウィンドウ | 拒否（`WHERE` は「スカラー値式に集約関数は使用できません」、`HAVING` は「集計関数の引数内に集計関数は使用できません」＝B129 より前段の既存診断で止まる。いずれも実行されない） |
 
+### 2.1 プラグイン画面での目視（v3.82.0 のプラグイン・user・2026-09-16）
+
+`SELECT 会社名, SUM(売上) AS 売上合計, RANK() OVER (ORDER BY SUM(売上) DESC) AS 順位, ROUND(SUM(売上) * 100.0 / SUM(SUM(売上)) OVER (), 1) AS 構成比 FROM APP4149 GROUP BY 会社名 ORDER BY 売上合計 DESC, 会社名` を kintone のプラグイン実行画面で実行し、10 行（サイボウズ商事 順位 1・構成比 25.3、同額 0 円の 2 社が順位 9）・警告なしをスクリーンショットで確認。プラグイン同梱エンジンでも A（集計と同じ SELECT のウィンドウ）と B（式内ウィンドウ）が同じ結果になる。
+
 ### 3. 注記
 
 - 同じウィンドウ式の畳み込みは「別名を除いた正規化 AST の `JSON.stringify` 一致」。第 3 回の 1 段版では `SUM(SUM(売上)) OVER ()` が 5 か所あるが 1 回評価

@@ -95,7 +95,7 @@ codex 版をそのまま採用（修正なし）。差分は `src/ui/renderResul
 
 - `npm run build`（プラグイン含む full build）で `prod/js/desktop.js` を再生成し、新しい配線がバンドルに入っていることを確認（Claude 実行）
 - `npm test`（Claude 実行・最終）: 308 suites / 6,604 tests passed、サブプロセス 2 suites / 26 passed、snapshots 27、`docs:check` 通過
-- kintone 上のプラグイン画面での目視（一時テーブルバッチで `[1] 累計 は既定フレーム（RANGE）…` が最終結果の上に出ること）は、v3.82.0 のプラグイン zip を入れ替えたあとに user が確認する
+- kintone 上のプラグイン画面での目視: **v3.82.0 のプラグインで user が確認済み（2026-09-16）**。`CREATE TEMP TABLE #t AS SELECT 会社名, 売上, SUM(売上) OVER (ORDER BY 売上) AS 累計 FROM APP4149 WHERE 売上 > 6000000; SELECT * FROM #t ORDER BY 売上` で、6 行の結果表の上に `[1] 累計 は既定フレーム（RANGE）で評価されます。…` が 1 行出た（スクリーンショットで確認）
 
 ### 3. 結果
 
