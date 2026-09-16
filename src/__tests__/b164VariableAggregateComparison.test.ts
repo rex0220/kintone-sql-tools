@@ -6,7 +6,6 @@ import {
   type KintoneClient,
   type SelectResult,
 } from "../execute";
-import { UNRESOLVED_AGGREGATE_COMPARISON_WARNING } from "../engine/process";
 
 function record(values: Record<string, string>): KintoneRecord {
   return Object.fromEntries(Object.entries(values).map(([code, value]) => [code, { value }]));
@@ -144,15 +143,14 @@ describe("B164 comparison aggregate references", () => {
     expect(result.warnings).toEqual([]);
   });
 
-  test("HAVING 非掲出は現状 0 行のまま新診断を返す", async () => {
+  test("HAVING 非掲出も集計値を実体化して警告なしで評価する", async () => {
     const result = await batchSelect(
       `DECLARE @target='O''Reilly'; SELECT 区分, COUNT(*) AS 件数 FROM APP164 GROUP BY 区分 ` +
         `HAVING SUM(${variableArg})=4`,
       "b164-unlisted-having"
     );
-    expect(result.rows).toEqual([]);
-    expect(result.warnings).toEqual([UNRESOLVED_AGGREGATE_COMPARISON_WARNING]);
-    expect(result.warnings?.join(" ")).not.toMatch(/aggregateRef|synthetic|lookup|key/i);
+    expect(result.rows).toEqual([{ 区分: "A", 件数: "3" }]);
+    expect(result.warnings).toEqual([]);
   });
 
   test.each([
@@ -176,12 +174,12 @@ describe("B164 comparison aggregate references", () => {
       `SELECT (SELECT 区分 FROM APP164 GROUP BY 区分 ` +
         `HAVING SUM(${variableArg})=4 OR 区分='A') AS 内側 FROM APP164 LIMIT 1`,
     ],
-  ])("サブクエリ内 HAVING 非掲出の警告を外側へ併合する: %s", async (_kind, sql) => {
+  ])("サブクエリ内 HAVING 非掲出も実体化して警告を出さない: %s", async (_kind, sql) => {
     const result = await batchSelect(
       `DECLARE @target='missing'; ${sql}`,
       `b164-subquery-warning-${_kind}`
     );
-    expect(result.warnings).toEqual([UNRESOLVED_AGGREGATE_COMPARISON_WARNING]);
+    expect(result.warnings).toEqual([]);
   });
 
   test("ORDER BY alias・window・UNION 各枝を回帰させない", async () => {

@@ -3,7 +3,6 @@ import { createServer, type Server } from "node:http";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { UNRESOLVED_AGGREGATE_COMPARISON_WARNING } from "../../engine/process";
 
 jest.setTimeout(30_000);
 
@@ -130,13 +129,14 @@ test.each(["table", "csv", "markdown"] as const)(
   }
 );
 
-test("HAVING の未掲載集計も既存の警告文を stderr に出す", async () => {
+test("HAVING の未掲載集計は評価され、stderr に未解決警告を出さない", async () => {
   const result = await runCli([
     "--format", "table",
     "-e", "SELECT 区分, COUNT(*) AS 件数 FROM APP100 GROUP BY 区分 HAVING SUM(売上) > 0",
   ]);
   expect(result.code).toBe(0);
-  expect(warningLines(result.stderr)).toEqual([`warning=${UNRESOLVED_AGGREGATE_COMPARISON_WARNING}`]);
+  expect(warningLines(result.stderr)).toEqual([]);
+  expect(result.stdout).toContain("A");
 });
 
 test("json は stderr に警告を複製せず warnings 配列を維持する", async () => {

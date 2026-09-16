@@ -139,7 +139,7 @@ test("B65-A03: B56 非数値は fail-closed、完全入力 error は両 reason �
   );
 });
 
-test("B65-A04: HAVING は全 set 縦結合後に各行へ作用し未選択の直接集計は追加計算しない", async () => {
+test("B65-A04: HAVING は全 set 縦結合後に各行へ作用し未選択の直接集計も評価する", async () => {
   const result = await execute(
     "SELECT 地域, GROUPING(地域) AS g, SUM(金額) AS total " +
     "FROM APP1 WHERE 地域!='除外' GROUP BY ROLLUP(地域) HAVING total >= 10 " +
@@ -158,7 +158,13 @@ test("B65-A04: HAVING は全 set 縦結合後に各行へ作用し未選択の�
     client(aggregateRows, { 金額: "NUMBER" }),
     { cacheContext: "b65-a04-direct" }
   ) as SelectResult;
-  expect(direct.rows).toEqual([]);
+  expect(direct.rows).toEqual([
+    { 地域: "東", g: "0", n: "2" },
+    { 地域: "西", g: "0", n: "2" },
+    { 地域: "除外", g: "0", n: "1" },
+    { 地域: "", g: "1", n: "5" },
+  ]);
+  expect(direct.warnings).toEqual([]);
 });
 
 test("B65-A05/H06: HAVING GROUPING は B64 条件付き集計・B56 統計の set 結果と併用する", async () => {

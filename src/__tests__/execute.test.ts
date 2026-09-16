@@ -1996,12 +1996,13 @@ test.each([
   expect(result.rows).toEqual([{ kind: "A", med: "2" }]);
 });
 
-test("B56: SELECT にない HAVING 直接統計集約は追加計算しない", async () => {
+test("B56: SELECT にない HAVING 直接統計集約も追加計算する", async () => {
   const result = await execute(
     "SELECT kind, COUNT(*) AS count FROM APP100 GROUP BY kind HAVING MEDIAN(金額) > 1",
     makeClient({ records: [makeRecord({ $id: "1", kind: "A", 金額: "3" })] })
   ) as SelectResult;
-  expect(result.rows).toEqual([]);
+  expect(result.rows).toEqual([{ kind: "A", count: "1" }]);
+  expect(result.warnings).toEqual([]);
 });
 
 test("B27: $id canonical REST top-N は B30 の完全入力要求を免除する", async () => {
