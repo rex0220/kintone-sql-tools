@@ -92,6 +92,16 @@ kSQL is a SQL-like dialect for kintone, not generic SQL. Supports cataloged-fami
 
 Key rules: LIKE/NOT LIKE uses JavaScript semantics; JOIN ON allows one equality; derived tables are unsupported (use WITH/temp tables); empty numeric cells become 0 in arithmetic. APPLY supports validation, EXPLAIN, and VALIDATE ONLY; APPLY mutation is disabled in MCP.
 
+Writing rules (learned from real failures):
+- Check field codes with ksql_describe_app first. "コピー元: YES" identifies lookup copy targets.
+- INNER JOIN: put the side you filter with WHERE (or the smaller side) in FROM; the join-key prefilter flows only FROM -> JOIN target and applies only to INNER JOIN. With LEFT/RIGHT JOIN, materialize the filtered side into a temp table first.
+- Date conditions: use relative-date functions or literal half-open ranges in WHERE; never wrap the column (DATE_FORMAT/YEAR) in WHERE. Relative-date functions are WHERE-only; use CURRENT_DATE() in SELECT.
+- Empty cells are '' (there is no NULL). Zero-fill with CASE WHEN x = '' THEN 0 ELSE x END and guard a denominator with CASE WHEN total = '' OR total = 0 (LEFT JOIN misses and empty aggregates yield ''). COALESCE/ISNULL keep numeric semantics only when every argument is numeric.
+- Aggregates and window functions cannot share a SELECT, and a window result cannot be used in an expression of the same SELECT: split stages with WITH or temp tables. Running totals: ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW plus a tie-break on the key.
+- Column aliases are lowercased in result names while physical field codes keep their case; later stages may reference an alias by either spelling. Do not alias a physical field to its own name when its original spelling must stay the output name.
+- Output only the requested columns; do not add ORDER BY, LIMIT, or filters that were not asked for. Rank with RANK() unless told otherwise.
+- After writing: ksql_validate, then ksql_explain; report the fetch summary and reason lines. State assumptions as assumptions.
+
 Use ksql_validate before execution. Before DML, use ksql_query VALIDATE ONLY and ksql_app_metadata, then ksql_mutate. Before first use of a statement form, verify it in ksql_docs; never invent syntax. Read ksql://language-reference or ksql://recipes; if unavailable, call ksql_docs without arguments, then only needed sections. Never probe ksql_validate to discover functions or syntax.
 
 ${STATEMENT_SYNTAX_PARAGRAPH}
