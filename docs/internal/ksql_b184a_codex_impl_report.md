@@ -218,3 +218,11 @@ codex 版のエンジン変更はそのまま採用（修正なし）。codex �
 ### 4. 結果
 
 - `npm test`（Claude 実行・テスト書き換え後の最終）: 306 suites / 6,584 tests passed、サブプロセス 2 suites / 26 passed、snapshots 27、`docs:check` 通過
+
+### 5. 追記（2026-09-16・リリース前の再レビューで見つけた退行 1 件を修正）
+
+言語リファレンス §10「`OVER (ORDER BY ...)` から同一 SELECT の alias は参照できません」の記述を見直す過程で、codex 版の `collectRequiredFieldsByTable` がウィンドウの ORDER BY を phase `"orderBy"`（SELECT 別名なら物理列として集めない）で歩くように変えた結果、**集計を含まない別名**（`売上 * 2 AS 倍`・`売上 AS s`・グループキーの別名 `会社名 AS c`）をウィンドウの ORDER BY で参照する形が、v3.80.0 の `unknown field code(s): 倍 (APP4149)`（fail-closed）から**空文字で静かに評価される**（全行が `RANK` 1 位）状態になっていた。実機で確認（v3.80.0 の MCP は拒否、修正前のビルドは全行 1 位・警告なし）。
+
+修正: ウィンドウの ORDER BY で「同一 SELECT の別名」として扱うのは、ウィンドウ評価より前に実体化される**集計を含む列の別名と集計合成名**（`collectAggregateMaterializedNames`）だけにし、それ以外は従来どおり物理フィールドとして集めて B86 の存在検査で止める。テスト 4 本（算術別名・物理列別名・グループキー別名の拒否と、集計算術・CASE 別名の参照）を追加。言語リファレンス §10 の該当行を「集計を含む列の別名だけ参照できる」に書き換え。
+
+同時に、MCP の Writing rules 5 行目（B183・「集計とウィンドウは同じ SELECT に書けない」）を B184 後の仕様「書ける。OVER の参照はグループキー・集計別名・集計式・`GROUPING()` に限る」へ更新（語数 exact `{952, 347, 605}`・上限内）。

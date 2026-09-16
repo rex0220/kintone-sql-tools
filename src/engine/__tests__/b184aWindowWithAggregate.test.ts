@@ -187,3 +187,28 @@ test("B184-A: 言語リファレンス掲載例を実行できる", async () => 
   ) as SelectResult;
   expect(result.rows[0]).toMatchObject({ 会社名: "D", 売上合計: "20700000", 順位: "1" });
 });
+
+// Claude レビュー（2026-09-16）: ウィンドウの ORDER BY が同一 SELECT の「集計を含まない別名」を指す形は、
+// 実体化されず空文字で静かに評価される（全行が 1 位）退行が codex 版にあった。v3.80.0 以前と同じく
+// 実行前に unknown field code(s) で止める（集計を含む別名は B184-A のとおり参照できる）
+test.each([
+  ["集計の無い SELECT の算術別名", "SELECT 会社名, 売上 * 2 AS 倍, RANK() OVER (ORDER BY 倍 DESC) AS r FROM APP100", "倍"],
+  ["集計の無い SELECT の物理列別名", "SELECT 会社名, 売上 AS s, RANK() OVER (ORDER BY s DESC) AS r FROM APP100", "s"],
+  ["グループキーの別名", "SELECT 会社名 AS c, SUM(売上) AS s, RANK() OVER (ORDER BY c) AS r FROM APP100 GROUP BY 会社名", "c"],
+] as const)("B184-A: %s をウィンドウの ORDER BY で参照する形は実行前に拒否する（静かに空文字で評価しない）", async (_label, sql, name) => {
+  await expect(execute(sql, client(rows), { cacheContext: `b184a-alias-reject-${name}` }))
+    .rejects.toThrow(`ArgumentError: unknown field code(s): ${name} (APP100)`);
+});
+
+test("B184-A: 集計を含む列の別名はウィンドウの ORDER BY から参照できる（集計算術・CASE を含む）", async () => {
+  const result = await execute(
+    "SELECT 会社名, SUM(売上) * 2 AS 倍, CASE WHEN SUM(売上) > 100 THEN 1 ELSE 0 END AS 大, " +
+      "RANK() OVER (ORDER BY 倍 DESC) AS r1, RANK() OVER (ORDER BY 大 DESC, 会社名) AS r2 FROM APP100 GROUP BY 会社名 ORDER BY r1, 会社名",
+    client(rows),
+    { cacheContext: "b184a-alias-materialized" }
+  ) as SelectResult;
+  // 倍: D 41,400,000 / C・E 18,100,000（同順位 2）/ B 398 / A 38。大: A 以外が 1 → 会社名順で B=1, C=2, D=3, E=4, A=5
+  expect(result.rows.map((row) => [row.会社名, row.r1, row.r2])).toEqual([
+    ["D", "1", "3"], ["C", "2", "2"], ["E", "2", "4"], ["B", "4", "1"], ["A", "5", "5"],
+  ]);
+});

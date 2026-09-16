@@ -126,7 +126,9 @@ describe("ksql_app_metadata MCP surface", () => {
       // B53 出荷時に文型カタログから内部用語「Phase1 forms」を除去（-2 tokens・意図した縮小）
       // B183: Writing rules 8 行を追加（+272 語。レビューで除数ガードを §5 の `= '' OR = 0` 形に、
       // JOIN の行を §7 が保証する「INNER JOIN のみ・FROM → JOIN 先」の範囲に揃えた）。
-      expect(budget).toEqual({ total: 935, catalog: 347, prose: 588 });
+      // B184（v3.81.0）: 5 行目を「集計と同じ SELECT に書けない」から「書ける・OVER の参照はグループキー・
+      // 集計別名・集計式・GROUPING() に限る」へ（+17 語）。
+      expect(budget).toEqual({ total: 952, catalog: 347, prose: 605 });
 
       // 以下の上限値には外部根拠がない（B81 §7）。MCP 仕様は instructions を
       // "Optional instructions for the client" と書くだけでサイズ規定を持たず、

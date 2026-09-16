@@ -422,6 +422,7 @@ function collectRequiredFieldsByTable(
   }
 
   const selectAliases = collectSelectOutputNames(stmt.columns);
+  const windowMaterializedAliases = collectAggregateMaterializedNames(stmt.columns);
 
   const markAll = (table: TableRef) => {
     const st = states.get(table);
@@ -799,7 +800,15 @@ function collectRequiredFieldsByTable(
         for (const ref of col.partitionBy) {
           if (ref.type === "FIELD") addFieldRef(ref.field, ref.tableAlias, "select");
         }
-        for (const item of col.orderBy) walkOrderByKey(item.key, "orderBy");
+        // B184-A: ウィンドウの ORDER BY が同一 SELECT の別名を指してよいのは、その別名がウィンドウ評価より
+        // 前に実体化される集計列（applyGroupBy の byLookupKey）に限る。集計を含まない別名（`売上 * 2 AS 倍`・
+        // グループキーの別名）は実行時に解決されず空文字で静かに評価されるため、従来どおり物理フィールドとして
+        // 集め、B86 の存在検査で `unknown field code(s)` として fail-closed に止める（v3.80.0 以前と同じ）
+        for (const item of col.orderBy) {
+          const isMaterializedAlias = item.key.type === "FIELD_NAME"
+            && (item.key.aggregateRef !== undefined || windowMaterializedAliases.has(item.key.name));
+          walkOrderByKey(item.key, isMaterializedAlias ? "orderBy" : "select");
+        }
         break;
     }
   }
@@ -825,6 +834,26 @@ function collectRequiredFieldsByTable(
   for (const ob of stmt.orderBy) walkOrderByKey(ob.key);
 
   return states;
+}
+
+/**
+ * B184-A: ウィンドウ評価より前に実体化される列（集計を含む列）の別名と集計合成名。
+ * ウィンドウの ORDER BY はこれらだけを「同一 SELECT の別名」として参照できる。
+ */
+function collectAggregateMaterializedNames(columns: SelectColumn[]): Set<string> {
+  const names = new Set<string>();
+  for (const col of columns) {
+    const materialized =
+      col.type === "AGGREGATE" || col.type === "ARITH_AGG_COL"
+      || (col.type === "ARITH_COL" && containsAggregate(col.expr))
+      || (col.type === "CASE_COL" && containsAggregate(col.expr))
+      || (col.type === "STRFUNC_COL" && hasAggregateInStringFuncExpr(col.expr))
+      || (col.type === "SCALAR_VALUE_COL" && scalarValueHasAggregate(col.expr));
+    if (!materialized) continue;
+    if (col.alias) names.add(col.alias);
+    if (col.type === "AGGREGATE") names.add(aggregateSyntheticName(col.func, col.distinct, col.arg));
+  }
+  return names;
 }
 
 function collectSelectOutputNames(columns: SelectColumn[]): Set<string> {
