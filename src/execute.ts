@@ -4446,7 +4446,9 @@ async function validateSelectGroupingPlanning(
 ): Promise<void> {
   resolvedGroupingSpecs.delete(stmt);
   const normalized = normalizeGroupingSpec(stmt);
+  // B191: 式の中のウィンドウ（hiddenWindows）の GROUPING() も B65 計画の対象にする
   const hasGroupingNodes = JSON.stringify(stmt.columns).includes('"GROUPING_')
+    || JSON.stringify(stmt.hiddenWindows ?? []).includes('"GROUPING_')
     || JSON.stringify(stmt.orderBy).includes('"GROUPING_');
   if (normalized.type === "GROUPING_SETS" || hasGroupingNodes) {
     const resolver = await buildGroupingFieldResolver(stmt, client, cacheContext, materializedTables);

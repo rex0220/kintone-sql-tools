@@ -122,6 +122,38 @@ test("B190: 一時テーブルを source にした非集計 SELECT でも CASE �
   ]);
 });
 
+test("B191: ROLLUP と式の中のウィンドウで PARTITION BY GROUPING() を解決する", async () => {
+  // v3.81.0〜v3.83.0 は「internal error: GROUPING() reference was not resolved during B65 planning.」
+  // （B65 の計画が stmt.columns の GROUPING() だけを束縛し hiddenWindows を見ていなかった）
+  const result = await execute(
+    "SELECT CASE WHEN GROUPING(会社名) = 1 THEN '合計' ELSE 会社名 END AS 会社, SUM(売上) AS 売上合計, " +
+      "RANK() OVER (PARTITION BY GROUPING(会社名) ORDER BY SUM(売上) DESC) AS 順位, " +
+      "ROUND(SUM(売上) * 100.0 / SUM(SUM(売上)) OVER (PARTITION BY GROUPING(会社名)), 1) AS 構成比 " +
+      "FROM APP100 GROUP BY ROLLUP(会社名) ORDER BY GROUPING(会社名), 売上合計 DESC, 会社",
+    client(sales), { cacheContext: "b191-rollup-hidden" }
+  ) as SelectResult;
+  expect(result.columns).toEqual(["会社", "売上合計", "順位", "構成比"]);
+  expect(result.rows.map((row) => [row.会社, row.順位, row.構成比])).toEqual([
+    ["D", "1", "53.4"], ["C", "2", "23.3"], ["E", "2", "23.3"], ["B", "4", "0"], ["A", "5", "0"], ["合計", "1", "100"],
+  ]);
+  // 列として出す従来形と同じ値
+  const staged = await execute(
+    "SELECT CASE WHEN GROUPING(会社名) = 1 THEN '合計' ELSE 会社名 END AS 会社, SUM(売上) AS 売上合計, " +
+      "SUM(SUM(売上)) OVER (PARTITION BY GROUPING(会社名)) AS 総計 " +
+      "FROM APP100 GROUP BY ROLLUP(会社名) ORDER BY GROUPING(会社名), 売上合計 DESC, 会社",
+    client(sales), { cacheContext: "b191-rollup-column" }
+  ) as SelectResult;
+  expect(staged.rows.map((row) => row.総計)).toEqual(["38800218", "38800218", "38800218", "38800218", "38800218", "38800218"]);
+});
+
+test("B191: 式の中のウィンドウにある GROUPING() も ROLLUP なしでは拒否する", async () => {
+  await expect(execute(
+    "SELECT 会社名, ROUND(SUM(売上) * 100.0 / SUM(SUM(売上)) OVER (PARTITION BY GROUPING(会社名)), 1) AS 構成比 " +
+      "FROM APP100 GROUP BY 会社名",
+    client(sales), { cacheContext: "b191-no-rollup" }
+  )).rejects.toThrow("GROUPING() requires GROUP BY ROLLUP or GROUPING SETS");
+});
+
 test("B184-B: LAG の算術・CASE・COALESCE・連結と複数の隠し窓を評価する", async () => {
   const result = await execute(
     "SELECT 年月, 件数 - LAG(件数) OVER (ORDER BY 年月) AS 前月差, " +
