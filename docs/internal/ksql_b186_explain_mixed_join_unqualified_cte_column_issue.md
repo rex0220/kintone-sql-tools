@@ -1,6 +1,6 @@
 # B186 物理 APP と CTE を混在させた JOIN の WHERE に未修飾の CTE 列を書くと `EXPLAIN` だけが `WHERE_FIELD_UNRESOLVED` で落ちる — 実行は通る
 
-- 状態: 📝 **起票（2026-09-16）**。未着手。実測 v3.77.0（MCP）と v3.78.0（CLI 再ビルド版）で同じ。「実行は正常なのに EXPLAIN だけ通らない」の 4 例目（B162 / B163 / B167 に続く）。改善（EXPLAIN 面のみ・実行不変）
+- 状態: 🚧 **codex が案 A を実装・Claude レビュー済み（2026-09-16・`b188/dev`・コミット待ち・[報告](ksql_b186_codex_impl_report.md)）**。原因は 2 つ＝`buildWhereFieldSemanticsResolver` の多表分岐に `columnMeta` 不在時のフォールバックが無かったこと、EXPLAIN が `normalizeSelectChoiceEquality` へ `explainRelations` を渡していなかったこと。実機で §1 の SQL の EXPLAIN が成功し、修飾形と計画が同一（`diff` なし）・実行 3 行を確認。**据え置き**: EXPLAIN の `fields:` 行に未修飾の CTE 列（`amount`・`custno`）が物理 FROM の取得列として並ぶ表示は既存の計画行を変えるため未修正（B185 の実装時に扱いを判断）。起票時の実測 v3.77.0（MCP）と v3.78.0（CLI 再ビルド版）で同じ。「実行は正常なのに EXPLAIN だけ通らない」の 4 例目（B162 / B163 / B167 に続く）。改善（EXPLAIN 面のみ・実行不変）
 
 ## 1. 現象（dev profile・SFA パック）
 

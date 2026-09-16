@@ -2563,6 +2563,8 @@ SELECT * FROM アプリ一覧 WHERE アプリ名 LIKE '顧客';
 
 `SELECT x AS y` を実体化した後段では `x` ではなく出力名 `y` を使います。UNION の実体化結果では左枝の列名／alias が出力 schema です。`rows=[] && columns=[]` で schema 自体を復元できない0行 wildcard source は、JOIN なしの読出しに限り既存の0行挙動を維持します。JOIN 入力では有効な JOIN key を証明できないため、物理レコード取得前に schema-unavailable error になります。
 
+実体化 CTE／一時テーブルの列を未修飾で `WHERE` に使った場合も、`EXPLAIN` は実行と同じ解決規則で計画を出します（v3.79.0〜。以前は `WHERE_FIELD_UNRESOLVED` になりました）。
+
 **注意事項:**
 - 非再帰 CTE 本体のサブクエリは SIMPLE / FULL_SCAN を自動判定
 - 再帰 CTE は read-only で、完全実体化してから外側 SELECT を評価
