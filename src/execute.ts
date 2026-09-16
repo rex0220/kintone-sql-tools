@@ -3650,10 +3650,16 @@ async function normalizeSelectChoiceEquality(
 
 type WindowWarningContext = "DIRECT" | "DERIVED";
 
+function selectWindowColumns(stmt: SelectStatement): WindowColumn[] {
+  return [
+    ...stmt.columns.filter((column): column is WindowColumn => column.type === "WINDOW_COL"),
+    ...(stmt.hiddenWindows ?? []),
+  ];
+}
+
 function hasDefaultRangeAggregateWindow(stmt: SelectStatement): boolean {
-  return stmt.columns.some((column) =>
-    column.type === "WINDOW_COL"
-    && column.windowKind === "AGGREGATE"
+  return selectWindowColumns(stmt).some((column) =>
+    column.windowKind === "AGGREGATE"
     && column.orderBy.length > 0
     && column.frame?.source === "DEFAULT"
   );
@@ -3661,7 +3667,7 @@ function hasDefaultRangeAggregateWindow(stmt: SelectStatement): boolean {
 
 function hasWindowNeedingOrderProof(stmt: SelectStatement): boolean {
   return hasDefaultRangeAggregateWindow(stmt)
-    || stmt.columns.some((column) => column.type === "WINDOW_COL" && column.windowKind === "VALUE");
+    || selectWindowColumns(stmt).some((column) => column.windowKind === "VALUE");
 }
 
 function sameSelectGroupOrderIsUnique(
@@ -3893,9 +3899,7 @@ function formatWhereCapabilityFailure(result: PredicateCapabilityResult): string
 }
 
 function hasCanonicalOrder(stmt: SelectStatement): boolean {
-  return stmt.orderBy.length > 0 || stmt.columns.some(
-    (column) => column.type === "WINDOW_COL" && column.orderBy.length > 0
-  );
+  return stmt.orderBy.length > 0 || selectWindowColumns(stmt).some((column) => column.orderBy.length > 0);
 }
 
 async function resolveDmlWhereCapability(
@@ -4571,7 +4575,7 @@ function arithHasFieldRef(node: ArithNode): boolean {
       `InternalError: unresolved arithmetic variable @${node.name} reached SELECT planning.`
     );
   }
-  if (node.type === "FIELD_REF") return true;
+  if (node.type === "FIELD_REF") return node.hiddenWindowRef !== true;
   if (node.type === "ARITH") return arithHasFieldRef(node.left) || arithHasFieldRef(node.right);
   if (node.type === "STRING_FUNC") return stringFuncHasFieldRef(node);
   return false;
@@ -4585,7 +4589,7 @@ function stringFuncArgHasFieldRef(arg: StringFuncArg): boolean {
 }
 
 function scalarValueHasFieldRef(expr: ScalarValueExpr): boolean {
-  if (expr.type === "FIELD") return true;
+  if (expr.type === "FIELD") return expr.hiddenWindowRef !== true;
   if (expr.type === "STRING_FUNC") return stringFuncHasFieldRef(expr);
   if (expr.type === "SCALAR_ARITH" || expr.type === "CONCAT_OP") {
     return scalarValueHasFieldRef(expr.left) || scalarValueHasFieldRef(expr.right);
@@ -4647,7 +4651,8 @@ function executeNoFromSelect(stmt: SelectStatement, options: ExecuteOptions): Se
   }
   validateNoFromColumns(stmt);
   const windowed = applyWindow(
-    [{}], stmt.columns, undefined, undefined, undefined, undefined, statementEvaluationContext(options)
+    [{}], stmt.columns, undefined, undefined, undefined, undefined, statementEvaluationContext(options),
+    stmt.hiddenWindows
   );
   const { rows: projected, columns } = project(
     windowed, stmt.columns, undefined, undefined, undefined, undefined, undefined,
@@ -5040,7 +5045,7 @@ function bindProjectedNamesForSelect(
     for (const child of Object.values(value)) visit(child, allowSelectAlias);
   };
 
-  for (const column of stmt.columns) visit(column);
+  for (const column of [...stmt.columns, ...(stmt.hiddenWindows ?? [])]) visit(column);
   visit(stmt.where);
   visit(stmt.having, true);
   visit(stmt.grouping);
@@ -5055,8 +5060,7 @@ function bindProjectedNamesForSelect(
     if (item.key.type === "FIELD_NAME") item.key.name = resolveText(item.key.name, true);
     else visit(item.key);
   }
-  for (const column of stmt.columns) {
-    if (column.type !== "WINDOW_COL") continue;
+  for (const column of selectWindowColumns(stmt)) {
     for (const ref of column.partitionBy) {
       if (ref.type !== "FIELD") continue;
       ref.field = resolveReference(ref.field, ref.tableAlias, false);
@@ -5972,7 +5976,7 @@ function withDisplayName(
 }
 
 function selectNeedsSourceColumnMeta(stmt: SelectStatement): boolean {
-  return stmt.columns.some((column) =>
+  return (stmt.hiddenWindows?.length ?? 0) > 0 || stmt.columns.some((column) =>
     column.type === "FIELD"
     || column.type === "WILDCARD"
     || column.type === "PARENT_WILDCARD"
@@ -6057,6 +6061,12 @@ async function inferSelectColumnMeta(
   };
 
   const inferred = new Map<string, MaterializedColumnMeta>();
+  const hiddenWindowMeta = new Map((stmt.hiddenWindows ?? []).map((window) => [
+    window.alias,
+    inferWindowColumnMeta(window, resolveField),
+  ]));
+  const resolveExpressionField = (ref: FieldRef): MaterializedColumnMeta | undefined =>
+    ref.hiddenWindowRef ? hiddenWindowMeta.get(ref.field) : resolveField(ref);
   const hasWildcard = stmt.columns.some((column) => column.type === "WILDCARD" || column.type === "PARENT_WILDCARD");
 
   if (stmt.columns.length === 1
@@ -6108,17 +6118,17 @@ async function inferSelectColumnMeta(
         meta = syntheticColumnMeta("string");
       } else if (column.type === "SCALAR_VALUE_COL") {
         const expr = column.expr;
-        if (expr.type === "STRING_FUNC") meta = stringFunctionColumnMeta(expr, resolveField);
+        if (expr.type === "STRING_FUNC") meta = stringFunctionColumnMeta(expr, resolveExpressionField);
         else if (expr.type === "NUMBER" || expr.type === "SCALAR_ARITH") meta = syntheticColumnMeta("number");
-        else if (expr.type === "FIELD") meta = resolveField(expr);
+        else if (expr.type === "FIELD") meta = resolveExpressionField(expr);
         else meta = syntheticColumnMeta("string");
       } else if (column.type === "STRFUNC_COL") {
-        meta = stringFunctionColumnMeta(column.expr, resolveField);
+        meta = stringFunctionColumnMeta(column.expr, resolveExpressionField);
       } else if (column.type === "WINDOW_COL") {
         meta = inferWindowColumnMeta(column, resolveField);
       } else if (column.type === "CASE_COL") {
-        const results = column.expr.branches.map((branch) => caseResultColumnMeta(branch.result, resolveField));
-        if (column.expr.elseResult) results.push(caseResultColumnMeta(column.expr.elseResult, resolveField));
+        const results = column.expr.branches.map((branch) => caseResultColumnMeta(branch.result, resolveExpressionField));
+        if (column.expr.elseResult) results.push(caseResultColumnMeta(column.expr.elseResult, resolveExpressionField));
         meta = mergeExpressionColumnMeta(results);
       } else if (column.type === "SCALAR_SUBQUERY_COL") {
         // サブクエリの実行値は後段で解決される。安全に型を証明できないため既定の文字列意味型を付ける。
@@ -8437,7 +8447,7 @@ interface OrderByMeta {
 function orderByFieldNames(stmt: SelectStatement): string[] {
   const items: OrderByItem[] = [
     ...stmt.orderBy,
-    ...stmt.columns.flatMap((column) => column.type === "WINDOW_COL" ? column.orderBy : []),
+    ...selectWindowColumns(stmt).flatMap((column) => column.orderBy),
   ];
   return [...new Set(items.flatMap((item) =>
     item.key.type === "FIELD_NAME" ? [item.key.name] : []
@@ -8496,6 +8506,12 @@ async function buildOrderSemanticsForSelect(
   };
 
   const aliasSemantics = new Map<string, ResolvedFieldSemantics>();
+  const hiddenWindowMeta = new Map((stmt.hiddenWindows ?? []).map((window) => [
+    window.alias,
+    inferWindowColumnMeta(window, resolveField),
+  ]));
+  const resolveExpressionField = (ref: FieldRef): MaterializedColumnMeta | undefined =>
+    ref.hiddenWindowRef ? hiddenWindowMeta.get(ref.field) : resolveField(ref);
   for (const column of stmt.columns) {
     if (!("alias" in column) || !column.alias) continue;
     let meta: MaterializedColumnMeta | undefined;
@@ -8506,12 +8522,19 @@ async function buildOrderSemanticsForSelect(
       meta = inferWindowColumnMeta(column, resolveField);
     } else if (column.type === "GROUPING_COL") {
       meta = syntheticColumnMeta("number");
-    } else if (column.type === "LITERAL_COL" || column.type === "SCALAR_VALUE_COL") meta = syntheticColumnMeta("string");
-    else if (column.type === "STRFUNC_COL") meta = stringFunctionColumnMeta(column.expr, resolveField);
+    } else if (column.type === "LITERAL_COL") meta = syntheticColumnMeta("string");
+    else if (column.type === "SCALAR_VALUE_COL") {
+      const expr = column.expr;
+      if (expr.type === "STRING_FUNC") meta = stringFunctionColumnMeta(expr, resolveExpressionField);
+      else if (expr.type === "NUMBER" || expr.type === "SCALAR_ARITH") meta = syntheticColumnMeta("number");
+      else if (expr.type === "FIELD") meta = resolveExpressionField(expr);
+      else meta = syntheticColumnMeta("string");
+    }
+    else if (column.type === "STRFUNC_COL") meta = stringFunctionColumnMeta(column.expr, resolveExpressionField);
     else if (column.type === "SCALAR_SUBQUERY_COL") meta = unknownStringColumnMeta();
     else if (column.type === "CASE_COL") {
-      const candidates = column.expr.branches.map((branch) => caseResultColumnMeta(branch.result, resolveField));
-      if (column.expr.elseResult) candidates.push(caseResultColumnMeta(column.expr.elseResult, resolveField));
+      const candidates = column.expr.branches.map((branch) => caseResultColumnMeta(branch.result, resolveExpressionField));
+      if (column.expr.elseResult) candidates.push(caseResultColumnMeta(column.expr.elseResult, resolveExpressionField));
       meta = mergeExpressionColumnMeta(candidates);
     } else if (column.type === "AGGREGATE") {
       if (column.func === "MIN" || column.func === "MAX" || column.func === "MODE") {
@@ -8524,9 +8547,7 @@ async function buildOrderSemanticsForSelect(
   }
 
   const aggregateOrderRefs = new Map<string, AggregateRef>();
-  for (const item of stmt.columns.flatMap((column) =>
-    column.type === "WINDOW_COL" ? column.orderBy : []
-  )) {
+  for (const item of selectWindowColumns(stmt).flatMap((column) => column.orderBy)) {
     if (item.key.type === "FIELD_NAME" && item.key.aggregateRef) {
       aggregateOrderRefs.set(item.key.name, item.key.aggregateRef);
     }
@@ -8573,9 +8594,7 @@ async function buildOrderByMetaForSelect(
   cacheContext: string,
   materializedTables?: ReadonlyMap<string, MaterializedTable>
 ): Promise<OrderByMeta> {
-  const hasWindowOrderBy = stmt.columns.some(
-    (column) => column.type === "WINDOW_COL" && column.orderBy.length > 0
-  );
+  const hasWindowOrderBy = selectWindowColumns(stmt).some((column) => column.orderBy.length > 0);
   if (stmt.orderBy.length === 0 && !hasWindowOrderBy) {
     return { optionOrders: new Map(), sortKinds: new Map(), semantics: new Map() };
   }
@@ -12502,7 +12521,7 @@ async function buildExplainWhereAnalysis(
       || select.distinct
       || select.having !== null
       || isAggregateQueryBlock(select)
-      || select.columns.some((column) => column.type === "WINDOW_COL")) {
+      || selectWindowColumns(select).length > 0) {
       currentRows = null;
     }
     if (currentRows !== null) {
@@ -12698,7 +12717,7 @@ async function buildExplainWhereAnalysis(
         .map((table) => table.appId);
       const needsWhereSchema = whereNeedsFieldMetadata(select.where);
       if (needsWhereSchema || select.orderBy.length > 0
-        || select.columns.some((column) => column.type === "WINDOW_COL" && column.orderBy.length > 0)) {
+        || selectWindowColumns(select).some((column) => column.orderBy.length > 0)) {
         physicalApps.forEach((appId) => fieldApps.add(appId));
       }
       const { resolver, rewrites } = await normalizeSelectChoiceEquality(
@@ -12792,7 +12811,7 @@ async function buildExplainWhereAnalysis(
       if (joinKeyPlans.size > 0) explainJoinKeyPrefilters.set(select, joinKeyPlans);
       // EXPLAIN は実行 planner と同じ ORDER 意味型も解決する。STATUS なら status.json 依存も記録される。
       if (select.orderBy.length > 0
-        || select.columns.some((column) => column.type === "WINDOW_COL" && column.orderBy.length > 0)) {
+        || selectWindowColumns(select).some((column) => column.orderBy.length > 0)) {
         const meta = await buildOrderByMetaForSelect(select, tracedClient, cacheContext);
         if (select.orderMode !== "KINTONE_NATIVE") {
           for (const semantics of meta.semantics.values()) {
@@ -14853,7 +14872,7 @@ function populateWithCrossJoinExplain(stmt: WithStatement): void {
       || select.distinct
       || select.having !== null
       || isAggregateQueryBlock(select)
-      || select.columns.some((column) => column.type === "WINDOW_COL")) return null;
+      || selectWindowColumns(select).length > 0) return null;
     if (current === null) return null;
     current = Math.max(0, current - (select.offset ?? 0));
     return select.limit === null ? current : Math.min(current, select.limit);
@@ -15022,7 +15041,7 @@ function collectFullScanReasons(stmt: SelectStatement): string[] {
   // ここで使うと「GROUP BY あり」の文に「集計関数あり」が新たに付き、EXPLAIN の文言契約が変わる
   if (hasAggregateColumns(stmt.columns))
     r.push("集計関数（COUNT / SUM 等）あり");
-  if (stmt.columns.some((c) => c.type === "WINDOW_COL"))
+  if (selectWindowColumns(stmt).length > 0)
     r.push("ウィンドウ関数あり");
   if (stmt.columns.some((c) => c.type === "SCALAR_SUBQUERY_COL"))
     r.push("SELECT 列にスカラーサブクエリ");

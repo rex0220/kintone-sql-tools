@@ -83,7 +83,8 @@ function selectNeedsOwnMetadata(statement: SelectStatement): boolean {
     )
     || statement.columns.some((column) =>
       column.type === "WINDOW_COL" && column.orderBy.length > 0
-    );
+    )
+    || (statement.hiddenWindows ?? []).some((column) => column.orderBy.length > 0);
 }
 
 function cteQueriesContainPhysicalSelect(ctes: unknown): boolean {

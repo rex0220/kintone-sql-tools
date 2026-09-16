@@ -590,11 +590,34 @@ ORDER BY 製品名, 日付, レコード番号
 
 ## R15. 全体で割る（構成比・累積構成比・ABC）
 
-**ウィンドウ関数の結果は同じ SELECT の式では使えません。** 割り算・`ROUND`・`CASE` は次の段へ移します。
-総計も「1 行に畳んだ別の集計」ではなく **`SUM(x) OVER ()` で全行に載る列**として出すのが要点で、
-これで JOIN も相関サブクエリも要らなくなります。
+v3.81.0 から、集計・ウィンドウ・割り算・`ROUND`・`CASE` を同じ SELECT に書けます。総計は **`SUM(SUM(x)) OVER ()` で各集計行に載る値**として使うため、JOIN も相関サブクエリも要りません。
 
-v3.81.0 から、集計とウィンドウは同じ SELECT に書けるため、`base` と `ranked` は1段にまとめられます。ウィンドウ結果を使う比率計算は引き続き次の段に置きます。
+```sql
+SELECT 製品名,
+       SUM(個数) AS 出庫量,
+       ROUND(SUM(個数) * 100.0 / SUM(SUM(個数)) OVER (), 1) AS 構成比,
+       ROUND(SUM(SUM(個数)) OVER (
+         ORDER BY SUM(個数) DESC, 製品名
+         ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+       ) * 100.0 / SUM(SUM(個数)) OVER (), 1) AS 累積構成比,
+       CASE
+         WHEN SUM(SUM(個数)) OVER (
+           ORDER BY SUM(個数) DESC, 製品名
+           ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+         ) * 100.0 / SUM(SUM(個数)) OVER () <= 80 THEN 'A'
+         WHEN SUM(SUM(個数)) OVER (
+           ORDER BY SUM(個数) DESC, 製品名
+           ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+         ) * 100.0 / SUM(SUM(個数)) OVER () <= 95 THEN 'B'
+         ELSE 'C'
+       END AS 区分
+FROM APP4228
+WHERE 入出庫区分 = '出庫'
+GROUP BY 製品名
+ORDER BY 出庫量 DESC, 製品名
+```
+
+段ごとに値を確かめたいときは、従来の3段版も使えます。
 
 ```sql
 WITH base AS (
@@ -616,7 +639,7 @@ FROM ranked
 ORDER BY 出庫量 DESC, 製品名
 ```
 
-段の役割は 3 つに分かれます。**この分け方自体が制約への対処**です。
+3段版の役割は次のとおりです。
 
 | 段 | すること |
 |---|---|
@@ -632,8 +655,7 @@ ORDER BY 出庫量 DESC, 製品名
 - 集計ウィンドウは完全入力が必要です。`maxRecords` を入力件数以上にし、
   上限到達時は部分結果を採らずエラーとして扱います（`onLimit=truncate` は適用されません）。
 
-ABC 区分まで付けるなら、最終段に `CASE` を足します（**累積構成比の式を `CASE` の中に直接書けます**。
-ウィンドウはもう `ranked` で列になっているためです）。
+3段版で ABC 区分まで付けるなら、最終段に `CASE` を足します。
 
 ```sql
 SELECT 製品名, 出庫量,
@@ -650,7 +672,23 @@ ORDER BY 出庫量 DESC, 製品名
 
 ## R16. 前月比を出す（`LAG`）
 
-月次集約の直前行を `LAG` で参照し、前月比を出します。v3.81.0 から月次集約と前月列は同じ SELECT に書けます。ウィンドウ結果を同じSELECTの式に含める形は未対応なので、比率計算だけを次の段に分けます。
+月次集約の直前行を `LAG` で参照し、前月差・前月比を出します。v3.81.0 から、月次集約・`LAG`・最終計算を同じ SELECT に書けます。
+
+```sql
+SELECT DATE_FORMAT(日付, '%Y-%m') AS 年月,
+       SUM(個数) AS 出庫数,
+       SUM(個数) - LAG(SUM(個数)) OVER (ORDER BY DATE_FORMAT(日付, '%Y-%m')) AS 前月差,
+       CASE WHEN LAG(SUM(個数)) OVER (ORDER BY DATE_FORMAT(日付, '%Y-%m')) = '' THEN ''
+            ELSE ROUND((SUM(個数) - LAG(SUM(個数)) OVER (ORDER BY DATE_FORMAT(日付, '%Y-%m'))) * 100.0
+                       / LAG(SUM(個数)) OVER (ORDER BY DATE_FORMAT(日付, '%Y-%m')), 1)
+       END AS 前月比
+FROM APP4228
+WHERE 入出庫区分 = '出庫'
+GROUP BY DATE_FORMAT(日付, '%Y-%m')
+ORDER BY 年月
+```
+
+集計値、前月値、比率を段ごとに確かめたいときは、従来の段分けも使えます。
 
 ```sql
 WITH 前月付き AS (

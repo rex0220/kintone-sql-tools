@@ -256,6 +256,8 @@ export interface SelectStatement {
   type: "SELECT";
   distinct: boolean;
   columns: SelectColumn[];       // * または フィールド指定
+  /** SELECT 式から切り出した非公開ウィンドウ列。公開結果の列位置には含めない。 */
+  hiddenWindows?: WindowColumn[];
   from: TableRef;
   joins: JoinClause[];
   where: WhereExpr | null;
@@ -613,6 +615,8 @@ export interface FieldRef {
   field: string;
   /** SELECT CASE 条件・HAVING で合成フィールド名へ変換した集計の評価情報。 */
   aggregateRef?: AggregateRef;
+  /** SELECT 式内の非公開ウィンドウ値を参照する内部ノード。 */
+  hiddenWindowRef?: true;
 }
 
 /** HAVING 左辺に直接書かれた集計算術式。 */
@@ -1124,7 +1128,7 @@ export type ArithOp = "+" | "-" | "*" | "/" | "%";
  *   VARIABLE:    バッチ変数参照（実行前に数値リテラルへ解決される）
  */
 export type ArithNode =
-  | { type: "FIELD_REF"; field: string }
+  | { type: "FIELD_REF"; field: string; hiddenWindowRef?: true }
   | NumberLiteral
   | LegacyArithExpr
   | StringFuncExpr

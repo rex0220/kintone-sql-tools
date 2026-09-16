@@ -240,6 +240,7 @@ function walkDependency(node: unknown, context: WalkContext): void {
     return;
   }
   const value = node as Record<string, unknown>;
+  if (value["hiddenWindowRef"] === true) return;
   if (isQueryBoundary(value) || isAggregateBoundary(value) || isWindowBoundary(value)) return;
   if (value["type"] === "GROUPING_REF" || value["type"] === "GROUPING_FIELD"
     || value["type"] === "GROUPING_COL" || value["type"] === "GROUPING_KEY") return;
@@ -290,7 +291,7 @@ export function validateAggregateDependencies(
   policy: AggregateDependencyIdentityPolicy
 ): void {
   const aliases = aliasesByName(stmt.columns);
-  for (const column of stmt.columns) {
+  for (const column of [...stmt.columns, ...(stmt.hiddenWindows ?? [])]) {
     if (column.type === "WINDOW_COL") {
       const windowExpressions: unknown[] = [
         ...column.partitionBy,

@@ -186,7 +186,7 @@ function selectCompleteInputReasons(stmt: SelectStatement): Set<CompleteInputRea
   if (grouping.type === "PLAIN") reasons.add("GROUP_BY");
   if (stmt.distinct) reasons.add("DISTINCT");
   if (stmt.orderBy.length > 0) reasons.add("LOCAL_ORDER");
-  for (const column of stmt.columns) {
+  for (const column of [...stmt.columns, ...(stmt.hiddenWindows ?? [])]) {
     if (column.type === "WINDOW_COL" && column.windowKind === "AGGREGATE") {
       reasons.add("AGGREGATE_WINDOW");
     } else if (column.type === "WINDOW_COL" && column.orderBy.length > 0) {

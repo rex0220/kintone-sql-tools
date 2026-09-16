@@ -73,7 +73,7 @@ export function planCanonicalOrder(input: CanonicalOrderPlanInput): CanonicalOrd
   const reasons: CanonicalOrderReasonCode[] = [];
   const windowOrderBy = stmt.columns.flatMap((column) =>
     column.type === "WINDOW_COL" ? column.orderBy : []
-  );
+  ).concat((stmt.hiddenWindows ?? []).flatMap((column) => column.orderBy));
   const allOrderBy = [...stmt.orderBy, ...windowOrderBy];
 
   for (const item of allOrderBy) {

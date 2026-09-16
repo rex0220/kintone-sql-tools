@@ -123,36 +123,31 @@ test.each([
   ["SELECT SUM(DISTINCT x) OVER () AS v FROM APP1", /引数の DISTINCT/],
   ["SELECT SUM(x) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS v FROM APP1", /ORDER BY/],
   ["SELECT SUM(x) OVER (ORDER BY d ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS v FROM APP1", /BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW だけ/],
-  ["SELECT SUM(x) OVER (ORDER BY d) * 2 AS v FROM APP1", /同じ SELECT の式では使えません/],
-  ["SELECT ROUND(SUM(x) OVER (ORDER BY d), 0) AS v FROM APP1", /同じ SELECT の式では使えません/],
-  ["SELECT k FROM APP1 GROUP BY k HAVING SUM(x) OVER () > 0", /SELECT 列にのみ/],
-  ["SELECT k FROM APP1 ORDER BY SUM(x) OVER ()", /SELECT 列にのみ/],
+  ["SELECT k FROM APP1 GROUP BY k HAVING SUM(x) OVER () > 0", /同じ SELECT の式では使えません/],
+  ["SELECT k FROM APP1 ORDER BY SUM(x) OVER ()", /同じ SELECT の式では使えません/],
   ["SELECT SUM(x) OVER () FROM APP1", /AS alias/],
 ])("B125: 非対応の集計ウィンドウ構文を指定メッセージで拒否する: %s", (sql, message) => {
   expect(() => parseSelect(sql)).toThrow(message);
 });
 
-describe("B129: ウィンドウ結果を式に使ったときの診断", () => {
-  // 依頼元（ksql-analytics）の指摘: 文章だけの制約は破られ、例のある制約は初回から守られる。
-  // したがって一般形・例・位置の 3 点がすべて出ることを固定する。
+describe("B184-B: SELECT 列内のウィンドウ結果を式に使う", () => {
   const forms = [
     ["関数で包む", "SELECT ROUND(SUM(x) OVER (ORDER BY d), 0) AS v FROM APP1"],
     ["算術に混ぜる", "SELECT SUM(x) OVER (ORDER BY d) * 2 AS v FROM APP1"],
   ] as const;
 
-  test.each(forms)("%s: 一般形・○×の例・位置をすべて出す", (_label, sql) => {
-    let message = "";
-    try {
-      parseSelect(sql);
-    } catch (err) {
-      message = (err as Error).message;
-    }
-    expect(message).toContain("ウィンドウ関数の結果は同じ SELECT の式では使えません。");
-    expect(message).toContain("× SELECT ROUND(SUM(x) OVER (), 1) AS a FROM t");
-    expect(message).toContain("○ WITH w AS (SELECT SUM(x) OVER () AS 総計 FROM t) SELECT ROUND(総計, 1) AS a FROM w");
-    expect(message).toContain("次の段（CTE または一時テーブル）に書いてください");
-    // 位置・トークンは末尾に付く。SQL 行に食い込まないよう、最終行は文で終える。
-    expect(message).toMatch(/書いてください（位置 \d+、トークン: 「[^」]+」）$/);
+  test.each(forms)("%sを受理し hiddenWindows へ切り出す", (_label, sql) => {
+    const stmt = parseSelect(sql);
+    expect(stmt.hiddenWindows).toHaveLength(1);
+    expect(stmt.columns[0]).toMatchObject({ alias: "v" });
+  });
+
+  test("同じウィンドウ式を構文的同一として1つに畳む", () => {
+    const stmt = parseSelect(
+      "SELECT CASE WHEN LAG(x) OVER (ORDER BY d) = '' THEN LAG(x) OVER (ORDER BY d) ELSE 'x' END AS v FROM APP1"
+    );
+    expect(stmt.hiddenWindows).toHaveLength(1);
+    expect(stmt.hiddenWindows?.[0].alias).toBe("__ksql_window_0");
   });
 
   test("提示している ○ の形は実際にパースできる", () => {
@@ -204,8 +199,8 @@ describe("B128: LAG / LEAD value windows", () => {
     "SELECT ROUND(LAG(x) OVER (ORDER BY d), 1) AS v FROM APP1",
     "SELECT LAG(x) OVER (ORDER BY d) * 2 AS v FROM APP1",
     "SELECT CASE WHEN LAG(x) OVER (ORDER BY d) = 1 THEN 'Y' ELSE 'N' END AS v FROM APP1",
-  ])("B129 の指定メッセージで nested VALUE window を拒否する: %s", (sql) => {
-    expect(() => parseSelect(sql)).toThrow(WINDOW_RESULT_IN_EXPRESSION_MESSAGE);
+  ])("式内 VALUE window を受理する: %s", (sql) => {
+    expect(parseSelect(sql).hiddenWindows).toHaveLength(1);
   });
 
   test("LAG / LEAD は soft keyword として同名フィールド参照を維持する", () => {

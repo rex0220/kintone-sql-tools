@@ -79,7 +79,7 @@ import {
   getGroupingRowMeta,
 } from "./groupingRowMeta";
 import { containsAggregate } from "../core/groupingValidation";
-import { stringFunctionSemanticKind } from "../core/expressionSemantics";
+import { expressionSemanticKind, stringFunctionSemanticKind } from "../core/expressionSemantics";
 import { resolveProjectedName } from "../core/projectedNameResolution";
 
 export { ProcessRow };
@@ -142,12 +142,12 @@ function materializedValuesFor(row: ProcessRow): MaterializedSelectValues {
 
 function setMaterializedSelectValue(
   row: ProcessRow,
-  columnIndex: number,
+  columnIndex: number | null,
   value: string,
   lookupKeys: readonly string[] = []
 ): void {
   const values = materializedValuesFor(row);
-  values.byColumn.set(columnIndex, value);
+  if (columnIndex !== null) values.byColumn.set(columnIndex, value);
   for (const key of lookupKeys) values.byLookupKey.set(key, value);
 }
 
@@ -460,7 +460,8 @@ export function applyGroupBy(
   resolveAggSortKind?: AggregateSortKindResolver,
   resolutionPlan?: PlainGroupByResolutionPlan,
   aliasEvaluationContext: SelectColumnEvaluationContext = {},
-  having: WhereExpr | null = null
+  having: WhereExpr | null = null,
+  hiddenWindows: WindowColumn[] = []
 ): ProcessRow[] {
   if (resolutionPlan && resolutionPlan.items.length !== groupByKeys.length) {
     throw new Error("InternalError: plain GROUP BY resolution plan length does not match group keys.");
@@ -527,6 +528,9 @@ export function applyGroupBy(
       resolveAggSortKind,
       aliasEvaluationContext.evaluationContext
     );
+    materializeAggregateDependencies(
+      outRow, groupRows, hiddenWindows, resolveAggSortKind, aliasEvaluationContext.evaluationContext
+    );
 
     result.push(outRow);
   }
@@ -549,7 +553,8 @@ export function applyGroupingSets(
   columns: SelectColumn[],
   resolveAggSortKind?: AggregateSortKindResolver,
   limits: { maxGeneratedRows?: number; evaluationContext?: EvaluationContext } = {},
-  having: WhereExpr | null = null
+  having: WhereExpr | null = null,
+  hiddenWindows: WindowColumn[] = []
 ): ProcessRow[] {
   const result: ProcessRow[] = [];
   let generatedRows = 0;
@@ -620,6 +625,9 @@ export function applyGroupingSets(
         outRow, groupRows, having, resolveAggSortKind, limits.evaluationContext
       );
       materializeAggregateDependencies(
+        outRow, groupRows, hiddenWindows, resolveAggSortKind, limits.evaluationContext
+      );
+      materializeAggregateDependencies(
         outRow,
         groupRows,
         columns.filter((column) => column.type === "WINDOW_COL"),
@@ -649,6 +657,10 @@ function materializeAggregateColumns(
   evaluationContext: EvaluationContext = {}
 ): void {
   for (const [columnIndex, col] of columns.entries()) {
+    if (containsHiddenWindowRef(col)) {
+      materializeAggregateDependencies(outRow, groupRows, col, resolveAggSortKind, evaluationContext);
+      continue;
+    }
     if (col.type === "AGGREGATE") {
       const syntheticKey = aggregateSyntheticName(col.func, col.distinct, col.arg);
       const value = String(evalAggregate(
@@ -720,6 +732,15 @@ function materializeAggregateColumns(
       );
     }
   }
+}
+
+function containsHiddenWindowRef(node: unknown): boolean {
+  if (node === null || typeof node !== "object") return false;
+  if (Array.isArray(node)) return node.some(containsHiddenWindowRef);
+  const value = node as Record<string, unknown>;
+  if (value["hiddenWindowRef"] === true) return true;
+  if (value["type"] === "SELECT" || value["type"] === "SCALAR_SUBQUERY") return false;
+  return Object.values(value).some(containsHiddenWindowRef);
 }
 
 function caseMaterializedKey(alias: string | null, columnIndex: number): string {
@@ -1370,11 +1391,13 @@ export function applyWindow(
   sortKinds?: FieldSortKindMap,
   fieldSemantics?: FieldSemanticsMap,
   resolveAggSortKind?: AggregateSortKindResolver,
-  evaluationContext: EvaluationContext = {}
+  evaluationContext: EvaluationContext = {},
+  hiddenWindows: WindowColumn[] = []
 ): ProcessRow[] {
-  const windows = columns
+  const windows: Array<{ column: WindowColumn; columnIndex: number | null }> = columns
     .map((column, columnIndex) => ({ column, columnIndex }))
     .filter((item): item is { column: WindowColumn; columnIndex: number } => item.column.type === "WINDOW_COL");
+  windows.push(...hiddenWindows.map((column) => ({ column, columnIndex: null })));
   if (rows.length === 0 || windows.length === 0) return rows;
 
   // materialized window 値を raw source row のプロパティにしない。
@@ -1441,7 +1464,7 @@ function evaluateValueWindowArg(
 
 function applyValueWindow(
   window: ValueWindowColumn,
-  columnIndex: number,
+  columnIndex: number | null,
   sorted: DecoratedSortRow[],
   evaluationContext: EvaluationContext = {}
 ): void {
@@ -1462,7 +1485,7 @@ function applyValueWindow(
 
 function applyAggregateWindow(
   window: AggregateWindowColumn,
-  columnIndex: number,
+  columnIndex: number | null,
   sortedResult: DecoratedSortResult,
   resolveAggSortKind?: AggregateSortKindResolver,
   evaluationContext: EvaluationContext = {}
@@ -1591,7 +1614,8 @@ export function evaluateSelectColumnValue(
   columnIndex: number,
   context: SelectColumnEvaluationContext = {}
 ): SelectColumnValue {
-  const sourceRow = sourceRowForEvaluation(row);
+  const hasHiddenWindow = containsHiddenWindowRef(column);
+  const sourceRow = hasHiddenWindow ? havingEvaluationRow(row) : sourceRowForEvaluation(row);
   switch (column.type) {
     case "VARIABLE_COL":
       throw new Error(`internal error: unresolved SELECT variable @${column.name}`);
@@ -1631,13 +1655,13 @@ export function evaluateSelectColumnValue(
         ?? "0";
     }
     case "ARITH_COL":
-      return containsAggregate(column.expr)
+      return containsAggregate(column.expr) && !hasHiddenWindow
         ? getMaterializedSelectValue(row, columnIndex)
           ?? getMaterializedLookupValue(row, column.alias ?? arithColDefaultKey(column.expr))
           ?? ""
         : String(evalArithExpr(column.expr, sourceRow, context.evaluationContext));
     case "CASE_COL":
-      return containsAggregate(column.expr)
+      return containsAggregate(column.expr) && !hasHiddenWindow
         ? getMaterializedSelectValue(row, columnIndex)
           ?? getMaterializedLookupValue(row, caseMaterializedKey(column.alias, columnIndex))
           ?? getLegacyMaterializedValue(row, caseMaterializedKey(column.alias, columnIndex))
@@ -1653,7 +1677,7 @@ export function evaluateSelectColumnValue(
       return evalGroupingRef(column.ref, row);
     case "STRFUNC_COL": {
       const source = stringFuncDefaultKey(column.expr);
-      return hasAggregateInStringFuncExpr(column.expr)
+      return hasAggregateInStringFuncExpr(column.expr) && !hasHiddenWindow
         ? getMaterializedSelectValue(row, columnIndex)
           ?? getMaterializedLookupValue(row, column.alias ?? source)
           ?? getMaterializedLookupValue(row, source)
@@ -1676,7 +1700,7 @@ export function evaluateSelectColumnValue(
     }
     case "SCALAR_VALUE_COL": {
       const source = scalarValueDefaultKey(column.expr);
-      return scalarValueHasAggregate(column.expr)
+      return scalarValueHasAggregate(column.expr) && !hasHiddenWindow
         ? getMaterializedSelectValue(row, columnIndex)
           ?? getMaterializedLookupValue(row, column.alias ?? source)
           ?? getMaterializedLookupValue(row, source)
@@ -2268,9 +2292,16 @@ function mergeKnownColumns(
 
 function deriveOutputOrderSemantics(
   columns: SelectColumn[],
-  resolveAggSortKind?: AggregateSortKindResolver
+  resolveAggSortKind?: AggregateSortKindResolver,
+  hiddenWindows: WindowColumn[] = []
 ): Map<string, ResolvedFieldSemantics> {
   const result = new Map<string, ResolvedFieldSemantics>();
+  const hiddenSemantics = new Map(hiddenWindows.map((window) => [
+    window.alias,
+    windowResultSemantics(window, resolveAggSortKind),
+  ]));
+  const resolveExpressionField = (field: FieldRef) => hiddenSemantics.get(field.field)
+    ?? resolveAggSortKind?.(field);
   for (const column of columns) {
     if (column.type === "AGGREGATE") {
       result.set(
@@ -2310,16 +2341,33 @@ function deriveOutputOrderSemantics(
       } else if (column.func === "GROUP_CONCAT") {
         result.set(column.alias, syntheticSemantics("string"));
       }
-    } else if (column.type === "LITERAL_COL" || column.type === "CASE_COL" || column.type === "SCALAR_SUBQUERY_COL" || column.type === "SCALAR_VALUE_COL") {
+    } else if (column.type === "LITERAL_COL" || column.type === "SCALAR_SUBQUERY_COL") {
       result.set(column.alias, syntheticSemantics("string"));
+    } else if (column.type === "CASE_COL" || column.type === "SCALAR_VALUE_COL") {
+      result.set(column.alias, syntheticSemantics(expressionSemanticKind(column.expr, resolveExpressionField)));
     } else if (column.type === "STRFUNC_COL") {
       result.set(column.alias, syntheticSemantics(stringFunctionSemanticKind(
         column.expr,
-        (field) => resolveAggSortKind?.(field)
+        resolveExpressionField
       )));
     }
   }
   return result;
+}
+
+function windowResultSemantics(
+  window: WindowColumn,
+  resolveAggSortKind?: AggregateSortKindResolver
+): ResolvedFieldSemantics {
+  if (isRankingWindow(window) || (isAggregateWindow(window)
+    && (window.aggFunc === "COUNT" || window.aggFunc === "SUM" || window.aggFunc === "AVG"))) {
+    return syntheticSemantics("number");
+  }
+  if ((isAggregateWindow(window) || isValueWindow(window)) && window.arg.type !== "WILDCARD") {
+    const semantics = resolveAggregateArgSemantics(window.arg, resolveAggSortKind) ?? "string";
+    return typeof semantics === "string" ? syntheticSemantics(semantics) : semantics;
+  }
+  return syntheticSemantics("string");
 }
 
 /**
@@ -2351,8 +2399,16 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
     warnings,
     evaluationContext,
   } = input;
-  const effectiveOrderSemantics = deriveOutputOrderSemantics(stmt.columns, aggregateSortKindResolver);
+  const effectiveOrderSemantics = deriveOutputOrderSemantics(
+    stmt.columns, aggregateSortKindResolver, stmt.hiddenWindows
+  );
   for (const [key, value] of orderSemantics ?? []) effectiveOrderSemantics.set(key, value);
+  const hiddenWindowSemantics = new Map((stmt.hiddenWindows ?? []).map((window) => [
+    window.alias,
+    windowResultSemantics(window, aggregateSortKindResolver),
+  ]));
+  const expressionFieldSemanticsResolver: FieldSemanticsResolver = (field) =>
+    hiddenWindowSemantics.get(field.field) ?? fieldSemanticsResolver?.(field);
 
   // 1. flatten
   let rows: ProcessRow[] = [];
@@ -2403,9 +2459,12 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
       stmt.columns,
       aggregateSortKindResolver,
       { maxGeneratedRows: B65_MAX_GENERATED_ROWS, evaluationContext },
-      stmt.having
+      stmt.having,
+      stmt.hiddenWindows
     );
-  } else if (grouping.type === "PLAIN" || hasAggregateColumns(stmt.columns)) {
+  } else if (grouping.type === "PLAIN" || hasAggregateColumns([
+    ...stmt.columns, ...(stmt.hiddenWindows ?? []),
+  ])) {
     rows = applyGroupBy(
       rows,
       grouping.type === "PLAIN" ? grouping.allItems : [],
@@ -2418,7 +2477,8 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
         resolveFieldSemantics: fieldSemanticsResolver,
         evaluationContext,
       },
-      stmt.having
+      stmt.having,
+      stmt.hiddenWindows
     );
   }
 
@@ -2440,7 +2500,8 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
     sortKinds,
     effectiveOrderSemantics,
     aggregateSortKindResolver,
-    evaluationContext
+    evaluationContext,
+    stmt.hiddenWindows
   );
 
   // 7. DISTINCT
@@ -2450,7 +2511,7 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
       stmt.columns,
       scalarCache,
       fieldTypeResolver,
-      fieldSemanticsResolver,
+      expressionFieldSemanticsResolver,
       evaluationContext
     );
   }
@@ -2463,7 +2524,7 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
     sortKinds,
     effectiveOrderSemantics,
     buildOrderByAliasEvaluator(
-      stmt.columns, scalarCache, fieldTypeResolver, fieldSemanticsResolver, evaluationContext
+      stmt.columns, scalarCache, fieldTypeResolver, expressionFieldSemanticsResolver, evaluationContext
     ),
     evaluationContext
   );
@@ -2478,7 +2539,7 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
     scalarCache,
     fieldTypeResolver,
     sourceColumns,
-    fieldSemanticsResolver,
+    expressionFieldSemanticsResolver,
     hiddenQualifiedAliases,
     evaluationContext
   );

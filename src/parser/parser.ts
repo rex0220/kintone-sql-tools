@@ -372,6 +372,10 @@ export class Parser {
   private scalarAllowsCase = true;
   private pos = 0;
   private insideAggregateArg = 0;
+  /** 現在解析中の SELECT リストから切り出した非公開ウィンドウ列。 */
+  private hiddenWindows: WindowColumn[] | null = null;
+  private insideWindowExpression = 0;
+  private insideWindowContainingSelectExpression = 0;
   /** GROUPING(field) is limited to the explicitly selected query context. */
   private groupingFieldContext: GroupingFieldContext = "FORBIDDEN";
   /** True only while parsing an actual SQL WHERE clause (including nested groups). */
@@ -1291,7 +1295,16 @@ export class Parser {
     this.expect(TokenKind.SELECT);
 
     const distinct = this.consume(TokenKind.DISTINCT);
-    const columns = this.parseSelectColumns();
+    const previousHiddenWindows = this.hiddenWindows;
+    this.hiddenWindows = [];
+    let columns: SelectColumn[];
+    let hiddenWindows: WindowColumn[];
+    try {
+      columns = this.parseSelectColumns();
+      hiddenWindows = this.hiddenWindows;
+    } finally {
+      this.hiddenWindows = previousHiddenWindows;
+    }
 
     const hasFrom = this.consume(TokenKind.FROM);
     const from = hasFrom
@@ -1358,6 +1371,7 @@ export class Parser {
       type: "SELECT",
       distinct,
       columns,
+      ...(hiddenWindows.length > 0 ? { hiddenWindows } : {}),
       from,
       joins,
       where,
@@ -1667,16 +1681,33 @@ export class Parser {
       return this.withAliasDisplay({ type: "GROUPING_COL", ref, alias: parsedAlias?.alias ?? null }, parsedAlias);
     }
 
+    if (this.startsWithWindowFunction() && this.leadingFunctionArgumentContainsOver()) {
+      throw new ParseError(WINDOW_RESULT_IN_EXPRESSION_MESSAGE, this.peek());
+    }
+
+    if (this.hasNestedAggregateWindowInSelectColumn() && !this.startsWithStandaloneWindowColumn()) {
+      this.insideWindowContainingSelectExpression++;
+      let expr: ScalarValueExpr;
+      try {
+        expr = this.parseScalarValueExpr({ allowCase: true, allowAggregateArgs: true });
+      } finally {
+        this.insideWindowContainingSelectExpression--;
+      }
+      const parsedAlias = this.consume(TokenKind.AS) ? this.parseAliasName() : null;
+      if (expr.type === "CASE_WHEN") {
+        return this.withAliasDisplay({ type: "CASE_COL", expr, alias: parsedAlias?.alias ?? null }, parsedAlias);
+      }
+      if (expr.type === "STRING_FUNC") {
+        return this.withAliasDisplay({ type: "STRFUNC_COL", expr, alias: parsedAlias?.alias ?? null }, parsedAlias);
+      }
+      return this.withAliasDisplay({
+        type: "SCALAR_VALUE_COL", expr, alias: parsedAlias?.alias ?? null,
+      } satisfies ScalarValueColumn, parsedAlias);
+    }
+
     const valueWindowFunc = this.tryValueWindowFunc();
     if (valueWindowFunc !== null) {
       return this.parseValueWindowColumn(valueWindowFunc);
-    }
-
-    if (this.tryAggregateFunc() === null && this.hasNestedAggregateWindowInSelectColumn()) {
-      throw new ParseError(
-        WINDOW_RESULT_IN_EXPRESSION_MESSAGE,
-        this.peek()
-      );
     }
 
     if (this.isNonAggregateArithmeticStartWithAggregate()) {
@@ -1862,11 +1893,135 @@ export class Parser {
           }
         }
       }
+      if (PARSER_WINDOW_FUNCTION_TOKEN_MAP[token.kind] !== undefined
+        && this.tokens[index + 1]?.kind === TokenKind.LPAREN) {
+        let windowDepth = 0;
+        for (let cursor = index + 1; cursor < this.tokens.length; cursor++) {
+          const candidate = this.tokens[cursor];
+          if (candidate.kind === TokenKind.LPAREN) windowDepth++;
+          else if (candidate.kind === TokenKind.RPAREN && --windowDepth === 0) {
+            const next = this.tokens[cursor + 1];
+            if (next?.kind === TokenKind.IDENT && next.value.toUpperCase() === "OVER") return true;
+            break;
+          }
+        }
+      }
       if (this.tryValueWindowFunc(index) !== null) return true;
       if (token.kind === TokenKind.LPAREN) depth++;
       else if (token.kind === TokenKind.RPAREN) depth--;
     }
     return false;
+  }
+
+  /** 先頭の window が SELECT 列全体を占める従来の公開 WINDOW_COL か。 */
+  private startsWithStandaloneWindowColumn(): boolean {
+    const valueWindow = this.tryValueWindowFunc();
+    const rankingWindow = this.tryWindowFunc();
+    const aggregateWindow = this.tryAggregateFunc();
+    if (valueWindow === null && rankingWindow === null && aggregateWindow === null) return false;
+    let depth = 0;
+    let functionClose = -1;
+    for (let index = this.pos + 1; index < this.tokens.length; index++) {
+      const token = this.tokens[index];
+      if (token.kind === TokenKind.LPAREN) depth++;
+      else if (token.kind === TokenKind.RPAREN && --depth === 0) { functionClose = index; break; }
+    }
+    const overIndex = functionClose + 1;
+    if (functionClose < 0 || this.tokens[overIndex]?.kind !== TokenKind.IDENT
+      || this.tokens[overIndex].value.toUpperCase() !== "OVER") return false;
+    if (overIndex < 0 || this.tokens[overIndex + 1]?.kind !== TokenKind.LPAREN) return false;
+    depth = 0;
+    for (let index = overIndex + 1; index < this.tokens.length; index++) {
+      const token = this.tokens[index];
+      if (token.kind === TokenKind.LPAREN) depth++;
+      else if (token.kind === TokenKind.RPAREN && --depth === 0) {
+        const next = this.tokens[index + 1]?.kind;
+        return next === TokenKind.AS || next === TokenKind.COMMA || next === TokenKind.FROM
+          || next === TokenKind.SEMICOLON || next === TokenKind.EOF;
+      }
+    }
+    return false;
+  }
+
+  private startsWithWindowFunction(): boolean {
+    if (this.tryValueWindowFunc() !== null || this.tryWindowFunc() !== null) return true;
+    if (this.tryAggregateFunc() === null) return false;
+    let depth = 0;
+    for (let index = this.pos + 1; index < this.tokens.length; index++) {
+      const token = this.tokens[index];
+      if (token.kind === TokenKind.LPAREN) depth++;
+      else if (token.kind === TokenKind.RPAREN && --depth === 0) {
+        const next = this.tokens[index + 1];
+        return next?.kind === TokenKind.IDENT && next.value.toUpperCase() === "OVER";
+      }
+    }
+    return false;
+  }
+
+  private leadingFunctionArgumentContainsOver(): boolean {
+    let depth = 0;
+    for (let index = this.pos + 1; index < this.tokens.length; index++) {
+      const token = this.tokens[index];
+      if (token.kind === TokenKind.LPAREN) depth++;
+      else if (token.kind === TokenKind.RPAREN && --depth === 0) return false;
+      if (depth > 0 && token.kind === TokenKind.IDENT && token.value.toUpperCase() === "OVER") return true;
+    }
+    return false;
+  }
+
+  private registerHiddenWindow(window: WindowColumn): string {
+    if (this.hiddenWindows === null) {
+      throw new ParseError(WINDOW_RESULT_IN_EXPRESSION_MESSAGE, this.peek());
+    }
+    const canonical = JSON.stringify({ ...window, alias: "" });
+    const existing = this.hiddenWindows.find((candidate) =>
+      JSON.stringify({ ...candidate, alias: "" }) === canonical
+    );
+    if (existing) return existing.alias;
+    const alias = `__ksql_window_${this.hiddenWindows.length}`;
+    this.hiddenWindows.push({ ...window, alias });
+    return alias;
+  }
+
+  private parseHiddenWindowReference(): FieldRef | null {
+    if (this.hiddenWindows === null) return null;
+    const valueFunc = this.tryValueWindowFunc();
+    const rankingFunc = this.tryWindowFunc();
+    const aggregateFunc = this.tryAggregateFunc();
+    if (valueFunc === null && rankingFunc === null && aggregateFunc === null) return null;
+    if (this.insideWindowExpression > 0) {
+      throw new ParseError(WINDOW_RESULT_IN_EXPRESSION_MESSAGE, this.peek());
+    }
+    let argumentDepth = 0;
+    for (let index = this.pos + 1; index < this.tokens.length; index++) {
+      const token = this.tokens[index];
+      if (token.kind === TokenKind.LPAREN) argumentDepth++;
+      else if (token.kind === TokenKind.RPAREN && --argumentDepth === 0) break;
+      if (argumentDepth > 0 && token.kind === TokenKind.IDENT && token.value.toUpperCase() === "OVER") {
+        throw new ParseError(WINDOW_RESULT_IN_EXPRESSION_MESSAGE, token);
+      }
+    }
+    const startPos = this.pos;
+    this.insideWindowExpression++;
+    try {
+      let window: WindowColumn;
+      if (valueFunc !== null) {
+        window = this.parseValueWindowColumn(valueFunc, "");
+      } else if (rankingFunc !== null) {
+        window = this.parseWindowColumn(rankingFunc, "");
+      } else {
+        const ref = this.parseAggregateRef(aggregateFunc!, true);
+        if (!this.isSoftKeyword("OVER")) {
+          this.pos = startPos;
+          return null;
+        }
+        window = this.parseAggregateWindowColumn(ref, "");
+      }
+      const field = this.registerHiddenWindow(window);
+      return { type: "FIELD", tableAlias: null, field, hiddenWindowRef: true };
+    } finally {
+      this.insideWindowExpression--;
+    }
   }
 
   private parseWindowPartitionKey(): WindowColumn["partitionBy"][number] {
@@ -1875,7 +2030,7 @@ export class Parser {
     return { type: "FIELD", tableAlias: ref.tableAlias, field: ref.field };
   }
 
-  private parseWindowColumn(func: WindowFunc): WindowColumn {
+  private parseWindowColumn(func: WindowFunc, hiddenAlias?: string): WindowColumn {
     this.advance();
     this.expect(TokenKind.LPAREN);
     if (this.peek().kind !== TokenKind.RPAREN) {
@@ -1899,6 +2054,9 @@ export class Parser {
       : [];
     this.expect(TokenKind.RPAREN);
 
+    if (hiddenAlias !== undefined) {
+      return { type: "WINDOW_COL", func, partitionBy, orderBy, alias: hiddenAlias };
+    }
     if (!this.consume(TokenKind.AS)) {
       throw new ParseError("ウィンドウ関数には AS alias が必要です", this.peek());
     }
@@ -1906,7 +2064,7 @@ export class Parser {
     return this.withAliasDisplay({ type: "WINDOW_COL", func, partitionBy, orderBy, alias: parsedAlias.alias }, parsedAlias);
   }
 
-  private parseValueWindowColumn(valueFunc: ValueWindowFunc): ValueWindowColumn {
+  private parseValueWindowColumn(valueFunc: ValueWindowFunc, hiddenAlias?: string): ValueWindowColumn {
     this.advance(); // LAG / LEAD (soft keyword IDENT)
     this.expect(TokenKind.LPAREN);
     const aggregateFunc = this.tryAggregateFunc();
@@ -1948,8 +2106,14 @@ export class Parser {
     const orderBy = this.parseOrderBy();
     this.expect(TokenKind.RPAREN);
 
-    if (this.isArithOp(this.peek().kind) || this.peek().kind === TokenKind.CONCAT_OP) {
+    if (hiddenAlias === undefined && (this.isArithOp(this.peek().kind) || this.peek().kind === TokenKind.CONCAT_OP)) {
       throw new ParseError(WINDOW_RESULT_IN_EXPRESSION_MESSAGE, this.peek());
+    }
+    if (hiddenAlias !== undefined) {
+      return {
+        type: "WINDOW_COL", windowKind: "VALUE", valueFunc, arg, offset,
+        partitionBy, orderBy, alias: hiddenAlias,
+      };
     }
     if (!this.consume(TokenKind.AS)) {
       throw new ParseError("ウィンドウ関数には AS alias が必要です", this.peek());
@@ -1961,7 +2125,7 @@ export class Parser {
     }, parsedAlias);
   }
 
-  private parseAggregateWindowColumn(ref: AggregateRef): AggregateWindowColumn {
+  private parseAggregateWindowColumn(ref: AggregateRef, hiddenAlias?: string): AggregateWindowColumn {
     const supported = new Set<AggregateFunc>(["SUM", "COUNT", "AVG", "MIN", "MAX"]);
     if (!supported.has(ref.func)) {
       throw new ParseError(
@@ -2011,11 +2175,17 @@ export class Parser {
     }
     this.expect(TokenKind.RPAREN);
 
-    if (this.isArithOp(this.peek().kind)) {
+    if (hiddenAlias === undefined && this.isArithOp(this.peek().kind)) {
       throw new ParseError(
         WINDOW_RESULT_IN_EXPRESSION_MESSAGE,
         this.peek()
       );
+    }
+    if (hiddenAlias !== undefined) {
+      return {
+        type: "WINDOW_COL", windowKind: "AGGREGATE", aggFunc: ref.func as WindowAggFunc,
+        arg: ref.arg, frame, partitionBy, orderBy, alias: hiddenAlias,
+      };
     }
     if (!this.consume(TokenKind.AS)) {
       throw new ParseError("ウィンドウ関数には AS alias が必要です", this.peek());
@@ -2296,6 +2466,8 @@ export class Parser {
 
   private parseScalarPrimary(allowCase: boolean): ScalarValueExpr {
     const tok = this.peek();
+    const hiddenWindow = this.parseHiddenWindowReference();
+    if (hiddenWindow) return hiddenWindow;
     if (tok.kind === TokenKind.LPAREN) {
       if (this.peekAt(1).kind === TokenKind.SELECT) throw new ParseError("スカラー値式にサブクエリは使用できません", tok);
       this.advance();
@@ -2320,9 +2492,18 @@ export class Parser {
     if (tok.kind === TokenKind.VARIABLE) { this.advance(); return this.finishVariableReference(tok); }
     if (tok.kind === TokenKind.CASE) {
       if (!allowCase) throw new ParseError("このスカラー値式では CASE を使用できません", tok);
-      return this.parseCaseWhenExpr();
+      return this.parseCaseWhenExpr(this.hiddenWindows !== null);
     }
     if (this.tryAggregateFunc() !== null) {
+      if (this.scalarAllowsAggregateArgs && this.insideWindowContainingSelectExpression > 0) {
+        const ref = this.parseAggregateRef(this.tryAggregateFunc()!, true);
+        return {
+          type: "FIELD",
+          tableAlias: null,
+          field: aggregateSyntheticName(ref.func, ref.distinct, ref.arg),
+          aggregateRef: ref,
+        };
+      }
       throw new ParseError(
         this.insideAggregateArg > 0
           ? "集計関数の引数内に集計関数は使用できません"
@@ -2409,6 +2590,10 @@ export class Parser {
   }
 
   private parseArithPrimary(): ArithNode {
+    const hiddenWindow = this.parseHiddenWindowReference();
+    if (hiddenWindow) {
+      return { type: "FIELD_REF", field: hiddenWindow.field, hiddenWindowRef: true };
+    }
     // 括弧: (expr)
     if (this.consume(TokenKind.LPAREN)) {
       const expr = this.parseArithAddSub();
@@ -2522,6 +2707,7 @@ export class Parser {
   /** THEN / ELSE の結果値。`||` を含む場合だけ新スカラー文法へ渡す。 */
   private parseCaseResult(allowAggregateResult = false): CaseResult {
     const tok = this.peek();
+    if (this.hiddenWindows !== null && this.startsWithWindowFunction()) return this.parseArithAddSub();
     if (this.insideAggregateArg > 0 && this.tryAggregateFunc() !== null) {
       throw new ParseError("集計関数の引数内に集計関数は使用できません", tok);
     }
@@ -2680,6 +2866,9 @@ export class Parser {
 
   /** 文字列関数の引数: ScalarValueExpr / 集計算術式 */
   private parseStringFuncArg(): StringFuncArg {
+    if (this.insideWindowContainingSelectExpression > 0) {
+      return this.parseScalarAddSubConcat(this.scalarAllowsCase);
+    }
     // 関数引数内では、集計式（例: SUM(金額), 100+SUM(金額)）を優先的に試す。
     // ただし集計関数を含まない式は従来どおり算術式として扱う。
     if (this.scalarAllowsAggregateArgs) {
@@ -3184,6 +3373,18 @@ export class Parser {
   // - 集計関数（HAVING のみ）: COUNT(*) / SUM(f) ...
   // - 通常フィールド参照: [alias.]field
   private parseFieldValue(): FieldValue {
+    const hiddenWindow = this.parseHiddenWindowReference();
+    if (hiddenWindow) {
+      if (this.isArithOp(this.peek().kind)) {
+        return {
+          type: "ARITH_FIELD",
+          expr: this.continueArith({
+            type: "FIELD_REF", field: hiddenWindow.field, hiddenWindowRef: true,
+          }),
+        };
+      }
+      return hiddenWindow;
+    }
     if (this.groupingFieldContext === "HAVING" && this.isNonAggregateArithmeticStartWithAggregate()) {
       throw new ParseError(
         `集計算術式は集計関数から始まる必要があります（${this.peek().value}）。`,
@@ -3775,7 +3976,7 @@ export class Parser {
       const start = this.pos;
       const ref = this.parseAggregateRef(aggregateStart);
       if (this.isSoftKeyword("OVER")) {
-        throw new ParseError("ウィンドウ関数は SELECT 列にのみ記述できます", this.peek());
+        throw new ParseError(WINDOW_RESULT_IN_EXPRESSION_MESSAGE, this.peek());
       }
       if (!this.isArithOp(this.peek().kind)) {
         return {
@@ -4658,7 +4859,7 @@ export class Parser {
 
   private rejectAggregateWindowOutsideSelect(): void {
     if (this.isSoftKeyword("OVER")) {
-      throw new ParseError("ウィンドウ関数は SELECT 列にのみ記述できます", this.peek());
+      throw new ParseError(WINDOW_RESULT_IN_EXPRESSION_MESSAGE, this.peek());
     }
   }
 
@@ -5032,6 +5233,9 @@ export class Parser {
     }
     const digitPrefixed = this.tryParseDigitPrefixedIdentifier();
     if (digitPrefixed !== null) return digitPrefixed;
+    if (this.startsWithWindowFunction()) {
+      throw new ParseError(WINDOW_RESULT_IN_EXPRESSION_MESSAGE, tok);
+    }
     throw new ParseError(
       "フィールド名またはテーブル名が必要です",
       tok
