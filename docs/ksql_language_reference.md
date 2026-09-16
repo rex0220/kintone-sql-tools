@@ -2000,7 +2000,7 @@ ORDER BY weekday ASC
 - ORDER BY 名が SELECT alias と入力行フィールドの両方に完全一致する場合は、**SELECT alias を優先**します。ドットを含む alias も完全一致を先に判定するため、同名の修飾物理列にはその ORDER BY からアクセスできません
 - 同じ alias を複数の SELECT 列へ指定した場合は、出力と同じく**後に記述した列が優先**されます
 - alias に一致しない名前は従来どおり入力行フィールドとして解決します。どちらにも解決できない名前は `ORDER_KEY_UNRESOLVED` で実行前に拒否します
-- この alias 解決はトップレベルの通常 `ORDER BY` だけに適用します。`OVER (ORDER BY ...)` から同一 SELECT の alias は参照できません。必要な場合は CTE または一時テーブルで一度列を実体化してください
+- この alias 解決はトップレベルの通常 `ORDER BY` だけに適用します。`OVER (ORDER BY ...)` から参照できる同一 SELECT の alias は、集計を含む列の別名（`SUM(売上) AS 合計` → `OVER (ORDER BY 合計)`・v3.81.0〜）だけです。集計を含まない列の別名（`売上 * 2 AS 倍`・グループキーの別名）は参照できず、実行前に `unknown field code(s)` で止まります。必要な場合は CTE または一時テーブルで一度列を実体化してください
 - `KORDER BY` は SELECT alias を直接物理列として扱いません
 
 ### GROUPING() による小計・総計行のソート

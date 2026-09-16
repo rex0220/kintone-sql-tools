@@ -24,7 +24,7 @@ const WRITING_RULE_MARKERS = [
   "join-key prefilter flows only FROM",
   "Relative-date functions are WHERE-only",
   "there is no NULL",
-  "cannot share a SELECT",
+  "may share a SELECT with aggregates",
   "lowercased in result names",
   "Output only the requested columns",
   "ksql_validate, then ksql_explain",
