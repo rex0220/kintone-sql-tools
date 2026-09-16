@@ -1,4 +1,7 @@
-import { execute, getSelectColumnMeta, type KintoneClient, type KintoneFieldInfo, type SelectResult } from "../../execute";
+import {
+  execute, executeBatch, getSelectColumnMeta,
+  type KintoneClient, type KintoneFieldInfo, type SelectResult,
+} from "../../execute";
 import { completeInputReasons } from "../../core/dmlGuard";
 import type { KintoneRecord } from "../../converter/dmlToKintone";
 import { serializeCsvExport } from "../../export/csvSerializer";
@@ -73,6 +76,50 @@ test("B184-B: 構成比・累積構成比・ABC の1段版を実行する", asyn
     ["D", "1", "A"], ["C", "2", "A"], ["E", "2", "C"], ["B", "4", "C"], ["A", "5", "C"],
   ]);
   expect(parse(sql).hiddenWindows).toHaveLength(2);
+});
+
+test("B190: CTE を source にした非集計 SELECT で CASE 条件の左辺に隠し窓を置ける", async () => {
+  // v3.81.0〜v3.82.0 は `unknown field code(s): __ksql_window_0 (base)` で落ちていた
+  // （CASE 条件の左辺 FieldValue だけ hiddenWindowRef を取得列・B86 検査から除外していなかった）
+  const c = client(sales);
+  const result = await execute(
+    "WITH base AS (SELECT 会社名, SUM(売上) AS 売上合計 FROM APP100 GROUP BY 会社名) " +
+      "SELECT 会社名, CASE WHEN SUM(売上合計) OVER () = 0 THEN 0 " +
+      "ELSE ROUND(売上合計 * 100.0 / SUM(売上合計) OVER (), 1) END AS 構成比, " +
+      "CASE WHEN RANK() OVER (ORDER BY 売上合計 DESC) <= 2 THEN 'TOP' ELSE '-' END AS 区分 " +
+      "FROM base ORDER BY 売上合計 DESC, 会社名",
+    c, { cacheContext: "b190-cte" }
+  ) as SelectResult;
+  const staged = await execute(
+    "WITH base AS (SELECT 会社名, SUM(売上) AS 売上合計 FROM APP100 GROUP BY 会社名), " +
+      "ranked AS (SELECT 会社名, 売上合計, SUM(売上合計) OVER () AS 総計, RANK() OVER (ORDER BY 売上合計 DESC) AS 順位 FROM base) " +
+      "SELECT 会社名, CASE WHEN 総計 = 0 THEN 0 ELSE ROUND(売上合計 * 100.0 / 総計, 1) END AS 構成比, " +
+      "CASE WHEN 順位 <= 2 THEN 'TOP' ELSE '-' END AS 区分 " +
+      "FROM ranked ORDER BY 売上合計 DESC, 会社名",
+    client(sales), { cacheContext: "b190-cte-staged" }
+  ) as SelectResult;
+  expect(result.columns).toEqual(["会社名", "構成比", "区分"]);
+  expect(result.rows).toEqual(staged.rows);
+  expect(result.rows.map((row) => [row.会社名, row.構成比, row.区分])).toEqual([
+    ["D", "53.4", "TOP"], ["C", "23.3", "TOP"], ["E", "23.3", "TOP"], ["B", "0", "-"], ["A", "0", "-"],
+  ]);
+  // 隠し窓の内部名は kintone の取得列（fields）に出さない
+  expect(c.fields.flat().some((name) => name.startsWith("__ksql_window_"))).toBe(false);
+});
+
+test("B190: 一時テーブルを source にした非集計 SELECT でも CASE 条件の隠し窓が通る", async () => {
+  const batch = await executeBatch(
+    "CREATE TEMP TABLE #base AS SELECT 会社名, SUM(売上) AS 売上合計 FROM APP100 GROUP BY 会社名; " +
+      "SELECT 会社名, CASE WHEN RANK() OVER (ORDER BY 売上合計 DESC) <= 2 THEN 'TOP' ELSE '-' END AS 区分 " +
+      "FROM #base ORDER BY 売上合計 DESC, 会社名",
+    client(sales), { cacheContext: "b190-temp" }
+  );
+  expect(batch.statements.map((s) => s.status)).toEqual(["success", "success"]);
+  const result = batch.statements[1].result as SelectResult;
+  expect(result.columns).toEqual(["会社名", "区分"]);
+  expect(result.rows.map((row) => [row.会社名, row.区分])).toEqual([
+    ["D", "TOP"], ["C", "TOP"], ["E", "TOP"], ["B", "-"], ["A", "-"],
+  ]);
 });
 
 test("B184-B: LAG の算術・CASE・COALESCE・連結と複数の隠し窓を評価する", async () => {

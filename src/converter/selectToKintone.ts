@@ -654,6 +654,9 @@ function collectRequiredFieldsByTable(
     phase: "where" | "having" | "groupBy" | "orderBy" | "select" = "select"
   ): void => {
     if (fv.type === "FIELD") {
+      // B190: CASE 条件の左辺に置かれた隠しウィンドウ参照（`__ksql_window_n`）は
+      // 取得列でも B86 の存在検査対象でもない（walkArith / walkScalar と同じ扱い）
+      if (fv.hiddenWindowRef) return;
       if (fv.aggregateRef) {
         walkAgg(fv.aggregateRef, phase);
         return;
