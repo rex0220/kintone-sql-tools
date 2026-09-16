@@ -10,6 +10,7 @@ import type {
   PlainGroupBySourceSchema,
 } from "./optimization/plainGroupByPlan";
 import { resolvePlainFieldReference } from "./optimization/plainGroupByPlan";
+import { resolveProjectedName } from "./projectedNameResolution";
 
 export const NON_GROUPED_DEPENDENCY_REASON = "B65_NON_GROUPED_DEPENDENCY";
 
@@ -251,10 +252,11 @@ function walkDependency(node: unknown, context: WalkContext): void {
     if (context.clause !== "SELECT" && ref.tableAlias === null
       && AGGREGATE_SYNTHETIC_REFERENCE.test(ref.field)) return;
     if (context.clause !== "SELECT" && ref.tableAlias === null) {
-      const targets = context.aliases.get(ref.field) ?? [];
-      if (targets.length === 1 && !context.resolvingAliases.has(ref.field)) {
+      const alias = resolveProjectedName(ref.field, context.aliases.keys());
+      const targets = alias === undefined ? [] : (context.aliases.get(alias) ?? []);
+      if (targets.length === 1 && alias !== undefined && !context.resolvingAliases.has(alias)) {
         const resolvingAliases = new Set(context.resolvingAliases);
-        resolvingAliases.add(ref.field);
+        resolvingAliases.add(alias);
         walkDependency(targets[0], { ...context, resolvingAliases });
         return;
       }
