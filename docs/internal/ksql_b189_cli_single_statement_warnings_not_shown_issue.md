@@ -1,6 +1,6 @@
 # B189 CLI のテキスト／csv／markdown 表示は単文 SELECT の `warnings` をどこにも出さない — JSON とバッチ表示（B188 後）だけが見える
 
-- 状態: 📝 **起票（2026-09-16）**。未着手。実測 v3.78.0 + B188（CLI 再ビルド版・dev profile・SFA パック）。改善（表示のみ・結果不変・規模 S）。v3.79.0 候補
+- 状態: 🚧 **codex が案 A を実装・Claude レビュー済み（2026-09-16・`b188/dev`・コミット待ち・[報告](ksql_b189_codex_impl_report.md)）**。単文 SELECT の非 JSON 出力後に `warning=<文言>` を stderr へ（`--quiet` で抑止・json は `warnings` 配列のまま）。stdout は 4 スナップショットで不変を固定。実機で table / csv の stderr に RANGE 警告と B187 の未解決集計警告が出ることを確認。起票時の実測 v3.78.0 + B188（CLI 再ビルド版・dev profile・SFA パック）。改善（表示のみ・結果不変・規模 S）。v3.79.0
 
 ## 1. 現象
 

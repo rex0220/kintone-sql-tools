@@ -260,6 +260,9 @@ node dist-cli/ksql.js ^
   -e "SELECT a.顧客No AS 顧客No, a.会社名, b.案件No_ AS 案件No, b.案件名, b.商談フェーズ, b.売上 FROM APP4148 a JOIN APP4149 b ON a.顧客No = b.顧客No_;"
 ```
 
+v3.79.0 以降、エンジンの警告は stderr に `warning=<警告文>` として出力され、`--quiet` で抑止できます。
+`--format json` では stderr に重ねて出力せず、従来どおり `warnings` 配列に含めます。
+
 ## 10. よくあるエラー
 
 - `AuthError: username/password are required for profile \"...\".`
