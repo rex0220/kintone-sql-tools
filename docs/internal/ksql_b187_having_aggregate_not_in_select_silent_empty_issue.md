@@ -1,6 +1,6 @@
 # B187 `HAVING` に SELECT 列に無い集計を書くと 0 行になる — 契約どおりで警告は出るが、標準 SQL の形が通らない
 
-- 状態: 📝 **起票（2026-09-16・同日訂正）**。未着手。実測 v3.78.0（CLI・dev profile・SFA パック）。**訂正**: 起票時は「エラーも警告も出ない」と書いたが、エンジンは `warnings` に「比較条件で参照した集計値を確認できません。SELECT リストに同じ集計式を含めてください。」（B121 由来・`UNRESOLVED_AGGREGATE_COMPARISON_WARNING`）を出している。見えなかったのは CLI のテキスト表示が単文 SELECT の `warnings` を出さないため（表示の穴は [B189](ksql_b189_cli_single_statement_warnings_not_shown_issue.md) に分離）。本件は「標準 SQL の形を評価する」機能改善（案 A）に絞る。B184 の後
+- 状態: 🚧 **codex が案 A を実装・Claude レビュー済み（2026-09-16・`b187/dev`・コミット待ち・[報告](ksql_b187_codex_impl_report.md)）**。`applyGroupBy` / `applyGroupingSets` で SELECT 集計の実体化直後に HAVING の集計依存も `materializeAggregateDependencies` で実体化（B182 の helper 再利用・出力列にはしない・取得列と EXPLAIN 不変）。旧契約を固定していた既存テスト 4 件（B164・B65-A04・B56・B189）を新契約へ。実機で起票 SQL が 3 行・警告なし、ROLLUP も評価。**結果が変わる修正**なので v3.80.0（minor）で出す。起票時の実測 v3.78.0（CLI・dev profile・SFA パック）。**訂正**: 起票時は「エラーも警告も出ない」と書いたが、エンジンは `warnings` に「比較条件で参照した集計値を確認できません。SELECT リストに同じ集計式を含めてください。」（B121 由来・`UNRESOLVED_AGGREGATE_COMPARISON_WARNING`）を出している。見えなかったのは CLI のテキスト表示が単文 SELECT の `warnings` を出さないため（表示の穴は [B189](ksql_b189_cli_single_statement_warnings_not_shown_issue.md) に分離）。本件は「標準 SQL の形を評価する」機能改善（案 A）に絞る。B184 の後
 
 ## 1. 現象
 

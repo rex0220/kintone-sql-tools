@@ -1928,7 +1928,7 @@ SELECT COUNT(*) FROM APP100 WHERE 異常フラグ = '1'
 GROUP BY 後の集計結果に対してフィルタをかけます。  
 HAVING 句には集計関数・GROUP BY フィールドを使用できます。
 
-直接記述した集計関数は、同じ集計が SELECT 列にも存在する場合に限り評価できます。SELECT にない集計を HAVING 専用で追加計算はしません。v3.16.0 以降の `CASE` 式引数も同じ規則で直接記述でき、SELECT で付けた alias から参照する書き方も有効です。
+HAVING に直接書いた集計は、SELECT 列に無くても評価されます（v3.80.0 以降。以前は SELECT に同じ集計がある場合に限り評価され、無いと 0 行 + 警告になりました）。HAVING の集計は出力列にはなりません。v3.16.0 以降の `CASE` 式引数も同じ規則で直接記述でき、SELECT で付けた alias から参照する書き方も有効です。
 
 B65 の HAVING は grouping set の集約後に各行へ作用します。通常の集計条件に加え、v3.18.0 以降は `HAVING` 内で `GROUPING(field)` を使用できます。`HAVING GROUPING(会社名) = 1` は総計・小計行だけ、`= 0` は明細行だけを残し、`HAVING GROUPING(会社名) = 1 AND SUM(売上) > 0` のように集計条件と組み合わせられます。`GROUPING()` は行の所属 grouping set から `0` / `1` を返す membership 判定であり、grouped 列が空文字の明細行と総計行を取り違えません。`WHERE`・JOIN 条件・集計関数の引数・ウィンドウ定義の中では `GROUPING()` は使用できません。
 
@@ -1940,10 +1940,10 @@ HAVING COUNT(*) >= 5
 ```
 
 ```sql
-SELECT 担当者, SUM(金額) AS 合計
+SELECT 商談フェーズ, COUNT(*) AS 件数
 FROM APP100
-GROUP BY 担当者
-HAVING SUM(金額) > 1000000
+GROUP BY 商談フェーズ
+HAVING SUM(売上) > 1000000
 ```
 
 ```sql

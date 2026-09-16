@@ -454,7 +454,8 @@ export function applyGroupBy(
   columns: SelectColumn[],
   resolveAggSortKind?: AggregateSortKindResolver,
   resolutionPlan?: PlainGroupByResolutionPlan,
-  aliasEvaluationContext: SelectColumnEvaluationContext = {}
+  aliasEvaluationContext: SelectColumnEvaluationContext = {},
+  having: WhereExpr | null = null
 ): ProcessRow[] {
   if (resolutionPlan && resolutionPlan.items.length !== groupByKeys.length) {
     throw new Error("InternalError: plain GROUP BY resolution plan length does not match group keys.");
@@ -507,6 +508,13 @@ export function applyGroupBy(
     materializeAggregateColumns(
       outRow, groupRows, columns, resolveAggSortKind, aliasEvaluationContext.evaluationContext
     );
+    materializeAggregateDependencies(
+      outRow,
+      groupRows,
+      having,
+      resolveAggSortKind,
+      aliasEvaluationContext.evaluationContext
+    );
 
     result.push(outRow);
   }
@@ -528,7 +536,8 @@ export function applyGroupingSets(
   spec: ResolvedGroupingSpec,
   columns: SelectColumn[],
   resolveAggSortKind?: AggregateSortKindResolver,
-  limits: { maxGeneratedRows?: number; evaluationContext?: EvaluationContext } = {}
+  limits: { maxGeneratedRows?: number; evaluationContext?: EvaluationContext } = {},
+  having: WhereExpr | null = null
 ): ProcessRow[] {
   const result: ProcessRow[] = [];
   let generatedRows = 0;
@@ -594,6 +603,9 @@ export function applyGroupingSets(
 
       materializeAggregateColumns(
         outRow, groupRows, columns, resolveAggSortKind, limits.evaluationContext
+      );
+      materializeAggregateDependencies(
+        outRow, groupRows, having, resolveAggSortKind, limits.evaluationContext
       );
       attachGroupingRowMeta(outRow, includedCanonicalIds);
       result.push(outRow);
@@ -2349,7 +2361,8 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
       resolvedGroupingSpec,
       stmt.columns,
       aggregateSortKindResolver,
-      { maxGeneratedRows: B65_MAX_GENERATED_ROWS, evaluationContext }
+      { maxGeneratedRows: B65_MAX_GENERATED_ROWS, evaluationContext },
+      stmt.having
     );
   } else if (grouping.type === "PLAIN" || hasAggregateColumns(stmt.columns)) {
     rows = applyGroupBy(
@@ -2363,7 +2376,8 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
         resolveFieldType: fieldTypeResolver,
         resolveFieldSemantics: fieldSemanticsResolver,
         evaluationContext,
-      }
+      },
+      stmt.having
     );
   }
 
