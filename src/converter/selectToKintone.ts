@@ -79,7 +79,7 @@ export function resolveSelectMode(stmt: SelectStatement): SelectMode {
   if (stmt.joins.length > 0) return "FULL_SCAN";
   if (normalizeGroupingSpec(stmt).type !== "NONE") return "FULL_SCAN";
   if (stmt.distinct) return "FULL_SCAN";
-  if (hasWindowColumns(stmt.columns)) return "FULL_SCAN";
+  if (hasWindowColumns(stmt.columns) || (stmt.hiddenWindows?.length ?? 0) > 0) return "FULL_SCAN";
   if (stmt.columns.some((c) =>
     c.type === "AGGREGATE" ||
     c.type === "ARITH_AGG_COL" ||
@@ -562,6 +562,7 @@ function collectRequiredFieldsByTable(
       );
     }
     if (node.type === "FIELD_REF") {
+      if (node.hiddenWindowRef) return;
       addFieldName(node.field, phase);
       return;
     }
@@ -604,6 +605,7 @@ function collectRequiredFieldsByTable(
 
   const walkScalar = (expr: ScalarValueExpr, phase: "where" | "having" | "groupBy" | "orderBy" | "select" = "select"): void => {
     if (expr.type === "FIELD") {
+      if (expr.hiddenWindowRef) return;
       if (expr.aggregateRef) {
         walkAgg(expr.aggregateRef, phase);
         return;
@@ -752,7 +754,7 @@ function collectRequiredFieldsByTable(
     walkStringFunc(k.expr, phase);
   };
 
-  for (const col of stmt.columns) {
+  for (const col of [...stmt.columns, ...(stmt.hiddenWindows ?? [])]) {
     switch (col.type) {
       case "WILDCARD":
         markAllTargetTables();

@@ -2134,7 +2134,8 @@ DENSE_RANK() OVER ([PARTITION BY フィールド [, ...]] [ORDER BY キー [ASC|
 - `AS alias` は必須
 - 集計引数は通常集計と同じく、フィールド・算術式・関数・`CASE`・`||`・`@var` を指定できる。`COUNT(*)` も使用できる
 - v3.81.0 から、`GROUP BY` / 集計と同じ SELECT にウィンドウ関数を書ける。ウィンドウから参照できるのは、グループキー、同じ SELECT の集計の別名、集計式、`GROUPING()`。評価順は `GROUP BY` → `HAVING` → ウィンドウ
-- `SUM(DISTINCT x) OVER (...)` のような引数の `DISTINCT`、`GROUP_CONCAT`・統計集計の `OVER`、ウィンドウ結果を同じ SELECT 内の式へ入れる形は未対応。CTEで一度実体化する
+- v3.81.0 から、ウィンドウ関数を関数の引数・算術・`CASE`・`||` の中に書ける。同じウィンドウ式を複数箇所に書いた場合は1回だけ評価する。`WHERE` / `HAVING` / `JOIN ON` / `GROUP BY` / 文レベルの `ORDER BY` では使えない
+- `SUM(DISTINCT x) OVER (...)` のような引数の `DISTINCT`、`GROUP_CONCAT`・統計集計の `OVER`、ウィンドウ関数の中にウィンドウ関数を書く形は未対応
 - `SELECT DISTINCT` とウィンドウ列の併用は可能。ウィンドウ評価後に DISTINCT を適用する
 - `LAG(expr, n)` はソート後のパーティション内で `n` 行前、`LEAD(expr, n)` は `n` 行後の値を返す。パーティション外は空文字
 - `offset` は省略時 `1`。非負の safe integer リテラルだけを指定でき、`0` は現在行を返す。変数・式・小数・負数は使用できない
@@ -2153,21 +2154,19 @@ FROM APP300
 
 ### 前後の行を参照する `LAG` / `LEAD`
 
-前月比のようにウィンドウ結果を計算へ使う場合は、集約、`LAG`、比率計算の3段に分けます。ウィンドウ結果を同じSELECTの式へ直接入れることはできません。
+v3.81.0 から、前月差・前月比のような計算もウィンドウ関数と同じ SELECT に書けます。先頭行の `LAG` は空文字を返し、算術では0として扱われます。空文字のまま返したい場合は `CASE` で判定します。
 
 ```sql
-WITH 月次 AS (
-  SELECT DATE_FORMAT(日付, '%Y-%m') AS 年月, SUM(個数) AS 出庫数
-  FROM APP4228 WHERE 入出庫区分 = '出庫' GROUP BY 年月
-), 前月付き AS (
-  SELECT 年月, 出庫数,
-         LAG(出庫数) OVER (ORDER BY 年月) AS 前月
-  FROM 月次
-)
-SELECT 年月, 出庫数, 前月,
-       CASE WHEN 前月 = '' THEN ''
-            ELSE ROUND((出庫数 - 前月) * 100.0 / 前月, 1) END AS 前月比
-FROM 前月付き
+SELECT DATE_FORMAT(日付, '%Y-%m') AS 年月,
+       SUM(個数) AS 出庫数,
+       SUM(個数) - LAG(SUM(個数)) OVER (ORDER BY DATE_FORMAT(日付, '%Y-%m')) AS 前月差,
+       CASE WHEN LAG(SUM(個数)) OVER (ORDER BY DATE_FORMAT(日付, '%Y-%m')) = '' THEN ''
+            ELSE ROUND((SUM(個数) - LAG(SUM(個数)) OVER (ORDER BY DATE_FORMAT(日付, '%Y-%m'))) * 100.0
+                       / LAG(SUM(個数)) OVER (ORDER BY DATE_FORMAT(日付, '%Y-%m')), 1)
+       END AS 前月比
+FROM APP4228
+WHERE 入出庫区分 = '出庫'
+GROUP BY DATE_FORMAT(日付, '%Y-%m')
 ORDER BY 年月
 ```
 
@@ -2223,15 +2222,18 @@ GROUP BY 会社名
 ORDER BY 順位, 会社名
 ```
 
-ウィンドウの結果を同じ SELECT の式の中で使う形は未対応です。割り算、`ROUND`、`CASE` などでウィンドウ結果を使う場合は段を分けます。次の3段の書き方は、集計・ウィンドウ・最終計算を段ごとに確かめたいときにも使えます。
+v3.81.0 から、ウィンドウ関数を関数の引数・算術・`CASE` の中に書けます。`WHERE` / `HAVING` では使えません。たとえば全社売上に対する構成比は1段で書けます。
 
 ```sql
-WITH agg AS (
-  SELECT 部署, SUM(売上) AS 合計 FROM APP300 GROUP BY 部署
-)
-SELECT 部署, 合計, RANK() OVER (ORDER BY 合計 DESC) AS 順位
-FROM agg
+SELECT 会社名,
+       SUM(売上) AS 売上合計,
+       ROUND(SUM(売上) * 100.0 / SUM(SUM(売上)) OVER (), 1) AS 構成比
+FROM APP100
+GROUP BY 会社名
+ORDER BY 売上合計 DESC, 会社名
 ```
+
+集計・ウィンドウ・最終計算を段ごとに確かめたいときは、従来どおり CTE または一時テーブルで3段に分けても同じ結果になります。
 
 ---
 
