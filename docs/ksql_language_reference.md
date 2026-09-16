@@ -2133,6 +2133,7 @@ DENSE_RANK() OVER ([PARTITION BY フィールド [, ...]] [ORDER BY キー [ASC|
 - `ORDER BY` 省略時、`RANK` / `DENSE_RANK` は全行1。`ROW_NUMBER` は取得順で採番する
 - `AS alias` は必須
 - 集計引数は通常集計と同じく、フィールド・算術式・関数・`CASE`・`||`・`@var` を指定できる。`COUNT(*)` も使用できる
+- v3.81.0 から、`GROUP BY` / 集計と同じ SELECT にウィンドウ関数を書ける。ウィンドウから参照できるのは、グループキー、同じ SELECT の集計の別名、集計式、`GROUPING()`。評価順は `GROUP BY` → `HAVING` → ウィンドウ
 - `SUM(DISTINCT x) OVER (...)` のような引数の `DISTINCT`、`GROUP_CONCAT`・統計集計の `OVER`、ウィンドウ結果を同じ SELECT 内の式へ入れる形は未対応。CTEで一度実体化する
 - `SELECT DISTINCT` とウィンドウ列の併用は可能。ウィンドウ評価後に DISTINCT を適用する
 - `LAG(expr, n)` はソート後のパーティション内で `n` 行前、`LEAD(expr, n)` は `n` 行後の値を返す。パーティション外は空文字
@@ -2212,7 +2213,17 @@ WHERE rn = 1
 
 ウィンドウ内の `ORDER BY` はトップレベルの通常`ORDER BY`と同じcanonical比較規則を使用します。CTE／一時テーブル由来でも伝播した型メタデータを使い、型を確定できない列は文字列として扱います。値の見た目による数値／文字列のペア単位切替は行いません。`KORDER BY`はウィンドウ内では使用できません。
 
-同じSELECT内での `GROUP BY`／集計関数との併用は未対応です。集約結果へ順位を付ける場合はCTEでスコープを分けます。
+v3.81.0 から、`GROUP BY` / 集計と同じ SELECT にウィンドウ関数を書けます。ウィンドウが参照できるのはグループキー・集計の別名・集計式・`GROUPING()` です。評価は `GROUP BY` → `HAVING` → ウィンドウの順なので、`HAVING` で除外されたグループは順位や累計に入りません。
+
+```sql
+SELECT 会社名, SUM(売上) AS 売上合計,
+       RANK() OVER (ORDER BY SUM(売上) DESC) AS 順位
+FROM APP100
+GROUP BY 会社名
+ORDER BY 順位, 会社名
+```
+
+ウィンドウの結果を同じ SELECT の式の中で使う形は未対応です。割り算、`ROUND`、`CASE` などでウィンドウ結果を使う場合は段を分けます。次の3段の書き方は、集計・ウィンドウ・最終計算を段ごとに確かめたいときにも使えます。
 
 ```sql
 WITH agg AS (

@@ -14,7 +14,7 @@
 
 import { Lexer, LexError } from "./lexer/lexer";
 import { Parser, ParseError } from "./parser/parser";
-import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, LegacyArithExpr, ArithNode, AggOperand, AggregateArgExpr, UnionStatement, WithStatement, WhereExpr, BinaryExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, CaseResult, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ExitStatement, ScalarSubquery, ScalarExpr, ScalarValueExpr, ValidateStatement, CheckGroup, ImportStatement, CsvDmlSource, JsonDmlSource, ApplyOperation, GroupByKey, KintoneFunction, WindowColumn, GenerateSeriesStatement, CteDefinition } from "./types/ast";
+import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, LegacyArithExpr, ArithNode, AggOperand, AggregateRef, AggregateArgExpr, UnionStatement, WithStatement, WhereExpr, BinaryExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, CaseResult, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ExitStatement, ScalarSubquery, ScalarExpr, ScalarValueExpr, ValidateStatement, CheckGroup, ImportStatement, CsvDmlSource, JsonDmlSource, ApplyOperation, GroupByKey, KintoneFunction, WindowColumn, GenerateSeriesStatement, CteDefinition } from "./types/ast";
 import { NO_FROM_CTE_NAME, numberLiteralText } from "./types/ast";
 import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
 import { completeInputReasons, requiresCompleteInput, type CompleteInputReason } from "./core/dmlGuard";
@@ -3664,6 +3664,34 @@ function hasWindowNeedingOrderProof(stmt: SelectStatement): boolean {
     || stmt.columns.some((column) => column.type === "WINDOW_COL" && column.windowKind === "VALUE");
 }
 
+function sameSelectGroupOrderIsUnique(
+  stmt: SelectStatement,
+  orderBy: readonly OrderByItem[]
+): boolean {
+  const grouping = normalizeGroupingSpec(stmt);
+  if (grouping.type !== "PLAIN" || grouping.allItems.length === 0) return false;
+  return grouping.allItems.every((groupKey) => {
+    if (orderBy.some((item) => {
+      if (groupKey.type === "FIELD_NAME" && item.key.type === "FIELD_NAME") {
+        return item.key.name === groupKey.name;
+      }
+      return groupKey.type === item.key.type && JSON.stringify(groupKey) === JSON.stringify(item.key);
+    })) return true;
+    return stmt.columns.some((column) => {
+      if (!("alias" in column) || column.alias === null) return false;
+      if (!orderBy.some((item) => item.key.type === "FIELD_NAME" && item.key.name === column.alias)) return false;
+      if (groupKey.type === "FIELD_NAME" && column.type === "FIELD") return column.field === groupKey.name;
+      if (groupKey.type === "ARITH_KEY" && column.type === "ARITH_COL") {
+        return JSON.stringify(groupKey.expr) === JSON.stringify(column.expr);
+      }
+      if (groupKey.type === "FUNC_KEY" && column.type === "STRFUNC_COL") {
+        return JSON.stringify(groupKey.expr) === JSON.stringify(column.expr);
+      }
+      return false;
+    });
+  });
+}
+
 function canProveTotalWindowOrder(
   stmt: SelectStatement,
   orderBy: readonly OrderByItem[],
@@ -3671,6 +3699,7 @@ function canProveTotalWindowOrder(
   context: WindowWarningContext,
   generatedColumn?: string
 ): boolean {
+  if (sameSelectGroupOrderIsUnique(stmt, orderBy)) return true;
   if (generatedColumn !== undefined && stmt.joins.length === 0 && stmt.from.cteName !== null) {
     return orderBy.some((item) => {
       if (item.key.type !== "FIELD_NAME") return false;
@@ -5029,6 +5058,7 @@ function bindProjectedNamesForSelect(
   for (const column of stmt.columns) {
     if (column.type !== "WINDOW_COL") continue;
     for (const ref of column.partitionBy) {
+      if (ref.type !== "FIELD") continue;
       ref.field = resolveReference(ref.field, ref.tableAlias, false);
     }
     for (const item of column.orderBy) {
@@ -5890,13 +5920,30 @@ function inferAggregateArgMeta(
   resolveField: (ref: FieldRef) => MaterializedColumnMeta | undefined
 ): MaterializedColumnMeta {
   if (arg.type === "FIELD_REF") return resolveField(aggregateFieldRef(arg.field)) ?? unknownStringColumnMeta();
-  if (arg.type === "FIELD") return resolveField(arg) ?? unknownStringColumnMeta();
+  if (arg.type === "FIELD") return arg.aggregateRef
+    ? aggregateResultColumnMeta(arg.aggregateRef, resolveField)
+    : resolveField(arg) ?? unknownStringColumnMeta();
   if (arg.type === "NUMBER" || arg.type === "ARITH" || arg.type === "SCALAR_ARITH") return syntheticColumnMeta("number");
   if (arg.type === "STRING" || arg.type === "CONCAT_OP" || arg.type === "VARIABLE") return syntheticColumnMeta("string");
   if (arg.type === "STRING_FUNC") return stringFunctionColumnMeta(arg, resolveField);
   const results = arg.branches.map((branch) => caseResultColumnMeta(branch.result, resolveField));
   if (arg.elseResult) results.push(caseResultColumnMeta(arg.elseResult, resolveField));
   return mergeExpressionColumnMeta(results);
+}
+
+function aggregateResultColumnMeta(
+  ref: AggregateRef,
+  resolveField: (field: FieldRef) => MaterializedColumnMeta | undefined
+): MaterializedColumnMeta {
+  if (ref.func === "COUNT" || ref.func === "SUM" || ref.func === "AVG"
+    || ref.func === "STDDEV_POP" || ref.func === "STDDEV_SAMP"
+    || ref.func === "VAR_POP" || ref.func === "VAR_SAMP" || ref.func === "MEDIAN") {
+    return syntheticColumnMeta("number");
+  }
+  if (ref.func === "GROUP_CONCAT" || ref.func === "MODE" || ref.arg.type === "WILDCARD") {
+    return syntheticColumnMeta("string");
+  }
+  return inferAggregateArgMeta(ref.arg, resolveField);
 }
 
 function inferWindowColumnMeta(
@@ -8476,10 +8523,22 @@ async function buildOrderSemanticsForSelect(
     if (meta?.semantics) aliasSemantics.set(column.alias, meta.semantics);
   }
 
+  const aggregateOrderRefs = new Map<string, AggregateRef>();
+  for (const item of stmt.columns.flatMap((column) =>
+    column.type === "WINDOW_COL" ? column.orderBy : []
+  )) {
+    if (item.key.type === "FIELD_NAME" && item.key.aggregateRef) {
+      aggregateOrderRefs.set(item.key.name, item.key.aggregateRef);
+    }
+  }
+
   const result = new Map<string, ResolvedFieldSemantics>();
   for (const name of names) {
     const resolvedAlias = resolveProjectedName(name, aliasSemantics.keys());
     const base = (resolvedAlias === undefined ? undefined : aliasSemantics.get(resolvedAlias))
+      ?? (aggregateOrderRefs.has(name)
+        ? aggregateResultColumnMeta(aggregateOrderRefs.get(name)!, resolveField).semantics
+        : undefined)
       ?? resolveField(aggregateFieldRef(name))?.semantics;
     if (!base) {
       const ref = aggregateFieldRef(name);
@@ -14398,7 +14457,9 @@ function buildSelectPlan(
     const clauses: string[] = [];
     if (column.partitionBy.length > 0) {
       clauses.push(`PARTITION BY ${column.partitionBy.map((ref) =>
-        ref.tableAlias ? `${ref.tableAlias}.${ref.field}` : ref.field
+        ref.type === "GROUPING_REF"
+          ? `GROUPING(${ref.field.tableAlias ? `${ref.field.tableAlias}.` : ""}${ref.field.field})`
+          : ref.tableAlias ? `${ref.tableAlias}.${ref.field}` : ref.field
       ).join(", ")}`);
     }
     if (column.orderBy.length > 0) {

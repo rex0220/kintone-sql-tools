@@ -604,6 +604,10 @@ function collectRequiredFieldsByTable(
 
   const walkScalar = (expr: ScalarValueExpr, phase: "where" | "having" | "groupBy" | "orderBy" | "select" = "select"): void => {
     if (expr.type === "FIELD") {
+      if (expr.aggregateRef) {
+        walkAgg(expr.aggregateRef, phase);
+        return;
+      }
       addFieldRef(expr.field, expr.tableAlias, phase);
       return;
     }
@@ -730,6 +734,10 @@ function collectRequiredFieldsByTable(
 
   const walkOrderByKey = (k: OrderByKey, phase: "orderBy" | "select" = "orderBy") => {
     if (k.type === "FIELD_NAME") {
+      if (k.aggregateRef) {
+        walkAgg(k.aggregateRef, phase);
+        return;
+      }
       addFieldName(k.name, phase);
       return;
     }
@@ -786,8 +794,10 @@ function collectRequiredFieldsByTable(
         if ((col.windowKind === "AGGREGATE" || col.windowKind === "VALUE") && col.arg.type !== "WILDCARD") {
           walkAggregateArg(col.arg, "select");
         }
-        for (const ref of col.partitionBy) addFieldRef(ref.field, ref.tableAlias, "select");
-        for (const item of col.orderBy) walkOrderByKey(item.key, "select");
+        for (const ref of col.partitionBy) {
+          if (ref.type === "FIELD") addFieldRef(ref.field, ref.tableAlias, "select");
+        }
+        for (const item of col.orderBy) walkOrderByKey(item.key, "orderBy");
         break;
     }
   }

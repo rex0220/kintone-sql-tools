@@ -201,7 +201,7 @@ export function validateGroupingStatic(stmt: SelectStatement): void {
   const normalized = normalizeGroupingSpec(stmt);
   const groupingRefs: GroupingRef[] = [];
   for (const column of stmt.columns) {
-    if (column.type !== "WINDOW_COL") collectGroupingRefs(column, groupingRefs);
+    collectGroupingRefs(column, groupingRefs);
   }
   collectGroupingRefs(stmt.having, groupingRefs);
   collectGroupingRefs(stmt.orderBy, groupingRefs);
@@ -210,9 +210,6 @@ export function validateGroupingStatic(stmt: SelectStatement): void {
   collectGroupingRefs(stmt.joins, forbiddenGroupingRefs);
   collectAggregateArgumentGroupingRefs(stmt.columns, forbiddenGroupingRefs);
   collectAggregateArgumentGroupingRefs(stmt.having, forbiddenGroupingRefs);
-  for (const column of stmt.columns) {
-    if (column.type === "WINDOW_COL") collectGroupingRefs(column, forbiddenGroupingRefs);
-  }
   if (forbiddenGroupingRefs.length > 0) {
     throw new Error(
       "ArgumentError: GROUPING() is not allowed in WHERE, JOIN, window, aggregate arguments, or DML expressions."
@@ -229,9 +226,6 @@ export function validateGroupingStatic(stmt: SelectStatement): void {
 
   if (stmt.orderMode === "KINTONE_NATIVE") {
     throw new Error("ArgumentError: KORDER BY is not supported with extended grouping.");
-  }
-  if (stmt.columns.some((column) => column.type === "WINDOW_COL")) {
-    throw new Error("ArgumentError: window functions are not supported with extended grouping.");
   }
   if (stmt.columns.some((column) =>
     column.type === "WILDCARD" || column.type === "PARENT_WILDCARD"
@@ -257,7 +251,7 @@ export function validateGroupingPlanning(
   const normalized = normalizeGroupingSpec(stmt);
   const groupingRefs: GroupingRef[] = [];
   for (const column of stmt.columns) {
-    if (column.type !== "WINDOW_COL") collectGroupingRefs(column, groupingRefs);
+    collectGroupingRefs(column, groupingRefs);
   }
   collectGroupingRefs(stmt.having, groupingRefs);
   collectGroupingRefs(stmt.orderBy, groupingRefs);

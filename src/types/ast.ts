@@ -337,6 +337,7 @@ export type WindowFunc = "ROW_NUMBER" | "RANK" | "DENSE_RANK";
 export type WindowAggFunc = "SUM" | "COUNT" | "AVG" | "MIN" | "MAX";
 export type ValueWindowFunc = "LAG" | "LEAD";
 export type WindowFrameUnit = "ROWS" | "RANGE";
+export type WindowPartitionKey = FieldRef | GroupingRef;
 
 export interface WindowFrame {
   unit: WindowFrameUnit;
@@ -348,7 +349,7 @@ export interface RankingWindowColumn extends SelectAliasDisplay {
   type: "WINDOW_COL";
   windowKind?: "RANKING";
   func: WindowFunc;
-  partitionBy: FieldRef[];
+  partitionBy: WindowPartitionKey[];
   orderBy: OrderByItem[];
   alias: string;
 }
@@ -360,7 +361,7 @@ export interface AggregateWindowColumn extends SelectAliasDisplay {
   aggFunc: WindowAggFunc;
   arg: WildcardColumn | AggregateArgExpr;
   frame: WindowFrame | null;
-  partitionBy: FieldRef[];
+  partitionBy: WindowPartitionKey[];
   orderBy: OrderByItem[];
   alias: string;
 }
@@ -372,7 +373,7 @@ export interface ValueWindowColumn extends SelectAliasDisplay {
   valueFunc: ValueWindowFunc;
   arg: ScalarValueExpr;
   offset: number;
-  partitionBy: FieldRef[];
+  partitionBy: WindowPartitionKey[];
   orderBy: OrderByItem[];
   alias: string;
 }
@@ -821,7 +822,7 @@ export type NormalizedGroupingSpec =
 
 /** ORDER BY のソートキー */
 export type OrderByKey =
-  | { type: "FIELD_NAME"; name: string }        // ORDER BY 名前 / alias
+  | { type: "FIELD_NAME"; name: string; aggregateRef?: AggregateRef } // ORDER BY 名前 / alias / 集計式
   | { type: "ARITH_KEY"; expr: ArithNode }       // ORDER BY 金額 * 1.1
   | { type: "FUNC_KEY";  expr: StringFuncExpr }  // ORDER BY UPPER(名前)
   | { type: "GROUPING_KEY"; ref: GroupingRef };  // ORDER BY GROUPING(field)

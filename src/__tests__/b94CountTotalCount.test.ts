@@ -243,13 +243,15 @@ test("B94: COUNT(*) と bare column の併用は B148 が records API 前に拒�
   expect(getRecords).not.toHaveBeenCalled();
 });
 
-test("B94: COUNT(*) と window の併用は既存 parser 契約どおり API 前に拒否する", async () => {
+test("B94: COUNT(*) と window の併用で未グループ化フィールドを参照する形は API 前に拒否する", async () => {
   const { client, getRecords } = makeClient({ totalCount: "999" });
 
+  // B184-A: 同一 SELECT の集計 + ウィンドウは通るようになった。ウィンドウの ORDER BY が
+  // グループ化されていない生のフィールド（金額）を参照する形は非グループ依存として records API 前に拒否
   await expect(execute(
     "SELECT COUNT(*) AS c, ROW_NUMBER() OVER (ORDER BY 金額) AS rn FROM APP100",
     client
-  )).rejects.toThrow(/ウィンドウ関数は GROUP BY \/ 集計関数と同じ SELECT では使用できません/);
+  )).rejects.toThrow(/非グループ化依存: 金額.*B65_NON_GROUPED_DEPENDENCY/);
   expect(getRecords).not.toHaveBeenCalled();
 });
 
