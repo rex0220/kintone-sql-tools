@@ -1,14 +1,16 @@
-ksql 配布パッケージ (v3.83.0)
+ksql 配布パッケージ (v3.84.0)
 
 release 成果物:
-- ksql-plugin-v3.83.0.zip
-- ksql-mcp.mcpb (manifest version 3.83.0)
-- ksql-mcp.js (MCP server version 3.83.0)
+- ksql-plugin-v3.84.0.zip
+- ksql-mcp.mcpb (manifest version 3.84.0)
+- ksql-mcp.js (MCP server version 3.84.0)
 
-修正 (B190: CTE／一時テーブルを元にした SELECT で CASE 条件の左辺に置いたウィンドウ関数が落ちる・純加法):
-- 元が CTE か一時テーブルの非集計 SELECT で `CASE WHEN SUM(x) OVER () = 0 THEN …` のように CASE 条件の
-  左辺にウィンドウ関数を書くと `unknown field code(s): __ksql_window_0` で止まっていました (v3.81.0 の B184-B の漏れ)。
-  修正後は通ります。算術・THEN/ELSE の中・物理アプリ・集計と同じ SELECT の形は元から通っていて不変。
+修正 (B191: 式の中のウィンドウの PARTITION BY GROUPING(...) が内部エラーで落ちる・純加法):
+- GROUP BY ROLLUP と同じ SELECT で `ROUND(... / SUM(SUM(売上)) OVER (PARTITION BY GROUPING(会社名)), 1)` のように
+  式の中のウィンドウに GROUPING() を書くと内部エラーで止まっていました (v3.81.0 の B184-B の漏れ)。修正後は通ります。
+  列として出す形 (`RANK() OVER (PARTITION BY GROUPING(会社名) ...) AS 順位`) は元から通っていて不変。
+
+v3.83.0 の節は畳みました (B190 CTE／一時テーブルを元にした SELECT で CASE 条件の左辺に置いたウィンドウ関数が落ちる修正 = 純加法)。
 
 v3.82.0 の節は畳みました (B188 残務 プラグインの実行画面に先行文の警告を [文番号] 付きで表示 = UI のみ・エンジン不変)。
 
@@ -107,21 +109,19 @@ B124 集計算術式 / B125 集計のウィンドウ関数 / B123 GROUP BY だ�
 - CHANGELOG.md と GitHub Releases に版ごとの内容と移行案内があります。
   https://github.com/rex0220/kintone-sql-tools/releases
 
-1. ksql-plugin-v3.83.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.84.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.83.0): B190 CTE／一時テーブルを元にした SELECT で CASE 条件の左辺に置いたウィンドウ関数が
-落ちる修正 (純加法)。
+本リリース (v3.84.0): B191 式の中のウィンドウの PARTITION BY GROUPING(...) が内部エラーで落ちる修正 (純加法)。
 
-前リリース (v3.82.0): B188 残務 = プラグインの実行画面に先行文の警告を [文番号] 付きで表示 (UI のみ)。
+前リリース (v3.83.0 / v3.82.0 / v3.81.0): B190 CTE／一時テーブルを元にした SELECT の CASE 条件のウィンドウ修正 /
+B188 残務 = プラグインの実行画面に先行文の警告を表示 (UI のみ) / B184 ウィンドウ関数を集計と同じ SELECT に・
+ウィンドウ結果を式の中で (純加法)。
 
-前リリース (v3.81.0): B184 ウィンドウ関数を集計と同じ SELECT に書ける (A)・ウィンドウ結果を式の中で
-使える (B)。純加法。
-
-前リリース (v3.80.0): B187 HAVING に直接書いた集計を SELECT 列に無くても評価 (結果が変わります)。
-前リリース (v3.79.0): 診断と警告の穴 4 件 = B185 / B186 / B188 / B189 (実行結果は不変)。
+前リリース (v3.80.0 / v3.79.0): B187 HAVING に直接書いた集計を SELECT 列に無くても評価 (結果が変わります) /
+診断と警告の穴 4 件 = B185 / B186 / B188 / B189 (実行結果は不変)。
 
 前リリース (v3.78.0): B182 COALESCE で包んだ集計値が静かに間違う修正 (結果が変わります)、
 B181 別名の参照解決 (純加法)、B183 MCP instructions に Writing rules 8 行 (エンジン不変)。

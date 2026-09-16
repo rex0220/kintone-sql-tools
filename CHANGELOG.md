@@ -3,6 +3,19 @@
 リリースごとの変更点。**本ファイルは v3.45.0 以降だけを保持する。**
 それ以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) の各タグを参照。
 
+## v3.84.0（2026-09-16）
+
+### 修正（B191: 式の中のウィンドウの `PARTITION BY GROUPING(...)` が「internal error: GROUPING() reference was not resolved during B65 planning.」で落ちる）**※ 純加法（落ちていた形が通るようになるだけ。既存 SQL の結果・警告・取得列・EXPLAIN は不変）**
+
+- `GROUP BY ROLLUP` / `GROUPING SETS` と同じ SELECT で、**式の中に書いたウィンドウ**（v3.81.0 の B184-B）の `PARTITION BY` に `GROUPING(会社名)` を置いた形
+  （`ROUND(SUM(売上) * 100.0 / SUM(SUM(売上)) OVER (PARTITION BY GROUPING(会社名)), 1) AS 構成比`）が内部エラーで止まっていました。
+  B65 の計画が出力列・HAVING・ORDER BY の `GROUPING()` だけを束縛し、式の中のウィンドウ（`hiddenWindows`）を見ていなかったためです。
+  列として出す形（`RANK() OVER (PARTITION BY GROUPING(会社名) ORDER BY SUM(売上) DESC) AS 順位`）は v3.81.0 から通っていて不変です。
+- 修正後は通り、列として出す形と同じ値になります。`ROLLUP` / `GROUPING SETS` の無い SELECT で式の中のウィンドウに `GROUPING()` を書くと、
+  従来どおり `GROUPING() requires GROUP BY ROLLUP or GROUPING SETS` で止まります（修正前は計画を素通りして別の内部エラーでした）。
+- 実機（dev profile・SFA パック）: 明細 10 行に順位と構成比、合計行は順位 1・構成比 100 の 11 行。
+- 棚卸しで見つけた別課題候補（結果は正しい・警告と表示の穴）: 式の中の `SUM(x) OVER (ORDER BY y)`（フレーム省略）に既定 RANGE の警告が出ない／EXPLAIN に式の中のウィンドウの `frame:` 行が出ない。
+
 ## v3.83.0（2026-09-16）
 
 ### 修正（B190: CTE／一時テーブルを元にした SELECT で、CASE 条件の左辺に置いたウィンドウ関数が `unknown field code(s): __ksql_window_0` で落ちる）**※ 純加法（落ちていた形が通るようになるだけ。既存 SQL の結果・警告・取得列・EXPLAIN は不変）**

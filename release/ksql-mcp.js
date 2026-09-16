@@ -29765,7 +29765,7 @@ var import_docsResourceBuilder = __toESM(require_docsResourceBuilder());
 
 // src/mcp/serverVersion.ts
 init_define_KSQL_DOCS();
-var SERVER_VERSION = true ? "3.83.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "3.84.0" : "0.0.0-dev";
 
 // src/mcp/docsResources.ts
 function loadFromRepoDocs() {
@@ -37035,8 +37035,9 @@ function validateGroupingRefMembership(ref, resolve3, canonicalItems) {
 }
 function validateGroupingStatic(stmt) {
   const normalized = normalizeGroupingSpec(stmt);
+  const projectedColumns = [...stmt.columns, ...stmt.hiddenWindows ?? []];
   const groupingRefs = [];
-  for (const column of stmt.columns) {
+  for (const column of projectedColumns) {
     collectGroupingRefs(column, groupingRefs);
   }
   collectGroupingRefs(stmt.having, groupingRefs);
@@ -37044,7 +37045,7 @@ function validateGroupingStatic(stmt) {
   const forbiddenGroupingRefs = [];
   collectGroupingRefs(stmt.where, forbiddenGroupingRefs);
   collectGroupingRefs(stmt.joins, forbiddenGroupingRefs);
-  collectAggregateArgumentGroupingRefs(stmt.columns, forbiddenGroupingRefs);
+  collectAggregateArgumentGroupingRefs(projectedColumns, forbiddenGroupingRefs);
   collectAggregateArgumentGroupingRefs(stmt.having, forbiddenGroupingRefs);
   if (forbiddenGroupingRefs.length > 0) {
     throw new Error(
@@ -37073,7 +37074,7 @@ function validateGroupingPlanning(stmt, resolve3, planningGuardHook = () => void
   validateGroupingStatic(stmt);
   const normalized = normalizeGroupingSpec(stmt);
   const groupingRefs = [];
-  for (const column of stmt.columns) {
+  for (const column of [...stmt.columns, ...stmt.hiddenWindows ?? []]) {
     collectGroupingRefs(column, groupingRefs);
   }
   collectGroupingRefs(stmt.having, groupingRefs);
@@ -51233,7 +51234,7 @@ async function buildGroupingFieldResolver(stmt, client, cacheContext, materializ
 async function validateSelectGroupingPlanning(stmt, client, cacheContext, materializedTables) {
   resolvedGroupingSpecs.delete(stmt);
   const normalized = normalizeGroupingSpec(stmt);
-  const hasGroupingNodes = JSON.stringify(stmt.columns).includes('"GROUPING_') || JSON.stringify(stmt.orderBy).includes('"GROUPING_');
+  const hasGroupingNodes = JSON.stringify(stmt.columns).includes('"GROUPING_') || JSON.stringify(stmt.hiddenWindows ?? []).includes('"GROUPING_') || JSON.stringify(stmt.orderBy).includes('"GROUPING_');
   if (normalized.type === "GROUPING_SETS" || hasGroupingNodes) {
     const resolver = await buildGroupingFieldResolver(stmt, client, cacheContext, materializedTables);
     const resolvedSpec = validateGroupingPlanning(
