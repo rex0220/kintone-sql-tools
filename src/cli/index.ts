@@ -1201,6 +1201,17 @@ export function buildSelectSummary(result: SelectResult): string {
   return `rowCount=${result.rowCount}${validateSummary}`;
 }
 
+export function writeSingleSelectWarnings(
+  result: SelectResult,
+  format: OutputFormat,
+  quiet: boolean
+): void {
+  if (quiet || format === "json") return;
+  for (const warning of result.warnings ?? []) {
+    process.stderr.write(`warning=${warning}\n`);
+  }
+}
+
 /**
  * DML バッチの確認プロンプト本文（仕様 §8.3: バッチ全体で1回、
  * 全 DML 文の一覧 — タイプ / 対象アプリ / WHERE 有無 — を表示）
@@ -2840,6 +2851,7 @@ async function run(): Promise<number> {
     if (!quiet) {
       process.stderr.write(`${buildSelectSummary(result)}\n`);
     }
+    writeSingleSelectWarnings(result, format, quiet);
     if (exportPlan) {
       const exportCode = runSingleSelectCliExport(exportPlan, result, quiet);
       if (exportCode !== 0) return exportCode;

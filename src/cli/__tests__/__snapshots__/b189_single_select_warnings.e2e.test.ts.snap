@@ -1,0 +1,30 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`--output は結果だけをファイルへ書き、警告を stderr に保つ: --output csv unchanged 1`] = `
+"売上,累計
+100,100
+200,300
+"
+`;
+
+exports[`csv: RANGE 警告を stderr に1行出し stdout を固定する: csv stdout unchanged 1`] = `
+"売上,累計
+100,100
+200,300
+"
+`;
+
+exports[`markdown: RANGE 警告を stderr に1行出し stdout を固定する: markdown stdout unchanged 1`] = `
+"| 売上 | 累計 |
+| --- | --- |
+| 100 | 100 |
+| 200 | 300 |
+"
+`;
+
+exports[`table: RANGE 警告を stderr に1行出し stdout を固定する: table stdout unchanged 1`] = `
+"売上	累計
+100	100
+200	300
+"
+`;
