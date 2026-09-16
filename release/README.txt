@@ -1,19 +1,18 @@
-ksql 配布パッケージ (v3.79.0)
+ksql 配布パッケージ (v3.80.0)
 
 release 成果物:
-- ksql-plugin-v3.79.0.zip
-- ksql-mcp.mcpb (manifest version 3.79.0)
-- ksql-mcp.js (MCP server version 3.79.0)
+- ksql-plugin-v3.80.0.zip
+- ksql-mcp.mcpb (manifest version 3.80.0)
+- ksql-mcp.js (MCP server version 3.80.0)
 
-診断と警告の穴 4 件 (実行結果・取得列・API 回数は不変):
-- B185: EXPLAIN が SELECT / GROUP BY / 集計引数 / ORDER BY などの列名もフォーム定義と突き合わせ、
-  無い列は実行時と同じ unknown field code(s) で失敗します (EXPLAIN が定義を読む文に限る・追加 API なし)。
-- B186: 物理 APP と CTE の混在 JOIN の WHERE に未修飾の CTE 列を書いても EXPLAIN が通ります
-  (以前は実行は通るのに EXPLAIN だけ WHERE_FIELD_UNRESOLVED)。
-- B188: CREATE TEMP TABLE / INSERT・UPSERT … SELECT で実体化した SELECT の警告 (RANGE 既定フレームなど) を
-  文結果の warnings に載せます。CLI バッチ表示・MCP envelope・/flow に到達。
-- B189: CLI の table / csv / markdown で単文 SELECT の警告を stderr に warning= で出します
-  (--quiet で抑止・json は warnings 配列のまま・stdout は不変)。
+機能 (B187: HAVING に直接書いた集計を SELECT 列に無くても評価・結果が変わる修正):
+- SELECT に無い集計を HAVING に直接書いた文 (例: … GROUP BY 商談フェーズ HAVING SUM(売上) > 1000000) は、
+  以前は 0 行 + 警告でした。標準 SQL と同じ意味で評価されます (上の例は 3 行)。
+  HAVING の集計は出力列にはならず、取得列・API 回数・EXPLAIN は不変。ROLLUP / GROUPING SETS も同じ。
+- SELECT に同じ集計がある文と、SELECT の別名を HAVING で参照する文は元から正しく不変。
+
+v3.79.0 の節は畳みました (診断と警告の穴 4 件 = B185 EXPLAIN の SELECT 列検査 / B186 混在 JOIN の
+  EXPLAIN 偽陽性 / B188 一時テーブル経由の警告伝播 / B189 CLI 単文 SELECT の警告表示。実行結果は不変)。
 
 v3.78.0 の節は畳みました (B182 COALESCE で包んだ集計値の修正 = 結果が変わる /
   B181 別名の参照解決 = 純加法 / B183 MCP instructions に Writing rules 8 行)。
@@ -111,12 +110,15 @@ B124 集計算術式 / B125 集計のウィンドウ関数 / B123 GROUP BY だ�
 - CHANGELOG.md と GitHub Releases に版ごとの内容と移行案内があります。
   https://github.com/rex0220/kintone-sql-tools/releases
 
-1. ksql-plugin-v3.79.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.80.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.79.0): 診断と警告の穴 4 件 = B185 EXPLAIN の SELECT 列検査 / B186 混在 JOIN の
+本リリース (v3.80.0): B187 HAVING に直接書いた集計を SELECT 列に無くても評価 (結果が変わります =
+以前は 0 行 + 警告)。
+
+前リリース (v3.79.0): 診断と警告の穴 4 件 = B185 EXPLAIN の SELECT 列検査 / B186 混在 JOIN の
 EXPLAIN 偽陽性 / B188 一時テーブル経由の警告伝播 / B189 CLI 単文 SELECT の警告表示 (実行結果は不変)。
 
 前リリース (v3.78.0): B182 COALESCE で包んだ集計値が静かに間違う修正 (結果が変わります)、
