@@ -30,4 +30,4 @@
 
 ## internal/（開発側の作業文書）
 
-仕様書・実装計画・課題文書・評価・実測証跡（`internal/evidence/`）はすべて [`internal/`](internal/) 配下にあります。個別文書の位置づけと最新ステータスは[台帳](ksql_issue_tracker.md)を正とします。横断的な意味論は [`internal/ksql_string_semantics.md`](internal/ksql_string_semantics.md)（文字列の扱いの正）を参照してください。
+仕様書・実装計画・課題文書・評価・実測証跡（`internal/evidence/`）はすべて [`internal/`](internal/) 配下にあります。Qiita 記事の下書き（未公開・公開済み）は [`internal/qiita/`](internal/qiita/)、シリーズ「kSQL 実践」（開発者向け。旧「kSQL 入門」は `v1_` 接頭辞で保存）の計画と各回の下書きは [`internal/qiita/ksql-intro-series/`](internal/qiita/ksql-intro-series/計画書.md)（各回は `NN_<題名>.md`） にまとめています。個別文書の位置づけと最新ステータスは[台帳](ksql_issue_tracker.md)を正とします。横断的な意味論は [`internal/ksql_string_semantics.md`](internal/ksql_string_semantics.md)（文字列の扱いの正）を参照してください。
