@@ -1,22 +1,25 @@
-ksql 配布パッケージ (v3.77.0)
+ksql 配布パッケージ (v3.78.0)
 
 release 成果物:
-- ksql-plugin-v3.77.0.zip
-- ksql-mcp.mcpb (manifest version 3.77.0)
-- ksql-mcp.js (MCP server version 3.77.0)
+- ksql-plugin-v3.78.0.zip
+- ksql-mcp.mcpb (manifest version 3.78.0)
+- ksql-mcp.js (MCP server version 3.78.0)
 
-機能追加 (B179: CSV export・名前付きシンク・純加法・既定動作は不変):
-- engine 層に RFC 4180 の CSV serializer を 1 実装 (CRLF・header あり・BOM なし)。
-  複数値は LF 連結、user/組織/グループは code、計算列の指数表記は 10 進展開、
-  DATETIME は既定 UTC・timezone 指定時だけ offset 付き。SUBTABLE/FILE 列は拒否。
-- CLI: --export-csv <name>=<path> (temp table #name・反復可) / --export-csv <path>
-  (単文 SELECT) / --export-encoding utf8|sjis / --export-timezone <zone>。SQL 全文成功後に
-  全 sink を serialize してから一時 file → fsync → rename で書きます (失敗時は旧 file 維持)。
-  Shift_JIS は表現不能文字で fail-closed (完成 file を残しません)。
-- /flow: createExecutionContext({ exportSinks }) で sink を事前宣言、exportSinkStatus /
-  serializeExportSink / serializeSelectResultAsCsv / serializeCsvExport を公開。engine は
-  path を持たず bytes と receipt { rows, columns, bytes, encoding } を返します。
-- 既存の --format csv / --output、MCP、プラグインは不変です。
+修正 (B182: COALESCE / ISNULL / NULLIF で包んだ集計値が静かに間違う・結果が変わる修正):
+- COALESCE(SUM(x), 0) + 0 のように関数で包んだ集計を算術に使うと 0 になり、
+  COALESCE(SUM(x), 0) AS 合計 の列で ORDER BY / RANK / 累計を取ると文字列順になっていました。
+  全引数が数値なら number として扱い、算術では集計値そのものを使います。
+  SUM(x) を直接使う形・CASE / SUM(COALESCE(x, 0)) / CAST の推奨形は元から正しく不変。
+修正 (B181: SELECT 別名の小文字正規化と参照解決の非対称・純加法):
+- AS Amount / AS 顧客No を次の段や ORDER BY から元の表記で参照すると実行時にだけ
+  unknown field code になっていました。完全一致 → 小文字正規名の順で解決します。
+  結果列名の小文字化と物理フィールドコードの区別は不変 (物理と同名なら物理が優先)。
+機能追加 (B183: MCP instructions に Writing rules 8 行・エンジン不変):
+- 実測で踏んだ失敗から作った 8 行を initialize 応答の instructions に追加 (5,722 → 7,369 文字)。
+  ツールの description / スキーマ / resources は不変。正本は src/mcp/index.ts。
+
+v3.77.0 の節は畳みました (B179 CSV export = 名前付きシンク・engine 層 serializer・
+  /flow 公開 API・CLI --export-csv・純加法。既存の --format csv / --output は不変)。
 
 v3.76.0 の節は畳みました (B178 /flow IMPORT source の materialize 通知 =
   onImportSourceMaterialized・5 key・mutation 前・throw は mutation 0)。
@@ -108,12 +111,15 @@ B124 集計算術式 / B125 集計のウィンドウ関数 / B123 GROUP BY だ�
 - CHANGELOG.md と GitHub Releases に版ごとの内容と移行案内があります。
   https://github.com/rex0220/kintone-sql-tools/releases
 
-1. ksql-plugin-v3.77.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.78.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.77.0): B179 CSV export (名前付きシンク・CLI --export-csv・/flow 公開 API・純加法)
+本リリース (v3.78.0): B182 COALESCE で包んだ集計値が静かに間違う修正 (結果が変わります)、
+B181 別名の参照解決 (純加法)、B183 MCP instructions に Writing rules 8 行 (エンジン不変)。
+
+前リリース (v3.77.0): B179 CSV export (名前付きシンク・CLI --export-csv・/flow 公開 API・純加法)
 
 前リリース (v3.76.0): B178 /flow IMPORT source の materialize 通知 onImportSourceMaterialized (純加法)
 
@@ -121,21 +127,10 @@ B124 集計算術式 / B125 集計のウィンドウ関数 / B123 GROUP BY だ�
 
 前リリース (v3.74.0): B176 EXPLAIN の native UPSERT 適格性が常に UNKNOWN だった修正
 
-前リリース (v3.73.0): B173 UPSERT を kintone native UPSERT へ (/flow は既定 ON・
-挙動が変わります・API 消費 1/3)、CLI の --native-upsert、EXPLAIN の適格性表示。
-
-前リリース (v3.72.0): B171 ASSERT 大小比較の辞書順不具合を修正 (結果が変わります)、
-B171 F-2 dialect 1 の INSERT VALUES で as-of 関数 (純加法)。
-
-前リリース (v3.71.0): B170 E-2 previewStatement (dry-run 差分プレビュー・/flow 純加法)。
-
-前リリース (v3.70.0): B170 ksql-flow 依頼対応 (/flow 純加法 = explain as-of・DML 結果型・metrics スナップショット・書込チャンク通知)。
-
-前リリース (v3.69.0): B168 Flow dialect 1 完成 (Stage 4-6・全面で実行可・公式 API /flow)。
-
-前リリース (v3.68.0): B168 Flow dialect 1 の解析基盤 (Stage 1-3・エンジン内部のみ・実験的)。
-
-前リリース (v3.67.0 以前) の節は畳みました (B169 固定時刻評価 / B53 再帰 CTE / B166 / B167 / B164 / B162・B163 ほか)。CHANGELOG.md と GitHub Releases を参照してください。
+前リリース (v3.73.0 以前) の節は畳みました (B173 native UPSERT = /flow 既定 ON・挙動が変わります /
+B171 ASSERT 大小比較の修正 = 結果が変わります / B170 previewStatement・/flow 純加法 4 件 /
+B168 Flow dialect 1 / B169 固定時刻評価 / B53 再帰 CTE / B166 / B167 / B164 / B162・B163 ほか)。
+CHANGELOG.md と GitHub Releases を参照してください。
 過去バージョンのプラグイン zip:
 - 本ディレクトリには最新版だけを置いています。
 - 過去版は GitHub Releases の各タグに添付しています。
