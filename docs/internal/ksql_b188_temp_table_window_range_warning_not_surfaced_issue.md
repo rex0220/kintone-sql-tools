@@ -1,6 +1,6 @@
 # B188 `CREATE TEMP TABLE` 経由だとウィンドウの既定フレーム（RANGE）警告が表面化しない — 直接の SELECT と CTE では出る
 
-- 状態: 📝 **起票（2026-09-16）**。未着手。実測 v3.78.0（CLI・dev profile・SFA パック）。改善（警告の伝播・結果は不変）
+- 状態: 🚧 **codex が案 A を実装・Claude レビュー済み（2026-09-16・`b188/dev`・コミット待ち・[報告](ksql_b188_codex_impl_report.md)）**。`BatchStatementResult.warnings?`（任意）を追加し、CREATE TEMP TABLE・INSERT / UPSERT … SELECT・IMPORT projection の実体化警告を文結果へ伝播。レビューでバッチ全体 `warnings` の範囲を「dialect 1 + 結果セットを持たない文」に絞った（SELECT の警告を二重に載せない）。実機で CLI テキスト／JSON に警告が出ることを確認。プラグイン UI の表示は残課題（別 PR）。起票時の実測 v3.78.0（CLI・dev profile・SFA パック）。改善（警告の伝播・結果は不変）
 
 ## 1. 現象
 

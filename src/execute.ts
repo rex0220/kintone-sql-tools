@@ -502,6 +502,18 @@ interface ImportExecutionSource {
   audit?: import("./import/types").ImportColumnAudit;
 }
 const importSourceByDmlStatement = new WeakMap<object, ImportExecutionSource>();
+/** SELECT-based DML の source 実行警告を、公開 DML result 型を変えず文結果へ渡す。 */
+const sourceWarningsByDmlStatement = new WeakMap<object, string[]>();
+
+function rememberDmlSourceWarnings(statement: object, warnings: readonly string[] | undefined): void {
+  if (!warnings?.length) return;
+  sourceWarningsByDmlStatement.set(statement, [...new Set(warnings)]);
+}
+
+function outcomeWithResultWarnings(statement: object, result: ExecuteResult): BatchStatementOutcome {
+  const warnings = sourceWarningsByDmlStatement.get(statement);
+  return { result, ...(warnings?.length ? { warnings } : {}) };
+}
 
 export interface InsertResult {
   type: "INSERT";
@@ -1651,6 +1663,8 @@ export interface BatchStatementResult {
   tempTable?: string;
   /** CREATE_TEMP_TABLE の実体化行数 */
   rowCount?: number;
+  /** この文の実行時警告（結果セットを持たない SELECT 実体化文など） */
+  warnings?: string[];
   error?: BatchStatementError;
   /** "fail-fast" / "dependency: #name" / "timeout" / "assertion" / "exit" */
   skippedReason?: string;
@@ -1866,13 +1880,20 @@ export async function executeBatch(
     }
 
     metrics.elapsedMs = Date.now() - startedAt;
+    // B188: バッチ全体の warnings は dialect 1 の警告と、結果セットを持たない文（CREATE TEMP TABLE・
+    // SELECT-based DML）の実行時警告を文順・重複なしで集める。SELECT の結果警告は従来どおり
+    // results[].warnings（文ごと）にだけ載せ、全体側へ二重に載せない（envelope の契約を変えない）
+    const warnings = [...new Set([
+      ...dialect1Warnings,
+      ...results.flatMap((statement) => statement.warnings ?? []),
+    ])];
     const batchResult: BatchExecuteResult = {
       ok: results.every((r) => r.status === "success" || r.skippedReason === "exit"),
       statementCount: statements.length,
       statements: results,
       analysis,
       metrics,
-      ...(dialect1Warnings.length > 0 ? { warnings: dialect1Warnings } : {}),
+      ...(warnings.length > 0 ? { warnings } : {}),
     };
     // B179: the CLI export seam reads temp tables here, before the batch scope is released.
     const observer = (options as InternalExecuteOptions)[batchCompletionObserverKey];
@@ -2501,7 +2522,8 @@ export async function executeBatchStatement(
   }
 
   if (resolvedStmt.type === "IMPORT") {
-    return { result: await executeImport(resolvedStmt, client, options, cacheContext, tempTables) };
+    const result = await executeImport(resolvedStmt, client, options, cacheContext, tempTables);
+    return outcomeWithResultWarnings(resolvedStmt, result);
   }
 
   if ("validateOnly" in resolvedStmt && resolvedStmt.validateOnly === true) {
@@ -2523,20 +2545,19 @@ export async function executeBatchStatement(
         materializedMetaByValidationResult.get(result) ?? new Map()
       );
     }
-    return { result };
+    return outcomeWithResultWarnings(resolvedStmt, result);
   }
 
   if ("onErrorSkip" in resolvedStmt && resolvedStmt.onErrorSkip === true) {
-    return {
-      result: await executeOnErrorSkip(
+    const result = await executeOnErrorSkip(
         resolvedStmt,
         client,
         { ...options, onLimitReached: "error" },
         cacheContext,
         tempTables,
         info.index + 1
-      ),
-    };
+      );
+    return outcomeWithResultWarnings(resolvedStmt, result);
   }
 
   if (resolvedStmt.type === "CREATE_TEMP_TABLE") {
@@ -2553,7 +2574,11 @@ export async function executeBatchStatement(
       columns: result.columns,
       columnMeta: materializedMetaBySelectResult.get(result),
     });
-    return { tempTable: resolvedStmt.name, rowCount: result.rows.length };
+    return {
+      tempTable: resolvedStmt.name,
+      rowCount: result.rows.length,
+      ...(result.warnings?.length ? { warnings: [...result.warnings] } : {}),
+    };
   }
 
   if (stmt.type === "DROP_TEMP_TABLE") {
@@ -2602,10 +2627,12 @@ export async function executeBatchStatement(
     }
     // SELECT-based DML（ソースは temp のみ / APP 混在とも。事前チェックで検証済み）
     if (resolvedStmt.type === "INSERT_SELECT") {
-      return { result: await executeInsertSelect(resolvedStmt, client, options, cacheContext, tempTables) };
+      const result = await executeInsertSelect(resolvedStmt, client, options, cacheContext, tempTables);
+      return outcomeWithResultWarnings(resolvedStmt, result);
     }
     if (resolvedStmt.type === "UPSERT_SELECT") {
-      return { result: await executeUpsertSelect(resolvedStmt, client, options, cacheContext, tempTables) };
+      const result = await executeUpsertSelect(resolvedStmt, client, options, cacheContext, tempTables);
+      return outcomeWithResultWarnings(resolvedStmt, result);
     }
     if (resolvedStmt.type === "UPDATE" && resolvedStmt.from?.cteName != null) {
       return { result: await executeUpdate(resolvedStmt, client, options, cacheContext, tempTables) };
@@ -2615,7 +2642,8 @@ export async function executeBatchStatement(
   }
 
   // 一時テーブルと無関係な文は既存の単文実行経路をそのまま使う
-  return { result: await executeParsedStatement(resolvedStmt, client, options, cacheContext) };
+  const result = await executeParsedStatement(resolvedStmt, client, options, cacheContext);
+  return outcomeWithResultWarnings(resolvedStmt, result);
 }
 
 /** Preview one DML statement with the same variable/as-of/temp-table state as batch execution. */
@@ -10104,6 +10132,8 @@ async function executeImport(
   importSourceByDmlStatement.set(generated, executionSource);
   const withAudit = <T extends ExecuteResult>(result: T): T => {
     if (executionSource.audit) Object.assign(result, { importAudit: executionSource.audit });
+    const warnings = sourceWarningsByDmlStatement.get(generated);
+    if (warnings?.length) sourceWarningsByDmlStatement.set(stmt, warnings);
     return result;
   };
   if (generated.validateOnly) {
@@ -10372,6 +10402,7 @@ async function materializeDmlSource(
     const selected = tempTables && tempTables.size > 0
       ? await executeQueryWithCte(stmt.select, client, options, tempTables, cacheContext, true)
       : await executeSelect(stmt.select, client, options, cacheContext, undefined, true);
+    rememberDmlSourceWarnings(stmt, selected.warnings);
     return { rows: selected.rows, columns: selected.columns, columnMeta: materializedMetaBySelectResult.get(selected) };
   }
   const payload = await loadImportSource(imported.handle, imported.cache);
@@ -10391,6 +10422,7 @@ async function materializeDmlSource(
   const tables = new Map(tempTables ?? []);
   tables.set(IMPORT_PROJECTION_SOURCE, raw);
   const selected = await executeQueryWithCte(projection, client, { ...options, onLimitReached: "error" }, tables, cacheContext, true);
+  rememberDmlSourceWarnings(stmt, selected.warnings);
   return { rows: selected.rows, columns: selected.columns, columnMeta: materializedMetaBySelectResult.get(selected) };
 }
 
