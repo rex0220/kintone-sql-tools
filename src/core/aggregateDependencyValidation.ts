@@ -255,6 +255,15 @@ function walkDependency(node: unknown, context: WalkContext): void {
     if (context.clause !== "SELECT" && ref.tableAlias === null) {
       const alias = resolveProjectedName(ref.field, context.aliases.keys());
       const targets = alias === undefined ? [] : (context.aliases.get(alias) ?? []);
+      // B193: HAVING はウィンドウより先に評価されるので、同じ SELECT のウィンドウ列の別名は
+      // 参照できない（v3.84.0 以前は空文字として比較され、静かに全件／0 件になっていた）
+      if (context.clause === "HAVING" && alias !== undefined && targets.some((target) => target.type === "WINDOW_COL")) {
+        throw new Error(
+          `ArgumentError: HAVING からは同じ SELECT のウィンドウ関数の結果（別名 ${alias}）を参照できません。` +
+          "HAVING はウィンドウより先に評価されます。WITH で段を分け、次の段の WHERE で絞ってください " +
+          "(reason=HAVING_WINDOW_ALIAS)"
+        );
+      }
       if (targets.length === 1 && alias !== undefined && !context.resolvingAliases.has(alias)) {
         const resolvingAliases = new Set(context.resolvingAliases);
         resolvingAliases.add(alias);
