@@ -102,6 +102,32 @@ test("B184-A: HAVING後のグループ行だけをウィンドウ評価する", 
   ]);
 });
 
+test("B193: HAVING から同一 SELECT のウィンドウ別名を参照すると実行前に止まる", async () => {
+  // v3.81.0〜v3.84.0 は別名が空文字として比較され、HAVING 順位 <= 5 は全件・HAVING 順位 = 1 は 0 件だった
+  for (const having of ["順位 <= 5", "順位 = 1", "順位 + 0 = 1", "順位 IS NULL", "SUM(売上) > 0 AND 順位 <= 5"]) {
+    await expect(execute(
+      "SELECT 会社名, SUM(売上) AS 売上合計, RANK() OVER (ORDER BY SUM(売上) DESC) AS 順位 " +
+        `FROM APP100 GROUP BY 会社名 HAVING ${having}`,
+      client(rows), { cacheContext: `b193-having-${having}` }
+    )).rejects.toThrow("HAVING からは同じ SELECT のウィンドウ関数の結果（別名 順位）を参照できません");
+  }
+});
+
+test("B193: 段を分けた WHERE と、集計別名の HAVING は従来どおり通る", async () => {
+  const staged = await execute(
+    "WITH r AS (SELECT 会社名, SUM(売上) AS 売上合計, RANK() OVER (ORDER BY SUM(売上) DESC) AS 順位 FROM APP100 GROUP BY 会社名) " +
+      "SELECT 会社名, 順位 FROM r WHERE 順位 <= 2 ORDER BY 順位, 会社名",
+    client(rows), { cacheContext: "b193-staged" }
+  ) as SelectResult;
+  expect(staged.rows.map((row) => [row.会社名, row.順位])).toEqual([["D", "1"], ["C", "2"], ["E", "2"]]);
+  const aliasHaving = await execute(
+    "SELECT 会社名, SUM(売上) AS 売上合計, RANK() OVER (ORDER BY SUM(売上) DESC) AS 順位 " +
+      "FROM APP100 GROUP BY 会社名 HAVING 売上合計 >= 199 ORDER BY 順位, 会社名",
+    client(rows), { cacheContext: "b193-alias-having" }
+  ) as SelectResult;
+  expect(aliasHaving.rows.map((row) => row.会社名)).toEqual(["D", "C", "E", "B"]);
+});
+
 test("B184-A: LAGの引数に同一SELECTの集計式を指定できる", async () => {
   const result = await execute(
     "SELECT 会社名, SUM(売上) AS total, LAG(SUM(売上)) OVER (ORDER BY 会社名) AS previous " +
