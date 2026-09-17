@@ -3,6 +3,20 @@
 リリースごとの変更点。**本ファイルは v3.45.0 以降だけを保持する。**
 それ以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) の各タグを参照。
 
+## v3.85.0（2026-09-17）
+
+### 修正（B193: `HAVING` から同じ SELECT のウィンドウ別名を参照しても止まらず、空文字として比較されていた）**※ 結果が変わる修正（静かに全件／0 件を返していた形が、実行前にエラーになる）**
+
+- v3.81.0（B184-A）でウィンドウを集計と同じ SELECT に書けるようになった際、CHANGELOG は「`HAVING` でのウィンドウ参照は従来どおり拒否」としていましたが、
+  拒否していたのは `HAVING SUM(x) OVER () > 0` のようにウィンドウ**式**を直接書いた形だけでした。**ウィンドウ列の別名を `HAVING` から参照する形**
+  （`RANK() OVER (ORDER BY SUM(売上) DESC) AS 順位 … GROUP BY 会社名 HAVING 順位 <= 5`）は検査を素通りし、`HAVING` がウィンドウより先に評価されるため
+  別名が空文字として比較されていました（`HAVING 順位 <= 5` は全件、`HAVING 順位 = 1` は 0 行。エラーも警告もなし）。
+- 修正後は、`HAVING` の未修飾名が同じ SELECT のウィンドウ列の別名に解決されると、静的検証・EXPLAIN・実行のすべてで実行前に止まります:
+  `ArgumentError: HAVING からは同じ SELECT のウィンドウ関数の結果（別名 順位）を参照できません。HAVING はウィンドウより先に評価されます。WITH で段を分け、次の段の WHERE で絞ってください (reason=HAVING_WINDOW_ALIAS)`
+- **結果が変わる形（修正対象）**: `HAVING` に同じ SELECT のウィンドウ列の別名を書いた文（比較・算術・`IS NULL`・`AND` の一部、いずれも）。v3.81.0〜v3.84.0 では静かに全件／0 件でした。
+- **元から正しくて変わらない形**: 集計の別名・集計式・グループキー・`GROUPING()` の `HAVING`、`WITH` で段を分けて次の段の `WHERE` で絞る形、文レベルの `ORDER BY 順位`（ウィンドウの後に評価されるので参照できます）、ウィンドウ式を `HAVING` に直接書いた形（従来どおりパーサで拒否）。
+- 報告元: kSQL Dashboard Pro（Ver.2 の v3.84.0 取り込み確認）。実機（dev profile・SFA パック）で再現し、修正版で停止を確認。言語リファレンス §9 / §10.1 に追記。
+
 ## v3.84.0（2026-09-16）
 
 ### 修正（B191: 式の中のウィンドウの `PARTITION BY GROUPING(...)` が「internal error: GROUPING() reference was not resolved during B65 planning.」で落ちる）**※ 純加法（落ちていた形が通るようになるだけ。既存 SQL の結果・警告・取得列・EXPLAIN は不変）**
