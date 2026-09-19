@@ -1,19 +1,12 @@
 <!-- タイトル案: 【kSQL 実践 #8】kSQL Flow へ載せる — dialect 1・ゲート・as-of・再実行 -->
 <!-- 投稿時タグ案: kintone, SQL, バッチ, 自動化, DataOps -->
-<!--
-状態: 草稿 R5（2026-09-12。全体レビュー（計画書 §11）を反映: 図の指示を HTML コメントに・論理名の仕組みの言い換え・10/40/monthly_pipeline_check の SQL を掲載・APP900000000 の初出説明・終了コードは CLI と別体系・「第 9 回で導入」の一文。R4: 2026-09-12。R3 への軽微 3 点を反映: CLI 出力の `EXIT success` は条件評価の成功であり不成立で続行した旨・終了コードは 0〜5・結論の EXIT を「対象なし・差分なし」に。公開可）。R3: R2 への再レビュー 3 点 + 推奨 2 点を反映: 最終集計日時の意味を実装に合わせて訂正・「CLI で先に動かす」を本線 7 文の読み取り専用版（コピー環境・実測 diff 10 件）に差し替え・導入をプロジェクトローカル（--save-exact / npm ci）に統一し Node 20.6+ を注記・--resume-batch 中のジョブ集合固定（実測）・INSERT 0 件の限定。R1 反映: 集計ジョブを「顧客管理全社のスナップショット + 差分だけ UPSERT」に設計変更・復旧の本線を --resume-batch に・LAPP_ はプラグイン不可・冪等性の限定・ルックアップのトークン要件・ロックの対象別説明・版互換の表現。計画書 §9.13）。構成は 計画書.md §4 の第 8 回を正とする。
-公開前チェック: 第 0〜7 回の URL（冒頭「前回」）／図の差し込み 2 か所（実行ログアプリの一覧・タスクスケジューラ）／このコメント自体を削除
-掲載コマンドと出力は ksql-flow 0.9.0（リポジトリの dist/cli.js）+ エンジン v3.77.0 で実行。読み取りだけのジョブは SFA パック本体（案件管理 APP4149・顧客管理 APP4148・password 認証・logApp 無し・--lock local-only）、書き込みを伴う run-all は検証用コピー（案件管理 4247・顧客管理 4246 に 3 フィールド追加・実行ログ 4264・API トークン認証）で実行し、書き込んだ 10 件は CLI で元の値に戻した。記事中のアプリ番号は読者環境に読み替える前提。ドメインは example.cybozu.com に置換
--->
-<!-- 計画書へのリンク（docs-check 用・公開時は削除）: [計画書.md](計画書.md) -->
-
 > **結論（3 行）**
 >
 > - 第 7 回の `.sql` と終了コードで足りないのは、**途中で止まったらどこから再開するか**、**実行履歴をどこに残すか**、**月次の基準日をどう固定するか**の 3 つです。kSQL Flow はこれを SQL の方言（dialect 1）とランナー（`ksql-flow`）で持ちます
 > - dialect 1 は `-- @ksql dialect: 1` を書いたときだけ有効です。`ASSERT …, 'msg'`（異常＝止める・通知）と `EXIT SUCCESS IF …, 'msg'`（対象なし・差分なし＝成功・通知しない）を分け、`@MONTH_START()` などの `@` 付き関数で基準日を固定し、`UPSERT … KEY (キー)` で同じキーを重複させずに書き戻します
 > - ランナーは `validate-all` → `run-all --dry-run` → `run-all` の順に使います。途中で止まったら `run-all --resume-batch <元の batch_id>` が、**失敗したジョブとその後続だけを元の基準日のまま**再開します（実測）。`--resume` は直近バッチを対象にする簡易形です
 
-前回（[第 7 回: CLI を導入して定期運用に載せる](https://qiita.com/rex0220/items/XXXXXXXX)）で、1 本の `.sql` をスケジューラから流して終了コードで検知する形を作りました。今回は複数のジョブを、履歴と再開つきで回します。
+前回（[第 7 回: CLI を導入して定期運用に載せる](https://qiita.com/rex0220/items/c0dc73f3ac40daba9ace)）で、1 本の `.sql` をスケジューラから流して終了コードで検知する形を作りました。今回は複数のジョブを、履歴と再開つきで回します。
 
 ## 課題
 
@@ -117,6 +110,22 @@ FROM diff
 KEY (会社名);
 ```
 
+7 文の流れと、止まる場所は 3 つです。`ASSERT` の 2 つは異常（通知する）、`EXIT SUCCESS IF` は対象なし（通知しない）で、どちらも書き込み API を呼ぶ前に止まります。
+
+```mermaid
+flowchart TD
+  A["1) ASSERT<br>当月のマイナス売上 = 0 件"] -->|成立| B["2) CREATE TEMP TABLE summary<br>当月の案件を会社別に集計"]
+  A -->|不成立| X1["ABORTED (exit 2)<br>書き込み 0・通知する"]
+  B --> C["3) ASSERT<br>顧客管理に無い会社名 = 0 件"]
+  C -->|不成立| X2["ABORTED (exit 2)<br>書き込み 0・通知する"]
+  C -->|成立| D["4) CREATE TEMP TABLE snapshot<br>顧客管理の全社 LEFT JOIN summary<br>案件が無い会社は 0・現在値も並べる"]
+  D --> E["5) CREATE TEMP TABLE diff<br>現在値と違う会社だけ"]
+  E --> F{"6) EXIT SUCCESS IF<br>diff が 0 件?"}
+  F -->|成立| X3["NO_DATA (exit 0)<br>書き込み 0・通知しない"]
+  F -->|不成立| G["7) UPSERT … KEY (会社名)<br>diff の行だけ書く・最終集計日時 = as-of"]
+  G --> Y["SUCCESS (exit 0)"]
+```
+
 ### スナップショットにする理由
 
 案件がある会社だけを書く形にすると、案件が無くなった月にその会社の前月値が残ります。「当月案件件数」を名乗る列としては誤りです。そこで **顧客管理の全社を起点に** 案件集計を `LEFT JOIN` し、案件が無い会社は `COALESCE(…, 0)` で 0 にします（第 2 回の 0 埋めと同じ考え方）。案件が 0 件の月でも、前月の値を持つ会社は 0 に書き換わります（実測。案件が無い月を基準にすると `書込 2 件`）。
@@ -171,7 +180,22 @@ KSQL-FLOW-TEST-C1	0	0
 
 ## 3. ランナーを入れる — ksql-flow
 
-[ksql-flow](https://github.com/rex0220/ksql-flow) は `/flow` 公式 API を使うバッチランナーです。SQL の解析・実行はすべてエンジン（`@rex0220/kintone-sql-tools`）側で、ランナーは排他・実行履歴・再開・通知を受け持ちます。本記事は 0.9.0（エンジン `^3.77.0`）です。
+[ksql-flow](https://github.com/rex0220/ksql-flow) は `/flow` 公式 API を使うバッチランナーです。SQL の解析・実行はすべてエンジン（`@rex0220/kintone-sql-tools`）側で、ランナーは排他・実行履歴・再開・通知を受け持ちます。本記事は 0.9.0（エンジン `^3.77.0`）です。ランナー自体の紹介は [【kSQL Flow #1】kintone のバッチ処理を SQL 1 本で書けるランナーの紹介](https://qiita.com/rex0220/items/893ab4016a5aaf595642) にまとめてあり、本記事はそのうち「ゲート・as-of・再開」を kSQL 実践の文脈で扱います。
+
+使う順は次のとおりです。書き込みが起きるのは `run-all` だけで、その前の 2 段は kintone に何も書きません。
+
+```mermaid
+flowchart LR
+  V["validate-all --strict<br>構文・論理名・KEY の重複禁止設定を検査<br>（kintone 読み取りなし）"] --> D["run-all --dry-run<br>読み取りは実行し、DML は差分プレビュー<br>（書き込み 0・ログ記録なし・ロックなし）"]
+  D --> R["run-all --as-of …<br>本実行。実行ログアプリに BATCH / JOB を記録"]
+  R -->|全ジョブ SUCCESS / NO_DATA| OK["exit 0"]
+  R -->|途中で ABORTED / FAILED| NG["exit 2〜4・通知"]
+  NG --> FIX["失敗したジョブを直す<br>（ジョブ集合とファイル名は変えない）"]
+  FIX --> RS["run-all --resume-batch <元の batch_id><br>失敗ジョブと後続だけ・as-of は元のまま"]
+  RS --> OK
+```
+
+本記事のコマンドと出力は ksql-flow 0.9.0 とエンジン v3.77.0 で取りました。エンジンはその後 v3.85.0 まで進んでいますが、0.9.0 の要求 `^3.77.0` を満たし、この記事の範囲（dialect 1・ゲート・as-of・再開）は変わっていません。
 
 ジョブ用のディレクトリを 1 つ作り、そこへ**プロジェクトローカル**に入れます。版を固定するためです。
 
@@ -345,8 +369,6 @@ ksql-flow run-all jobs --profile prod --as-of "2025-10-01T00:00:00+09:00"
 | JOB | 30_quality_gate.sql | ABORTED | 2025-09-30T15:00:00Z | 0 | 4 |
 | JOB | 40_report.sql | SKIPPED | 2025-09-30T15:00:00Z | | |
 
-<!-- 図: 実行ログアプリの一覧。BATCH と JOB がステータス別に並ぶ画面 -->
-
 ### 直して `--resume-batch`
 
 しきい値を 10,000,000 に直して、止まったバッチを指定して再開します。
@@ -366,6 +388,21 @@ ksql-flow run-all jobs --profile prod --resume-batch 9b429128-8167-4c6d-a29c-35f
 ```
 
 成功済みの 10・20 は流れず、失敗した 30 とその後続の 40 だけが動きました。`--as-of` を付けていないのに基準時刻が前回のまま（2025-10-01 JST）なのは、再開が**元セッションの as-of を引き継ぐ**からです。翌日にリランしても「前日の基準で集計した続き」になります。
+
+```mermaid
+flowchart LR
+  subgraph run1["1 回目: run-all（batch 9b42…・as-of 2025-09-30T15:00Z）"]
+    direction LR
+    J10["10 test_data_gate<br>SUCCESS"] --> J20["20 monthly_deal_summary<br>SUCCESS・書込 10 件"] --> J30["30 quality_gate<br>ABORTED (exit 2)"] --> J40["40 report<br>SKIPPED<br>(dependency: quality_gate)"]
+  end
+  subgraph run2["2 回目: run-all --resume-batch 9b42…（as-of は 1 回目のまま）"]
+    direction LR
+    R30["30 quality_gate<br>SUCCESS"] --> R40["40 report<br>SUCCESS・読取 10 件"]
+  end
+  J30 -. しきい値を 10,000,000 に直す .-> R30
+```
+
+10・20 は元バッチの JOB レコードが `SUCCESS` なので対象外、30 は `ABORTED`、40 は `SKIPPED` なので対象になります。判定の根拠は実行ログアプリだけです。
 
 `--resume-batch` は再開元を**指定したバッチに固定**し、状態を実行ログアプリだけから読みます（取得できなければ止まり、ローカルの状態ファイルへは落ちません）。同じ ID をもう一度指定すれば同じ選抜（30・40）が再び動きます（実測）。復旧が済んだら通常の `run-all` に戻します。
 
@@ -479,8 +516,7 @@ exit /b %ERRORLEVEL%
 - `node` を直接呼ぶのは、終了コード 0〜5 をそのままタスクスケジューラの「前回の実行結果」に渡すためです。参照先は 3 節でローカル導入した `node_modules` で、`.env` にはトークンを置きます（`--env-file` は Node.js 20.6 以上）
 - タスクの「失敗時に再起動」は**有効にしません**。再実行は `--resume-batch` の仕事で、多重起動はロックが止めます
 - 通知は 2 系統です。実行ログアプリの条件通知（`record_type = BATCH` かつ status が `FAILED` / `ABORTED` / `TIMEOUT`、および `record_type = JOB` かつ `parent_batch_id` が空で同じ status）と、設定ファイルの `notifications.onFailure.webhook`。どちらも `NO_DATA` では飛びません
-
-<!-- 図: タスクスケジューラの登録画面。操作は .bat の絶対パス -->
+- タスクスケジューラの「操作」は、プログラムに上の `.bat` の絶対パスを指定します（第 7 回と同じ形）
 
 CI で回すなら、`validate-all --strict` と `run-all --dry-run --json` を PR ごとに流します。dry-run の JSON は `formatVersion: 1` の固定形式で、書き込み予定件数とサンプルを機械的に検査できます。
 
@@ -488,6 +524,8 @@ CI で回すなら、`validate-all --strict` と `run-all --dry-run --json` を 
 ksql-flow validate-all jobs --profile stg --strict
 ksql-flow run-all jobs --profile stg --dry-run --json > dry-run.json
 ```
+
+ジョブが 4 本から数十本に増えると、次に困るのは「A が終わってから B」「B が失敗したら C は止める」といった依存の網の運用です。そこから先は [【kSQL-FlowNet #1】kintone のバッチを「ジョブの網」として運用する](https://qiita.com/rex0220/items/24470d6223c1b4ed4031) が扱っています。本記事の `depends_on` と `--resume-batch` は、その入り口です。
 
 次回は最終回、第 9 回「AI に書かせてレビューする」です。kSQL MCP を導入し、ここまでの各回で使った依頼文を共通プロンプトにまとめ、Claude が書いた SQL を `EXPLAIN` と実測でレビューする手順を扱います。
 
@@ -499,3 +537,8 @@ ksql-flow run-all jobs --profile stg --dry-run --json > dry-run.json
 - https://github.com/rex0220/ksql-flow（ランナー・公開仕様書・実行ログアプリのテンプレート・examples）
 - https://github.com/rex0220/ksql-flow-template（AI と共同でジョブを書くためのテンプレート）
 - npm: `@rex0220/kintone-sql-tools`（エンジン / CLI / MCP）・`@rex0220/ksql-flow`（ランナー）
+
+参考記事:
+
+- [【kSQL Flow #1】kintone のバッチ処理を SQL 1 本で書けるランナーの紹介](https://qiita.com/rex0220/items/893ab4016a5aaf595642) — ランナーの全体像（導入・設定・実行ログ・通知）
+- [【kSQL-FlowNet #1】kintone のバッチを「ジョブの網」として運用する](https://qiita.com/rex0220/items/24470d6223c1b4ed4031) — ジョブが増えたあとの依存関係と運用
