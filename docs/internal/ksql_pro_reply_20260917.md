@@ -1,7 +1,7 @@
 # Pro への返信 — `HAVING` のウィンドウ別名参照が止まらない件（B193）
 
 - 作成: 2026-09-17
-- ステータス: 📝 **送付待ち**。B193 は v3.85.0 でリリース（2026-09-17）。npm 公開を確認してから送る（本文の版数は v3.85.0 で確定）
+- ステータス: ✅ **送付可（2026-09-17・npm に 3.85.0 が latest として公開済みを確認・MCP 3.85.0 で `HAVING_WINDOW_ALIAS` の停止を実機確認）**。社内メモ（送付前の確認）を削除して送る
 - 受領: [Pro の連絡 2026-09-17](../../../ksql-dashboard-pro/docs/internal/kSQLエンジンへの連絡-20260917-送付版.md)（v3.84.0 取り込み報告 + 1 件）
 - 関連: [B193](ksql_b193_having_window_alias_not_rejected_issue.md) / [B184](ksql_b184_window_in_same_select_issue.md)
 
