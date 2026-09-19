@@ -1,12 +1,5 @@
 <!-- タイトル案: 【kSQL 実践 番外編】Claude に ABC 分析の SQL を書かせて検証したら、2 回とも違う形で間違えた -->
 <!-- 投稿時タグ案: kintone, SQL, Claude, MCP, AI -->
-<!--
-状態: 草稿 R3・**公開可（第 9 回と合わせて）**（2026-09-16 R3: v3.78.0 リリース後に §4・§5・まとめ 5 行を追加。当初の方針: 第 3〜8 回を先に公開し、B181・B182・B183 の対応とリリース後に、本稿へ「4. 作り方を MCP に組み込む（B183・before/after）」「5. 正本を直す（B181・B182 修正後に 1〜2 巡目の SQL を再実行）」を足して 1 本の番外編として完成させ、第 9 回と合わせて公開する。旧 03b の構成案は本稿末尾のコメントに統合）。R2: 3 巡目「作り方のルールを前置き」を追加: user が kSQL作成ルール_試験用.md の 21 項目 + 改訂前の依頼文を Claude Desktop に渡した結果を Claude Code が実行し、10 行・順位・区分すべて第 3 回の表と一致（列順と FROM の向きだけ違い、後者は Claude が推測と明示）。R1: 第 3 回 R8〜R9 の「Claude が書いた SQL を検証する」を分離して独立記事に。実測はすべて計画書 §9.8 の第 3 回 R8/R9 メモのとおり。公開可）。ルール全文は第 9 回に載せる予定（第 9 回未反映）。
-公開前チェック: 第 3 回の URL（冒頭）／第 9 回の URL（末尾・公開後）／課題台帳の B181・B182 が GitHub に push 済みであること／このコメント自体を削除
-掲載 SQL と結果は §1〜3 が v3.77.0 の MCP、§4〜5 が v3.78.0（dev profile・CLI）で実行。Claude の回答は user が Claude Desktop で取得したものを原文のまま（抜粋）掲載。手元環境は顧客管理 215 件・案件管理 20 件
--->
-<!-- 計画書へのリンク（docs-check 用・公開時は削除）: [計画書.md](計画書.md) -->
-
 > **結論（3 行）**
 >
 > - 第 3 回の依頼文で Claude Desktop に ABC 分析の SQL を書かせたところ、`ksql_validate` と `ksql_explain` は通り、**実行で止まりました**。原因は列別名の英字が小文字に正規化される仕様で、Claude 自身の原因説明は 2 つとも外れでした
@@ -14,7 +7,7 @@
 > - 依頼文を戻し、代わりに kSQL の作り方を 21 項目のルールとして先頭に置くと、**同じ依頼で 1 回目から正しい結果**になりました。依頼文は「何を出すか」、ルールは「どう書くか」。それでも実行して結果を見る工程は人間の側に残ります
 > - 見つかった 2 件は kSQL v3.78.0 で直し、ルールの要点は MCP の instructions に組み込みました。修正後は元の依頼文のままで正しい結果になりますが、**SQL の形を変えたのはエンジンの修正で、instructions は作法までは変えませんでした**（3 回実測）
 
-[第 3 回: ABC 分析](https://qiita.com/rex0220/items/d417ba52766f73cb965d)の課題を Claude に頼む依頼文を書き、実際に Claude Desktop（kSQL MCP 導入済み）へ渡して、返ってきた SQL を検証した記録です。本編の題材から外れるので番外編に分けました。
+[第 3 回: ABC 分析](https://qiita.com/rex0220/items/d417ba52766f73cb965d)の課題を Claude に頼む依頼文を書き、実際に Claude Desktop（kSQL MCP 導入済み）へ渡して、返ってきた SQL を検証した記録です。本編の題材から外れるので番外編に分けました。掲載した SQL と結果は、1〜3 巡目が kSQL v3.77.0、4 節と 5 節が v3.78.0 の実測です。Claude の回答は Claude Desktop で得たものを原文のまま（抜粋）載せています。
 
 依頼文はこれです。
 
@@ -205,7 +198,7 @@ Writing rules (learned from real failures):
 - After writing: ksql_validate, then ksql_explain; report the fetch summary and reason lines. State assumptions as assumptions.
 ```
 
-長さは 7,369 文字（+29%）になりました。接続時に渡るツール定義まで含めた固定分では +4.5% です。
+長さは 7,369 文字（+29%）になりました。接続時に渡るツール定義まで含めた固定分では +4.5% です。上の文面は v3.78.0 時点のもので、5 行目はその後 v3.81.0 で「ウィンドウ関数は集計と同じ SELECT に書け、式の中でも使える」に書き換えています（5 節）。
 
 ### before / after
 
@@ -236,7 +229,7 @@ v3.78.0 の MCP で、**1 巡目と同じ依頼文を前置きなし・新しい
 
 もう 1 つ、第 3 回で「kSQL ではできない」と書いた、集計と同じ SELECT にウィンドウ関数を書く形と、ウィンドウの結果を式の中で使う形も、v3.81.0 で通るようになりました（[課題台帳](https://github.com/rex0220/kintone-sql-tools/blob/main/docs/ksql_issue_tracker.md) の B184）。集計とウィンドウを 1 つの SELECT にまとめた形は、3 段版と同じ 10 行を返します（v3.82.0 で実測）。AI が最初に書く形が通るようになったので、この番外編の 1〜3 巡目で毎回起きていた「3 段に直す 1 往復」は今後は要りません。
 
-ただし、この注記を書くために「標準 SQL ならこう書く」の形（集計を `base` に分け、次の SELECT で `CASE WHEN SUM(売上合計) OVER () = 0 THEN …` と書く）を流したところ、v3.82.0 では `unknown field code(s): __ksql_window_0 (base)` で落ちました。CTE や一時テーブルを元にした SELECT で、CASE の条件の左辺にウィンドウ関数を置いた形だけが漏れていた修正漏れです（[課題台帳](https://github.com/rex0220/kintone-sql-tools/blob/main/docs/ksql_issue_tracker.md) の B190、v3.83.0 で修正）。「直った」と書く前に、直した形の隣の形まで流す。この番外編で繰り返してきたことが、記事の注記 1 行にも要りました。
+ただし、この注記を書くために「標準 SQL ならこう書く」の形（集計を `base` に分け、次の SELECT で `CASE WHEN SUM(売上合計) OVER () = 0 THEN …` と書く）を流したところ、v3.82.0 では `unknown field code(s): __ksql_window_0 (base)` で落ちました。CTE や一時テーブルを元にした SELECT で、CASE の条件の左辺にウィンドウ関数を置いた形だけが漏れていた修正漏れです（[課題台帳](https://github.com/rex0220/kintone-sql-tools/blob/main/docs/ksql_issue_tracker.md) の B190、v3.83.0 で修正）。翌日には同じ型が `ROLLUP` との併用でも見つかりました（B191、v3.84.0 で修正）。「直った」と書く前に、直した形の隣の形まで流す。この番外編で繰り返してきたことが、記事の注記 1 行にも要りました。
 
 この 2 件が直ったので、3 巡目のルールにあった「別名に英字を使わない」「集計値を `COALESCE` で包まない」は Writing rules に入れていません。回避策を恒久のルールにせず、正本を直して仕様として書く。instructions に残すのは、文書に書いてあっても読まれない種類のものだけです。
 
@@ -258,7 +251,7 @@ v3.78.0 の MCP で、**1 巡目と同じ依頼文を前置きなし・新しい
 
 - 正本で直せるものは直し、残った作法は依頼文に書く。instructions に入れても、作法までは変わらなかった
 
-見つかった 2 件は kSQL 側の課題として起票し、v3.78.0 で修正しました（[課題台帳](https://github.com/rex0220/kintone-sql-tools/blob/main/docs/ksql_issue_tracker.md) の B181・B182。Writing rules は B183）。人間がレビューする手順の全体は[第 9 回](https://qiita.com/rex0220/items/XXXXXXXX)にまとめます。
+見つかった 2 件は kSQL 側の課題として起票し、v3.78.0 で修正しました（[課題台帳](https://github.com/rex0220/kintone-sql-tools/blob/main/docs/ksql_issue_tracker.md) の B181・B182。Writing rules は B183）。人間がレビューする手順の全体は[第 9 回: AI に書かせて人間がレビューする](https://qiita.com/rex0220/items/33280e22599957b2331d)にまとめました。
 
 ---
 
@@ -266,9 +259,3 @@ v3.78.0 の MCP で、**1 巡目と同じ依頼文を前置きなし・新しい
 
 - https://github.com/rex0220/kintone-sql-tools
 - npm: `@rex0220/kintone-sql-tools`（CLI / プラグイン / MCP サーバー同梱）
-
-<!--
-R3（2026-09-16）: §4・§5・まとめ 5 行を追加。実測はすべて v3.78.0（dev profile・SFA パック・CLI 再ビルド版）。
-§4 の before/after は user が Claude Desktop（MCP 3.78.0）で 3 回実行した SQL を Claude Code が実行して突き合わせた（1 回目は前置きなし、2・3 回目は「他のスレッドは参照しない」を追加。1 回目が過去スレッドを拾った可能性は否定できないが、3 回とも SQL の形は同じ）。
-第 1・2 回の依頼文の before/after は未実施（必要なら追記）。第 9 回の URL は公開後に置換。
--->
