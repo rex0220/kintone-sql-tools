@@ -1,6 +1,6 @@
 # B196 `/flow` の一時テーブルの合計の上限 `tempTablesMaxTotalRows` — 出来た行数で登録の前に止め、読取も残りで止める
 
-- 状態: 🚧 **実装済み・リリース待ち（2026-10-22・作業ブランチ `b196/dev` から main へ・v3.87.0 想定）**。Claude が直接実装（codex 未介在）。`CreateExecutionContextOptions.tempTablesMaxTotalRows`・`TempTableTotalLimitError`・`StatementResult.metrics.tempTableRows`。テスト `src/flow-library/__tests__/b196TempTableTotalLimit.test.ts`（20 件）
+- 状態: ✅ **v3.87.0 でリリース（2026-10-22）**。Claude が直接実装（codex 未介在）。実装の commit は b0a2178（作業ブランチ `b196/dev` から main へ）。`CreateExecutionContextOptions.tempTablesMaxTotalRows`・`TempTableTotalLimitError`・`StatementResult.metrics.tempTableRows`。テスト `src/flow-library/__tests__/b196TempTableTotalLimit.test.ts`（20 件）
 - 種別: 機能（公開 API の純加法追加）＋安全性（ブラウザのタブのメモリ）
 - 優先: **高**（kSQL ジョブ実行プラグインの製品の上限「一時テーブルの合計」のブロッカー。初版の関門）
 - 版: minor（v3.87.0 想定）。省略すれば既定動作は変わらない（`metrics.tempTableRows` が増えるだけ）

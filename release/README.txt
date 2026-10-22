@@ -1,20 +1,20 @@
-ksql 配布パッケージ (v3.86.0)
+ksql 配布パッケージ (v3.87.0)
 
 release 成果物:
-- ksql-plugin-v3.86.0.zip
-- ksql-mcp.mcpb (manifest version 3.86.0)
-- ksql-mcp.js (MCP server version 3.86.0)
+- ksql-plugin-v3.87.0.zip
+- ksql-mcp.mcpb (manifest version 3.87.0)
+- ksql-mcp.js (MCP server version 3.87.0)
 
-機能 (B195: /flow の書込前の確認フック confirm・純加法。プラグイン・CLI・MCP の動きは不変):
-- createExecutionContext に confirm を渡すと、書き込みの直前に件数と文の情報 (物理のアプリ ID・論理名) で呼ばれ、
-  true のときだけ書きます。答えを待つ間に timeoutMs か dispose が来ると signal で知らせ、後から true でも書きません。
-  /flow は confirm の有無によらず、期限切れ・dispose のあとに次のチャンクを書かなくなりました。
+機能 (B196: /flow の一時テーブルの合計の上限 tempTablesMaxTotalRows・純加法。プラグイン・CLI・MCP の動きは不変):
+- createExecutionContext に tempTablesMaxTotalRows を渡すと、残っている一時テーブル (エラー表を含む) の行数の合計が
+  上限を超える文を TempTableTotalLimitError で止めます (表は登録しない・書き込み 0 回)。出来た行数で登録の前に確かめ、
+  CREATE TEMP TABLE の読み取りも残りで止めます。StatementResult.metrics.tempTableRows に文が終わった時点の合計。
 
-v3.85.0 / v3.84.0 / v3.83.0 の節は畳みました (B193 HAVING のウィンドウ別名参照を実行前に拒否 = 結果が変わる /
-  B191 式の中のウィンドウの PARTITION BY GROUPING() の内部エラー修正 /
-  B190 CTE／一時テーブルを元にした SELECT の CASE 条件のウィンドウ修正。B191・B190 は純加法)。
+v3.86.0 / v3.85.0 の節は畳みました (B195 /flow の書込前の確認フック confirm = 純加法 /
+  B193 HAVING のウィンドウ別名参照を実行前に拒否 = 結果が変わる)。
 
-v3.82.0 の節は畳みました (B188 残務 プラグインの実行画面に先行文の警告を [文番号] 付きで表示 = UI のみ・エンジン不変)。
+v3.84.0 / v3.83.0 / v3.82.0 の節は畳みました (B191 式の中のウィンドウの PARTITION BY GROUPING() の内部エラー修正 /
+  B190 CTE／一時テーブルを元にした SELECT の CASE 条件のウィンドウ修正 / B188 残務 プラグインの実行画面に先行文の警告を表示)。
 
 v3.81.0 / v3.80.0 の節は畳みました (B184 ウィンドウ関数を集計と同じ SELECT に・ウィンドウ結果を式の中で = 純加法 /
   B187 HAVING に直接書いた集計を SELECT 列に無くても評価 = 結果が変わる修正)。
@@ -111,16 +111,16 @@ B124 集計算術式 / B125 集計のウィンドウ関数 / B123 GROUP BY だ�
 - CHANGELOG.md と GitHub Releases に版ごとの内容と移行案内があります。
   https://github.com/rex0220/kintone-sql-tools/releases
 
-1. ksql-plugin-v3.86.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.87.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.86.0): B195 /flow の書込前の確認フック confirm と、期限切れ・dispose のあとに書かない保証 (純加法)。
+本リリース (v3.87.0): B196 /flow の一時テーブルの合計の上限 tempTablesMaxTotalRows (純加法)。
 
-前リリース (v3.85.0 / v3.84.0 / v3.83.0 / v3.82.0 / v3.81.0): B193 HAVING のウィンドウ別名参照を実行前に拒否
-(結果が変わります) / B191 式の中のウィンドウの PARTITION BY GROUPING() 修正 / B190 CTE／一時テーブルを元にした
-SELECT の CASE 条件のウィンドウ修正 / B188 残務 = プラグインの実行画面に先行文の警告を表示 (UI のみ) /
+前リリース (v3.86.0〜v3.81.0): B195 /flow の書込前の確認フック confirm (純加法) / B193 HAVING のウィンドウ別名参照を
+実行前に拒否 (結果が変わります) / B191 式の中のウィンドウの PARTITION BY GROUPING() 修正 / B190 CTE／一時テーブルを
+元にした SELECT の CASE 条件のウィンドウ修正 / B188 残務 = 先行文の警告を表示 (UI のみ) /
 B184 ウィンドウ関数を集計と同じ SELECT に・ウィンドウ結果を式の中で (純加法)。
 
 前リリース (v3.80.0 / v3.79.0): B187 HAVING に直接書いた集計を SELECT 列に無くても評価 (結果が変わります) /

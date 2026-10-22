@@ -3,6 +3,27 @@
 リリースごとの変更点。**本ファイルは v3.45.0 以降だけを保持する。**
 それ以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) の各タグを参照。
 
+## v3.87.0（2026-10-22）
+
+### 機能（B196: `/flow` の一時テーブルの合計の上限 `tempTablesMaxTotalRows`）**※ 純加法（省略すれば従来どおり。CLI・MCP・プラグインは不変）**
+
+- `createExecutionContext` に `tempTablesMaxTotalRows?: number`（正の安全な整数。違えば `RangeError`）を追加しました。
+  その実行コンテキストで残っている一時テーブルの行数の合計の上限で、`CREATE TEMP TABLE` に加え、`VALIDATE … INTO`・`VALIDATE ONLY INTO`・
+  `ON ERROR SKIP … INTO`（IMPORT を含む）のエラー表も数えます。`DROP TEMP TABLE` で外した表は数えません。
+- 表の登録・エラー表への追加の前に、**出来た行数**で合計を確かめます。JOIN・UNION・CTE・`GENERATE_SERIES`・FROM の無い SELECT・
+  別の一時テーブルからの SELECT・再帰 CTE を含め、どの形でも効きます。超える文は `error.code = "TempTableTotalLimitError"`
+  （表は登録・追加しない・書込 API 0 回・後続は `skippedReason: "fail-fast"`）です。
+- `CREATE TEMP TABLE` の読取は `min(tempTableMaxRows, 合計の残り)` で途中で止めます。集計なども**読む行数**で数えます
+  （出来る表が小さくても、残りより多く読めば止まります）。1 表の上限のほうが厳しいときは従来どおり `FetchAllLimitError` です。
+- `StatementResult.metrics.tempTableRows` に、文が終わった時点で残っている一時テーブルの行数の合計が入ります（オプションの有無によらず）。
+- 依頼元: kSQL ジョブ実行プラグイン（依頼 KJ-2）。テスト 20 件（`src/flow-library/__tests__/b196TempTableTotalLimit.test.ts`）。
+
+### 文書（B197: `tempTableMaxRows` の実際の動き）
+
+- 言語リファレンス §27.9 に、`tempTableMaxRows`（1 表の上限）が実際には実体化の**読取**（1 回ごと）の上限で、
+  出来た表の行数は確かめていないこと（JOIN・UNION・CTE・`GENERATE_SERIES` などは超える表を作れる）を書き添えました。
+  動きは変えていません（直すと結果が変わるため、別に判断します）。
+
 ## v3.86.0（2026-10-22）
 
 ### 機能（B195: `/flow` の書込前の確認フック `confirm`）**※ 純加法（`confirm` を渡さなければ従来どおり。CLI・MCP・プラグインは不変）**
