@@ -1,17 +1,18 @@
-ksql 配布パッケージ (v3.85.0)
+ksql 配布パッケージ (v3.86.0)
 
 release 成果物:
-- ksql-plugin-v3.85.0.zip
-- ksql-mcp.mcpb (manifest version 3.85.0)
-- ksql-mcp.js (MCP server version 3.85.0)
+- ksql-plugin-v3.86.0.zip
+- ksql-mcp.mcpb (manifest version 3.86.0)
+- ksql-mcp.js (MCP server version 3.86.0)
 
-修正 (B193: HAVING から同じ SELECT のウィンドウ別名を参照しても止まらず空文字比較になっていた・結果が変わります):
-- `RANK() OVER (...) AS 順位 ... GROUP BY 会社名 HAVING 順位 <= 5` が v3.81.0〜v3.84.0 では全件 (= 1 は 0 件) を
-  静かに返していました。修正後は実行前に `HAVING_WINDOW_ALIAS` で止まります。WITH で段を分けて次の段の WHERE で絞ってください。
-  集計別名・集計式の HAVING、文レベルの ORDER BY 順位、段を分けた形は不変。
+機能 (B195: /flow の書込前の確認フック confirm・純加法。プラグイン・CLI・MCP の動きは不変):
+- createExecutionContext に confirm を渡すと、書き込みの直前に件数と文の情報 (物理のアプリ ID・論理名) で呼ばれ、
+  true のときだけ書きます。答えを待つ間に timeoutMs か dispose が来ると signal で知らせ、後から true でも書きません。
+  /flow は confirm の有無によらず、期限切れ・dispose のあとに次のチャンクを書かなくなりました。
 
-v3.84.0 / v3.83.0 の節は畳みました (B191 式の中のウィンドウの PARTITION BY GROUPING() の内部エラー修正 /
-  B190 CTE／一時テーブルを元にした SELECT の CASE 条件のウィンドウ修正。いずれも純加法)。
+v3.85.0 / v3.84.0 / v3.83.0 の節は畳みました (B193 HAVING のウィンドウ別名参照を実行前に拒否 = 結果が変わる /
+  B191 式の中のウィンドウの PARTITION BY GROUPING() の内部エラー修正 /
+  B190 CTE／一時テーブルを元にした SELECT の CASE 条件のウィンドウ修正。B191・B190 は純加法)。
 
 v3.82.0 の節は畳みました (B188 残務 プラグインの実行画面に先行文の警告を [文番号] 付きで表示 = UI のみ・エンジン不変)。
 
@@ -110,16 +111,17 @@ B124 集計算術式 / B125 集計のウィンドウ関数 / B123 GROUP BY だ�
 - CHANGELOG.md と GitHub Releases に版ごとの内容と移行案内があります。
   https://github.com/rex0220/kintone-sql-tools/releases
 
-1. ksql-plugin-v3.85.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.86.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.85.0): B193 HAVING のウィンドウ別名参照を実行前に拒否 (結果が変わります = 静かに全件／0 件だった形がエラーに)。
+本リリース (v3.86.0): B195 /flow の書込前の確認フック confirm と、期限切れ・dispose のあとに書かない保証 (純加法)。
 
-前リリース (v3.84.0 / v3.83.0 / v3.82.0 / v3.81.0): B191 式の中のウィンドウの PARTITION BY GROUPING() 修正 /
-B190 CTE／一時テーブルを元にした SELECT の CASE 条件のウィンドウ修正 / B188 残務 = プラグインの実行画面に
-先行文の警告を表示 (UI のみ) / B184 ウィンドウ関数を集計と同じ SELECT に・ウィンドウ結果を式の中で (純加法)。
+前リリース (v3.85.0 / v3.84.0 / v3.83.0 / v3.82.0 / v3.81.0): B193 HAVING のウィンドウ別名参照を実行前に拒否
+(結果が変わります) / B191 式の中のウィンドウの PARTITION BY GROUPING() 修正 / B190 CTE／一時テーブルを元にした
+SELECT の CASE 条件のウィンドウ修正 / B188 残務 = プラグインの実行画面に先行文の警告を表示 (UI のみ) /
+B184 ウィンドウ関数を集計と同じ SELECT に・ウィンドウ結果を式の中で (純加法)。
 
 前リリース (v3.80.0 / v3.79.0): B187 HAVING に直接書いた集計を SELECT 列に無くても評価 (結果が変わります) /
 診断と警告の穴 4 件 = B185 / B186 / B188 / B189 (実行結果は不変)。

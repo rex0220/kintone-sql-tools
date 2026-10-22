@@ -3,6 +3,28 @@
 リリースごとの変更点。**本ファイルは v3.45.0 以降だけを保持する。**
 それ以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) の各タグを参照。
 
+## v3.86.0（2026-10-22）
+
+### 機能（B195: `/flow` の書込前の確認フック `confirm`）**※ 純加法（`confirm` を渡さなければ従来どおり。CLI・MCP・プラグインは不変）**
+
+- `createExecutionContext` に `confirm?: FlowDmlConfirm` を追加しました。書込の対象を読み、書く内容を準備した直後・最初の書込 API の前に
+  `confirm(count, operation, context)` が await され、`true` を返したときだけ書きます。`false`・`undefined` など `true` 以外は取消
+  （その文の書込 API は 0 回・`error.code = "OperationCancelledError"`・後続は `skippedReason: "fail-fast"`）、reject はその code の error です。
+- `context`（`FlowDmlConfirmContext`）は `statementIndex` / `statementCount` / `statementType` / `targetAppId`（**物理のアプリ ID**）/
+  `logicalAppName`（`LAPP_` の文だけ・NFC・大文字）/ `signal`。答えを待つ間に `timeoutMs`（実行コンテキスト全体の期限）か
+  `disposeExecutionContext` が来ると `signal` が中止され（`reason.name` は `TimeoutError` / `ExecutionContextDisposedError`）、
+  文は答えを待たずに `TimeoutError` / `ExecutionContextDisposedError` の結果で終わります。後から `true` が返っても書きません。
+- 件数の意味・呼ばれない文（素の INSERT VALUES、対象 0 件の UPSERT など）・件数 0 で呼ばれる文は README の `/flow` の節の表にあります。
+  IMPORT を含むスクリプトとは併用できません（`ArgumentError`）。APPLY の書込は `/flow` の公開面では動かないため、APPLY の詳細は渡しません。
+- 依頼元: kSQL ジョブ実行プラグイン（依頼 KJ-1）。テスト 18 件（`src/flow-library/__tests__/b195ConfirmHook.test.ts`）。
+
+### 安全性（B195: `/flow` は期限切れ・dispose のあとに書かない）**※ `confirm` の有無によらず効く**
+
+- `/flow` の実行は、書込 API（POST / PUT / DELETE / native UPSERT）を呼ぶ直前に毎回、期限と dispose を確かめるようになりました。
+  これまでは、`onChunkWritten` を待つ間などに期限が来て `executeStatement` が `TimeoutError` を返したあとも、切り離された実行が
+  次のチャンクを書いていました（250 行の UPSERT で POST 3 回 → 修正後 1 回）。送信中だった 1 回の書込は止められないため、
+  その `onChunkWritten` は `executeStatement` の結果より後に届くことがあります。
+
 ## v3.85.0（2026-09-17）
 
 ### 修正（B193: `HAVING` から同じ SELECT のウィンドウ別名を参照しても止まらず、空文字として比較されていた）**※ 結果が変わる修正（静かに全件／0 件を返していた形が、実行前にエラーになる）**

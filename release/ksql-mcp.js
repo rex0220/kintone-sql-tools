@@ -29765,7 +29765,7 @@ var import_docsResourceBuilder = __toESM(require_docsResourceBuilder());
 
 // src/mcp/serverVersion.ts
 init_define_KSQL_DOCS();
-var SERVER_VERSION = true ? "3.85.0" : "0.0.0-dev";
+var SERVER_VERSION = true ? "3.86.0" : "0.0.0-dev";
 
 // src/mcp/docsResources.ts
 function loadFromRepoDocs() {

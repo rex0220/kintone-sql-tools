@@ -1,6 +1,6 @@
 # B195 `/flow` の書込前の確認フック `confirm` の公開 — 期限・dispose と競わせ、書込 API の直前に確かめ直す
 
-- 状態: 🚧 **実装済み・リリース待ち（2026-10-22・作業ブランチ `b195/dev` から main へ・v3.86.0 想定）**。リリース（プラグイン zip の署名・npm 公開）は鍵と認証のある Windows で行う。Claude が直接実装（codex 未介在）。公開型 `FlowDmlConfirm` / `FlowDmlConfirmContext` と `CreateExecutionContextOptions.confirm`、管理層の書込ゲートと確認の待ちの打ち切り。テスト `src/flow-library/__tests__/b195ConfirmHook.test.ts`（18 件）
+- 状態: ✅ **v3.86.0 でリリース（2026-10-22）**。Claude が直接実装（codex 未介在）。実装の commit は 23f94b8（作業ブランチ `b195/dev` から main へ）。公開型 `FlowDmlConfirm` / `FlowDmlConfirmContext` と `CreateExecutionContextOptions.confirm`、管理層の書込ゲートと確認の待ちの打ち切り。テスト `src/flow-library/__tests__/b195ConfirmHook.test.ts`（18 件）
 - 種別: 機能（公開 API の純加法追加）＋安全性（期限切れ・dispose のあとに切り離された実行が書かない）
 - 優先: **高**（kSQL ジョブ実行プラグインの「書き込みの前に確認する」と spike の関門 6 のブロッカー）
 - 版: minor（v3.86.0 想定）。`confirm` を渡さなければ既定動作は変わらない（§5 の書込ゲートだけは常に効く）
