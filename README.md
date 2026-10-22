@@ -277,7 +277,7 @@ npm パッケージは 2 つのサブパスを **semver 対象の公開 API** �
 | サブパス | 用途 | 主な export |
 |---|---|---|
 | `@rex0220/kintone-sql-tools/engine` | **read-only** のクエリ実行（ダッシュボード等）。書込 API は構造的に遮断 | `runQuery` / `runBatch` / `explainQuery` / `createReadonlyKintoneClient` / `KsqlEngineError` / `version` |
-| `@rex0220/kintone-sql-tools/flow` | **Flow dialect 1**（→ [言語リファレンス §27](docs/ksql_language_reference.md)）のスクリプト解析・検証・**文単位実行**（バッチランナー向け・書込可能） | `parseScript` / `validateScript` / `explainScript`（`asOf`/`timezone` 注入可） / `createExecutionContext`（`onChunkWritten` 書込チャンク通知・`onImportSourceMaterialized` IMPORT receipt） / `executeStatement` / `previewStatement`（dry-run 差分プレビュー・書込 0 回） / `disposeExecutionContext` / `createImportSourceResolver` / `FlowImportProviderError` / `createKintoneClient` / `isDmlResult`（`FlowDmlResult` 型ガード） / `version` |
+| `@rex0220/kintone-sql-tools/flow` | **Flow dialect 1**（→ [言語リファレンス §27](docs/ksql_language_reference.md)）のスクリプト解析・検証・**文単位実行**（バッチランナー向け・書込可能） | `parseScript` / `validateScript` / `explainScript`（`asOf`/`timezone` 注入可） / `createExecutionContext`（`onChunkWritten` 書込チャンク通知・`onImportSourceMaterialized` IMPORT receipt・`confirm` 書込前の確認フック） / `executeStatement` / `previewStatement`（dry-run 差分プレビュー・書込 0 回） / `disposeExecutionContext` / `createImportSourceResolver` / `FlowImportProviderError` / `createKintoneClient` / `isDmlResult`（`FlowDmlResult` 型ガード） / `version` |
 
 バッチ実行ランナー **kSQL Flow**（`/flow` API を使った公式ランナー・別リポジトリ）: https://github.com/rex0220/ksql-flow
 
@@ -337,6 +337,40 @@ RFC 4180 data record数（subtable CSVは継続行を含む）、JSONはtop-leve
 CSVの `encoding` は上記優先順位の解決後、JSONは `"utf8"` です。callbackがthrow/rejectすると
 当該文はerrorになり、その文のmutation APIは0回です。通知objectのkeyは
 `statementIndex` / `name` / `kind` / `rows` / `encoding` の5つだけです。
+
+書込前の確認フック `confirm`（B195）は、書込の対象を読み、書く内容を準備した直後・最初の書込 API の前に1回 await されます。
+`true` を返したときだけ書き、それ以外（`false`・`undefined`・reject）はその文の書込 API が0回で、
+`false` 等は `error.code = "OperationCancelledError"`、reject はその code の error になります（後続の文は `skippedReason: "fail-fast"`）。
+
+```ts
+const ctx = createExecutionContext({
+  client, statements, meta, apps: { 受注: 100 }, timeoutMs: 600_000,
+  async confirm(count, operation, info) {
+    // info = { statementIndex, statementCount, statementType, targetAppId（物理）, logicalAppName?, signal }
+    return showDialog({ count, operation, ...info, close: info.signal });   // signal 中止で画面を閉じる
+  },
+});
+```
+
+| 文 | `count` / `operation` |
+|---|---|
+| UPDATE / UPDATE ... FROM | 対象レコード数 / `UPDATE` |
+| DELETE | 対象レコード数 / `DELETE` |
+| INSERT ... SELECT | 追加する行数 / `INSERT` |
+| UPSERT / UPSERT ... SELECT | 追加と更新の合計 / `UPDATE`（UPSERT かどうかは `statementType`） |
+| CHECK 付きの INSERT / UPDATE / UPSERT | 書く行数（1行でも不合格なら確認の前に error） / INSERT 系は `INSERT`・ほかは `UPDATE` |
+| ON ERROR SKIP 付きの INSERT / UPDATE / UPSERT | 合格した行数 / INSERT 系は `INSERT`・ほかは `UPDATE` |
+| REORDER | 対象の親レコード数 / `UPDATE` |
+
+- **呼ばれない**: 素の INSERT VALUES（CHECK・ON ERROR SKIP 付きは呼ばれる）、対象0件の UPSERT、CHECK 付きで対象0行、WHERE が定数偽の UPDATE / DELETE / REORDER、VALIDATE ONLY。dialect 0 のサブテーブルへの INSERT も呼ばれない（dialect 1 ではサブテーブル DML 自体が実行時に止まる）。
+- **`count = 0` で呼ばれる**: 対象0件の UPDATE / DELETE / INSERT ... SELECT / REORDER、ON ERROR SKIP で合格0行。0件なら書込は起きないので、画面を出さずに `true` を返してよい。
+- **期限と dispose**: 答えを待つ間に `timeoutMs`（実行コンテキスト全体の期限）か `disposeExecutionContext` が来ると `info.signal` が中止され（`reason.name` は `TimeoutError` / `ExecutionContextDisposedError`）、
+  文は答えを待たずに `error.code = "TimeoutError"` / `"ExecutionContextDisposedError"` で返ります。後から `true` が返っても書きません。
+- **対象外**: IMPORT を含むスクリプトとは併用できません（`createExecutionContext` が `ArgumentError`）。APPLY の書込は `/flow` の公開面では動かないため、APPLY の詳細は渡しません。
+
+`confirm` の有無にかかわらず、`/flow` の実行は**書込 API を呼ぶ直前に毎回**期限と dispose を確かめ、過ぎていれば書きません（B195）。
+期限切れの結果を返したあとに、切り離された実行が次のチャンクを書くことはありません。送信中だった1回分の書込は止められないため、
+その `onChunkWritten` が `executeStatement` の結果より後に届くことがあります。
 
 CSV export（B179）は temp table を名前付きシンクとして事前宣言し、全文実行後に serialize します。
 engine は path を持たず bytes と receipt を返すだけで、file 書込みと sha256 は呼出側の責務です:

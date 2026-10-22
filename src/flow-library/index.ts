@@ -13,6 +13,7 @@ import {
   disposeManagedStatementExecutionContext,
   executeManagedStatement,
   previewManagedStatement,
+  type ExecuteOptions,
   type ManagedStatementExecutionContext,
 } from "../execute";
 import { createKintoneClient } from "./writableClient";
@@ -30,6 +31,7 @@ import type {
   ExecutionMetrics,
   ExplainScriptOptions,
   ExplainScriptResult,
+  FlowDmlConfirm,
   ParseScriptOptions,
   ParseScriptResult,
   PreviewResult,
@@ -150,8 +152,17 @@ export function createExecutionContext(opts: CreateExecutionContextOptions): Exe
     const handle = {} as ExecutionContext;
     const {
       client, script: _script, statements: _statements, meta: _meta, apps: _apps,
-      onChunkWritten, onImportSourceMaterialized, enableNativeUpsert, exportSinks, ...executeOptions
+      onChunkWritten, onImportSourceMaterialized, enableNativeUpsert, exportSinks, confirm, ...executeOptions
     } = opts;
+    if (confirm !== undefined && typeof confirm !== "function") {
+      throw new TypeError("confirm must be a function.");
+    }
+    if (confirm && statements.some(statementUsesImport)) {
+      throw new KsqlFlowError(
+        "ArgumentError",
+        "ArgumentError: confirm does not cover IMPORT; remove confirm or run IMPORT in a separate execution context."
+      );
+    }
     const normalizedExportSinks = normalizeExportSinkDeclarations(statements, exportSinks);
     const bindings = bindingsByStatements.get(statements as object);
     const executionClient = bindings ? routeClient(client, bindings) : client;
@@ -165,7 +176,7 @@ export function createExecutionContext(opts: CreateExecutionContextOptions): Exe
         statements,
         dialect,
         executionClient,
-        executeOptions,
+        confirm ? { ...executeOptions, confirm: routeConfirm(confirm, bindings) } : executeOptions,
         routedOnChunkWritten,
         enableNativeUpsert !== false,
         onImportSourceMaterialized,
@@ -318,6 +329,34 @@ function normalizedLogicalAppResult(source: string, apps: Readonly<Record<string
   });
 }
 
+/**
+ * B195: 内部の確認を公開の形へ。仮の ID を物理のアプリ ID と論理名に戻し、true 以外は取消にする。
+ * 公開の形で渡せない詳細（APPLY / IMPORT）が付いた確認は、フックを呼ばずに止める（書かない）。
+ */
+function routeConfirm(
+  confirm: FlowDmlConfirm,
+  bindings: ReadonlyMap<number, AppBinding> | undefined
+): NonNullable<ExecuteOptions["confirm"]> {
+  return async (count, operation, context) => {
+    if (context === undefined || context.targetAppId === null || context.signal === undefined) {
+      throw new Error("InternalError: confirm context is incomplete; the statement was not written.");
+    }
+    if (context.applyDetail || context.applyDiagnostic || context.importDetail) {
+      throw new Error("UnsupportedError: confirm does not cover APPLY or IMPORT detail; the statement was not written.");
+    }
+    const binding = bindings?.get(context.targetAppId);
+    const answer = await confirm(count, operation, {
+      statementIndex: context.statementIndex,
+      statementCount: context.statementCount,
+      statementType: context.statementType,
+      targetAppId: binding?.appId ?? context.targetAppId,
+      ...(binding?.source === "logical" ? { logicalAppName: binding.logicalName } : {}),
+      signal: context.signal,
+    });
+    return answer === true;
+  };
+}
+
 function routeClient(
   client: import("../execute").KintoneClient,
   bindings: ReadonlyMap<number, AppBinding>
@@ -358,6 +397,8 @@ export type {
   ExplainScriptOptions,
   ExplainScriptResult,
   FieldInfo,
+  FlowDmlConfirm,
+  FlowDmlConfirmContext,
   FlowImportProviderErrorCode,
   FlowCsvExportColumnMeta,
   FlowCsvExportInput,

@@ -776,6 +776,11 @@ export interface DmlConfirmContext {
   applyDetail?: ApplyConfirmDetail;
   /** Phase 16a shared APPLY detail. Additive; applyDetail remains byte-for-byte compatible. */
   applyDiagnostic?: ApplyDiagnostic;
+  /**
+   * B195: /flow の管理された実行だけが渡す。文の期限・dispose が答えより先に来ると中止され、
+   * 文は答えを待たずに終わる（後から true が返っても書かない）。答えが出たあとは中止しない。
+   */
+  signal?: AbortSignal;
 }
 
 export interface ExecuteOptions {
@@ -1932,6 +1937,8 @@ export interface ManagedStatementExecutionContext {
   readonly cursorCleanups: Set<() => Promise<void>>;
   readonly onChunkWritten?: (info: ManagedChunkWrittenInfo) => void | Promise<void>;
   readonly onImportSourceMaterialized?: (info: ManagedImportSourceMaterializedInfo) => void | Promise<void>;
+  /** B195: dispose で中止される。確認フックの待ちを dispose と競わせる。 */
+  readonly disposeController: AbortController;
   nextIndex: number;
   aborted: "fail-fast" | "timeout" | "assertion" | "exit" | null;
   disposed: boolean;
@@ -2025,6 +2032,7 @@ export function createManagedStatementExecutionContext(
     cursorCleanups: new Set(),
     ...(onChunkWritten ? { onChunkWritten } : {}),
     ...(onImportSourceMaterialized ? { onImportSourceMaterialized } : {}),
+    disposeController: new AbortController(),
     nextIndex: 0,
     aborted: null,
     disposed: false,
@@ -2083,27 +2091,39 @@ export async function executeManagedStatement(
     const cursorScope = wrapClientWithCursorScope(statementClient);
     managed.cursorCleanups.add(cursorScope.closeActive);
     const remaining = managed.deadline !== null ? managed.deadline - Date.now() : null;
+    // B195: runWithDeadline も dispose も中の処理を止めない。切り離された実行が書かないよう、
+    // 書込 API の直前に毎回、期限と dispose を確かめ直す（onChunkWritten の有無によらない）。
+    const abandoned = new AbortController();
+    const gatedClient = wrapClientWithWriteGate(
+      cursorScope.client,
+      () => assertManagedStatementWritable(managed, abandoned.signal)
+    );
     const executionClient = managed.onChunkWritten
       ? wrapClientWithChunkWrittenCallback(
-          cursorScope.client,
+          gatedClient,
           index,
           statement,
           managed.onChunkWritten
         )
-      : cursorScope.client;
+      : gatedClient;
     const userConfirm = managed.options.confirm;
     let statementOptions: BatchExecuteOptions = userConfirm
       ? {
           ...managed.options,
-          confirm: (count, operation, detailContext) => userConfirm(count, operation, {
-            statementIndex: index,
-            statementCount: managed.statements.length,
-            statementType: info.statementType,
-            targetAppId: info.targetAppId,
-            ...(detailContext?.importDetail ? { importDetail: detailContext.importDetail } : {}),
-            ...(detailContext?.applyDetail ? { applyDetail: detailContext.applyDetail } : {}),
-            ...(detailContext?.applyDiagnostic ? { applyDiagnostic: detailContext.applyDiagnostic } : {}),
-          }),
+          confirm: (count, operation, detailContext) => awaitManagedConfirm(
+            managed,
+            abandoned.signal,
+            (signal) => userConfirm(count, operation, {
+              statementIndex: index,
+              statementCount: managed.statements.length,
+              statementType: info.statementType,
+              targetAppId: info.targetAppId,
+              ...(detailContext?.importDetail ? { importDetail: detailContext.importDetail } : {}),
+              ...(detailContext?.applyDetail ? { applyDetail: detailContext.applyDetail } : {}),
+              ...(detailContext?.applyDiagnostic ? { applyDiagnostic: detailContext.applyDiagnostic } : {}),
+              signal,
+            })
+          ),
         }
       : managed.options;
     if (managed.onImportSourceMaterialized) {
@@ -2115,7 +2135,7 @@ export async function executeManagedStatement(
           await managed.onImportSourceMaterialized!({ statementIndex: index, ...materialized });
           // runWithDeadline cannot cancel the underlying Promise. Re-check here so a callback
           // that settles after the deadline cannot let the detached execution reach mutation.
-          if (managed.deadline !== null && Date.now() >= managed.deadline) throw new BatchTimeoutError();
+          assertManagedStatementWritable(managed, abandoned.signal);
         },
       } as BatchExecuteOptions;
     }
@@ -2133,7 +2153,10 @@ export async function executeManagedStatement(
         dialect: managed.dialect,
       }),
       remaining,
-      cursorScope.closeActive
+      async () => {
+        abandoned.abort();
+        await cursorScope.closeActive();
+      }
     );
     if (outcome.result) {
       outcome.result = attachSearchAbortWarning(outcome.result, searchAbortCollector);
@@ -2301,10 +2324,100 @@ export async function disposeManagedStatementExecutionContext(
 ): Promise<void> {
   if (managed.disposed) return;
   managed.disposed = true;
+  managed.disposeController.abort();
   await Promise.all([...managed.cursorCleanups].map((cleanup) => cleanup().catch(() => undefined)));
   managed.cursorCleanups.clear();
   releaseMetadataCacheScope(managed.cacheContext);
   managed.metrics.elapsedMs = Date.now() - managed.startedAt;
+}
+
+function executionContextDisposedError(): Error {
+  return new Error("ExecutionContextDisposedError: execution context is disposed.");
+}
+
+/** B195: 書込の直前と確認の答えのあとに確かめる。dispose を先に見る（呼出側が意図して止めたため）。 */
+function assertManagedStatementWritable(
+  managed: ManagedStatementExecutionContext,
+  abandoned: AbortSignal
+): void {
+  if (managed.disposed) throw executionContextDisposedError();
+  if (abandoned.aborted || (managed.deadline !== null && Date.now() >= managed.deadline)) {
+    throw new BatchTimeoutError();
+  }
+}
+
+/** B195: /flow 管理層の書込 API 直前ゲート。読取と Cursor の後始末は止めない。 */
+function wrapClientWithWriteGate(client: KintoneClient, assertWritable: () => void): KintoneClient {
+  const wrapped: KintoneClient = {
+    ...client,
+    postRecords: async (params) => {
+      assertWritable();
+      return client.postRecords(params);
+    },
+    putRecords: async (params) => {
+      assertWritable();
+      return client.putRecords(params);
+    },
+    deleteRecords: async (params) => {
+      assertWritable();
+      return client.deleteRecords(params);
+    },
+  };
+  if (clientHasNativeUpsert(client)) {
+    wrapped.upsertRecords = async (params) => {
+      assertWritable();
+      return client.upsertRecords!(params);
+    };
+  }
+  return wrapped;
+}
+
+function confirmAbortReason(code: "TimeoutError" | "ExecutionContextDisposedError"): Error {
+  const reason = code === "TimeoutError" ? new Error("TimeoutError: batch timeout exceeded.") : executionContextDisposedError();
+  reason.name = code;
+  return reason;
+}
+
+/**
+ * B195: 確認フックの答えを、文の期限（runWithDeadline の打ち切り）と dispose と競わせる。
+ * 先に来たほうで signal を中止し、答えを待たずに BatchTimeoutError / ExecutionContextDisposedError で
+ * 文を終える。後から true が返っても、ここと書込ゲートの両方で書かない。
+ */
+async function awaitManagedConfirm(
+  managed: ManagedStatementExecutionContext,
+  abandoned: AbortSignal,
+  ask: (signal: AbortSignal) => Promise<boolean>
+): Promise<boolean> {
+  assertManagedStatementWritable(managed, abandoned);
+  const controller = new AbortController();
+  const disposeSignal = managed.disposeController.signal;
+  let stopListening!: () => void;
+  const interrupted = new Promise<never>((_, reject) => {
+    const onTimeout = () => {
+      controller.abort(confirmAbortReason("TimeoutError"));
+      reject(new BatchTimeoutError());
+    };
+    const onDispose = () => {
+      controller.abort(confirmAbortReason("ExecutionContextDisposedError"));
+      reject(executionContextDisposedError());
+    };
+    abandoned.addEventListener("abort", onTimeout, { once: true });
+    disposeSignal.addEventListener("abort", onDispose, { once: true });
+    stopListening = () => {
+      abandoned.removeEventListener("abort", onTimeout);
+      disposeSignal.removeEventListener("abort", onDispose);
+    };
+  });
+  const answer = Promise.resolve().then(() => ask(controller.signal));
+  void answer.catch(() => { /* 打ち切った後の reject を抑止 */ });
+  void interrupted.catch(() => { /* 同上 */ });
+  try {
+    const ok = await Promise.race([answer, interrupted]);
+    assertManagedStatementWritable(managed, abandoned);
+    return ok;
+  } finally {
+    stopListening();
+  }
 }
 
 /** /flow 管理層だけで有効にする、書込 API 成功境界の薄い observer。 */

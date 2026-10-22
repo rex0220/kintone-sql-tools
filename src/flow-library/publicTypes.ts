@@ -251,7 +251,44 @@ export interface CreateExecutionContextOptions extends ParseScriptOptions {
    * コールバックが throw した場合、その文は error になるが、通知対象チャンクは書込済み。
    */
   onChunkWritten?: (info: FlowChunkWrittenInfo) => void | Promise<void>;
+  /**
+   * 書込の対象を読み、書く内容を準備した直後・最初の書込 API の前に await される（B195）。
+   * true 以外（false・undefined など）は取消＝その文の書込 0 回・`OperationCancelledError`。
+   * 省略時は確認なしで書く。IMPORT を含むスクリプトとは併用できない（ArgumentError）。
+   * APPLY の詳細は渡さない（/flow の公開面では APPLY の書込は動かない）。
+   */
+  confirm?: FlowDmlConfirm;
 }
+
+/**
+ * 確認フックに渡す文の情報（B195）。
+ * 呼ばれる文と件数の意味は README の `/flow` の節を参照（呼出し回数から文番号を推測しないこと）。
+ */
+export interface FlowDmlConfirmContext {
+  /** バッチ内の文 index（0 始まり。parseScript の statements の位置）。 */
+  statementIndex: number;
+  /** バッチの総文数。 */
+  statementCount: number;
+  /** "UPDATE" / "UPSERT_SELECT" など。operation より細かい。 */
+  statementType: string;
+  /** 書込先の物理アプリ ID（LAPP は解決済み）。 */
+  targetAppId: number;
+  /** LAPP_ で書かれた文だけ。"LAPP_" を除き NFC・大文字に正規化した論理名。 */
+  logicalAppName?: string;
+  /**
+   * 文の期限（timeoutMs）または disposeExecutionContext が答えより先に来ると中止される。
+   * そのとき文は答えを待たずに終わり、後から true を返しても書かない。答えたあとは中止しない。
+   * reason は Error（name が "TimeoutError" または "ExecutionContextDisposedError"）。
+   */
+  signal: AbortSignal;
+}
+
+/** 確認フック（B195）。true を返したときだけ書く。 */
+export type FlowDmlConfirm = (
+  count: number,
+  operation: "UPDATE" | "DELETE" | "INSERT",
+  context: FlowDmlConfirmContext
+) => boolean | Promise<boolean>;
 
 export interface FlowChunkWrittenInfo {
   /** バッチ内の文 index（0 始まり）。 */
