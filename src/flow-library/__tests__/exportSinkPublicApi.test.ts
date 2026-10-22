@@ -306,6 +306,7 @@ describe("B179 /flow public CSV export API", () => {
         cursorRecordsScanned: 0, cursorActiveCurrent: 0, cursorActivePeak: 0,
         cursorCleanupFailures: 0, cursorCreateOutcomeUnknown: 0, cursorQuarantinedCurrent: 0,
         fetchedRows: 0, limitReached: false, limitReachedApps: [], elapsedMs: 0,
+        tempTableRows: 0,
       },
     });
     expect(run.client.apiCalls()).toBe(0);

@@ -4466,7 +4466,8 @@ KEY (顧客コード);
 ### 27.9 公式 API `/flow` の実行上限オプション
 
 - **読取上限 `maxRecords`（既定 10,000）**: 文単位の読取候補行数上限。`createExecutionContext` の options で指定し、`executeStatement`／`previewStatement` は同じ実行コンテキストの値を共有します。`explainScript` は自身の options の `maxRecords` を使います（実行・preview・EXPLAIN の 3 面で同値・実測 v3.72.0）
-- **一時テーブル実体化上限 `tempTableMaxRows`（既定 10,000・独立）**: 超過は `onLimitReached` にかかわらず常にエラーです。`maxRecords` だけ引き上げても 10,000 行超の実体化は停止するため、実体化を伴うバッチでは両方を併せて指定してください（例: `{ maxRecords: 25000, tempTableMaxRows: 25000 }`）
+- **一時テーブル実体化上限 `tempTableMaxRows`（既定 10,000・独立）**: 超過は `onLimitReached` にかかわらず常にエラーです。`maxRecords` だけ引き上げても 10,000 行超の実体化は停止するため、実体化を伴うバッチでは両方を併せて指定してください（例: `{ maxRecords: 25000, tempTableMaxRows: 25000 }`）。注意: 実際に止めているのは実体化の**読取**（1 回の読取ごと）で、出来た表の行数は確かめません。JOIN・UNION・CTE・`GENERATE_SERIES`・FROM の無い SELECT・別の一時テーブルからの SELECT は、この値を超える行数の表を作れます（B197）。集計は、出来る行数が少なくても読む行数で止まります
+- **一時テーブルの合計の上限 `tempTablesMaxTotalRows`（省略時は上限なし・v3.87.0〜）**: いま残っている一時テーブル（`CREATE TEMP TABLE` と、`VALIDATE` / `ON ERROR SKIP` の `INTO` のエラー表）の行数の合計の上限です。`DROP TEMP TABLE` で外した表は数えません。どの形の SELECT でも**出来た行数**で数え、表の登録・エラー表への追加の前に止めます（超える文は `error.code = "TempTableTotalLimitError"`・表は登録・追加しない・書込 0 回・後続は fail-fast）。あわせて `CREATE TEMP TABLE` の読取を `min(tempTableMaxRows, 合計の残り)` で途中で止めます（集計なども読む行数で数えます）。文の結果の `metrics.tempTableRows` に、文が終わった時点の合計が入ります
 - **値の上限は設けていません**（正の整数を受理）。ただし読取は fetch-all 方式で候補行が全件メモリに載るため、「受理される」ことと「その規模で動作が実測済みである」ことは別です。大きな値を常用する場合は、呼び出し側（ランナー等）で運用上の上限を検証することを推奨します
 
 ---

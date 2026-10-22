@@ -13,6 +13,7 @@ import {
   disposeManagedStatementExecutionContext,
   executeManagedStatement,
   previewManagedStatement,
+  tempTableRowTotal,
   type ExecuteOptions,
   type ManagedStatementExecutionContext,
 } from "../execute";
@@ -275,11 +276,16 @@ export async function executeStatement(
   ) {
     kind = "EXIT_NO_DATA";
   }
-  return { ...internal, kind, metrics: snapshotMetrics(managed.metrics) };
+  return { ...internal, kind, metrics: snapshotMetrics(managed) };
 }
 
-function snapshotMetrics(metrics: import("./publicTypes").ExecutionMetrics): import("./publicTypes").ExecutionMetrics {
-  return { ...metrics, limitReachedApps: [...metrics.limitReachedApps] };
+function snapshotMetrics(managed: ManagedStatementExecutionContext): import("./publicTypes").ExecutionMetrics {
+  const { metrics } = managed;
+  return {
+    ...metrics,
+    limitReachedApps: [...metrics.limitReachedApps],
+    tempTableRows: tempTableRowTotal(managed.tempTables),
+  };
 }
 
 export async function disposeExecutionContext(context: ExecutionContext): Promise<void> {

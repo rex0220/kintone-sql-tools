@@ -409,6 +409,15 @@ await explainScript(source, { client, maxRecords: 25000 }); // EXPLAIN 面にも
 
 `executeStatement` / `previewStatement` は実行コンテキストの `maxRecords` を共有します（3 面同値）。詳細は[言語リファレンス §27.9](docs/ksql_language_reference.md)。
 
+ブラウザなどでメモリを守るため、いま残っている一時テーブルの**行数の合計**にも上限を付けられます（B196・省略時は上限なし）:
+
+```ts
+const ctx = createExecutionContext({ client, script: source, tempTableMaxRows: 100_000, tempTablesMaxTotalRows: 200_000 });
+// 超える文は error.code = "TempTableTotalLimitError"（表は登録しない・書込 0 回）。result.metrics.tempTableRows = 文が終わった時点の合計
+```
+
+エラー表（`VALIDATE` / `ON ERROR SKIP` の `INTO`）も数え、`DROP TEMP TABLE` で外した表は数えません。どの形の SELECT でも出来た行数で数えて登録の前に止め、`CREATE TEMP TABLE` の読取は合計の残りで途中で止めます（集計なども読む行数で数えます）。
+
 ### エンジンバージョン × dialect 対応表
 
 | エンジン | dialect 0（既定・宣言なし） | dialect 1（`-- @ksql dialect: 1`） | ksql-flow |

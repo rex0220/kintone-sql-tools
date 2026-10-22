@@ -229,6 +229,13 @@ export interface CreateExecutionContextOptions extends ParseScriptOptions {
   dmlMaxRows?: number;
   dmlMaxSubtableRows?: number;
   tempTableMaxRows?: number;
+  /**
+   * いま残っている一時テーブルの行数の合計の上限（B196。正の安全な整数。省略時は上限なし）。
+   * CREATE TEMP TABLE とエラー表（VALIDATE / ON ERROR SKIP の INTO）を数え、DROP TEMP TABLE で外した表は数えない。
+   * 登録・追加の前に確かめ、超える文は TempTableTotalLimitError（表は登録・追加しない・書込 0 回）。
+   * CREATE TEMP TABLE の読取は min(tempTableMaxRows, 残り) で止める（集計なども読む行数で数える）。
+   */
+  tempTablesMaxTotalRows?: number;
   timeoutMs?: number;
   asOf?: Date;
   timezone?: string;
@@ -341,6 +348,8 @@ export interface ExecutionMetrics {
   limitReached: boolean;
   limitReachedApps: number[];
   elapsedMs: number;
+  /** 文が終わった時点で残っている一時テーブルの行数の合計（B196）。 */
+  tempTableRows: number;
 }
 
 export interface FlowInsertResult {

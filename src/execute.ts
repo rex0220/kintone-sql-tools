@@ -1600,6 +1600,11 @@ export interface BatchExecuteOptions extends ExecuteOptions {
   timeoutMs?: number;
   /** 一時テーブル実体化の行数上限（既定 TEMP_TABLE_MAX_ROWS） */
   tempTableMaxRows?: number;
+  /**
+   * B196: いま残っている一時テーブル（CREATE TEMP TABLE とエラー表）の行数の合計の上限。
+   * 省略時は合計の上限なし。登録・追加の前に確かめ、CREATE TEMP TABLE の読取も残りで止める。
+   */
+  tempTablesMaxTotalRows?: number;
   /** dialect 1 の @ 付き時刻関数が共有するスクリプト単位の基準時刻 */
   asOf?: Date;
   /** @TODAY() などの暦日境界に使う IANA timezone。省略時はホスト timezone */
@@ -1615,13 +1620,53 @@ export interface BatchStatementError {
   partialSuccess?: ApplyWriteFailureDetail;
 }
 
+/** B196: 一時テーブルの合計の上限を超える登録・追加・読取を止めたことを表す。 */
+export class TempTableTotalLimitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TempTableTotalLimitError";
+  }
+}
+
+/** いま残っている一時テーブルの行数の合計。excluding は置き換える表（数えない）。 */
+export function tempTableRowTotal(tempTables: ReadonlyMap<string, MaterializedTable>, excluding?: string): number {
+  let total = 0;
+  for (const [name, table] of tempTables) {
+    if (name !== excluding) total += table.rows.length;
+  }
+  return total;
+}
+
+function assertTempTableTotalRows(
+  tempTables: ReadonlyMap<string, MaterializedTable>,
+  name: string,
+  rowsAfter: number,
+  maxTotalRows: number | undefined
+): void {
+  if (maxTotalRows === undefined) return;
+  const others = tempTableRowTotal(tempTables, name);
+  if (others + rowsAfter > maxTotalRows) {
+    throw new TempTableTotalLimitError(
+      `TempTableTotalLimitError: 一時テーブルの合計が上限（${maxTotalRows} 行）を超えるため、${name} を登録しませんでした`
+      + `（${name} 以外の合計 ${others} 行 + ${name} ${rowsAfter} 行）。DROP TEMP TABLE で使い終わった表を外すか、上限を引き上げてください。`
+    );
+  }
+}
+
+function assertTempTablesMaxTotalRows(value: number | undefined): void {
+  if (value !== undefined && (!Number.isSafeInteger(value) || value <= 0)) {
+    throw new RangeError("tempTablesMaxTotalRows must be a positive safe integer");
+  }
+}
+
 function appendValidationErrors(
   tempTables: Map<string, MaterializedTable>,
   name: string,
   columns: string[],
   rows: ProcessRow[],
   maxRows: number,
-  columnMeta: MaterializedColumnMetaMap
+  columnMeta: MaterializedColumnMetaMap,
+  maxTotalRows: number | undefined
 ): void {
   const current = tempTables.get(name);
   if (current && (
@@ -1635,6 +1680,7 @@ function appendValidationErrors(
   if (existingRows.length + rows.length > maxRows) {
     throw new Error(`ArgumentError: temp table ${name} exceeds max rows (${maxRows}).`);
   }
+  assertTempTableTotalRows(tempTables, name, existingRows.length + rows.length, maxTotalRows);
   // schema・件数を先に検査し、既存値を変更せず単一setで反映する。
   tempTables.set(name, { columns: [...columns], rows: [...existingRows, ...rows], columnMeta });
 }
@@ -1717,6 +1763,7 @@ export async function executeBatch(
   // B168 F: capture exactly once, before parsing/analysis or any API call.
   const asOfClock = createAsOfClock(options.asOf ?? new Date(), options.timezone);
   resolveRecursiveCteLimits(options);
+  assertTempTablesMaxTotalRows(options.tempTablesMaxTotalRows);
   const { statements, meta } = parseSqlStatementsForScript(sql, { import: options.enableImport === true });
   const dialect1Warnings = meta.dialect === 1 && statements.some(statementHasBareServerTimeFunctionInWhere)
     ? [DIALECT1_SERVER_TIME_FUNCTION_WARNING]
@@ -1978,6 +2025,7 @@ export function createManagedStatementExecutionContext(
   exportSinks: ReadonlySet<string> = new Set()
 ): ManagedStatementExecutionContext {
   resolveRecursiveCteLimits(options);
+  assertTempTablesMaxTotalRows(options.tempTablesMaxTotalRows);
   const mutableStatements = [...statements];
   const analysis = analyzeBatch(mutableStatements);
   mutableStatements.forEach((statement) => assertApplyExecutionScope("phase15b", statement));
@@ -2628,7 +2676,8 @@ export async function executeBatchStatement(
         result.columns,
         result.rows,
         options.tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS,
-        materializedMetaBySelectResult.get(result) ?? existingValidationColumnMeta(resolvedStmt.summary === true)
+        materializedMetaBySelectResult.get(result) ?? existingValidationColumnMeta(resolvedStmt.summary === true),
+        options.tempTablesMaxTotalRows
       );
     }
     return { result };
@@ -2655,7 +2704,8 @@ export async function executeBatchStatement(
         result.columns,
         result.errors,
         options.tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS,
-        materializedMetaByValidationResult.get(result) ?? new Map()
+        materializedMetaByValidationResult.get(result) ?? new Map(),
+        options.tempTablesMaxTotalRows
       );
     }
     return outcomeWithResultWarnings(resolvedStmt, result);
@@ -2676,12 +2726,31 @@ export async function executeBatchStatement(
   if (resolvedStmt.type === "CREATE_TEMP_TABLE") {
     // 実体化は onLimitReached を適用せず常に error
     //（truncate による暗黙の欠損が後続文の結果を静かに歪めるため。仕様 §5.6）
+    const tableMaxRows = options.tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS;
+    const totalMaxRows = options.tempTablesMaxTotalRows;
+    // B196: 合計の残りが 1 表の上限より小さければ、読取をその残りで止める（読む行数で数える）。
+    const remainingRows = totalMaxRows === undefined
+      ? undefined
+      : totalMaxRows - tempTableRowTotal(tempTables, resolvedStmt.name);
+    const readLimit = remainingRows === undefined ? tableMaxRows : Math.min(tableMaxRows, Math.max(remainingRows, 1));
     const materializeOptions: ExecuteOptions = {
       ...options,
-      maxRecords: options.tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS,
+      maxRecords: readLimit,
       onLimitReached: "error",
     };
-    const result = await runSelectLike(resolvedStmt.query, client, materializeOptions, cacheContext, tempTables);
+    let result: SelectResult;
+    try {
+      result = await runSelectLike(resolvedStmt.query, client, materializeOptions, cacheContext, tempTables);
+    } catch (error) {
+      if (readLimit < tableMaxRows && error instanceof Error && error.name === "FetchAllLimitError") {
+        throw new TempTableTotalLimitError(
+          `TempTableTotalLimitError: 一時テーブルの合計の残り（${remainingRows} 行・上限 ${totalMaxRows} 行）を超える読取のため、`
+          + `${resolvedStmt.name} の実体化を止めました。集計なども読む行数で数えます。DROP TEMP TABLE で使い終わった表を外すか、上限を引き上げてください。`
+        );
+      }
+      throw error;
+    }
+    assertTempTableTotalRows(tempTables, resolvedStmt.name, result.rows.length, totalMaxRows);
     tempTables.set(resolvedStmt.name, {
       rows: result.rows,
       columns: result.columns,
@@ -9421,7 +9490,8 @@ async function executeOnErrorSkip(
     prepared.result.columns,
     prepared.result.errors,
     options.tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS,
-    prepared.columnMeta
+    prepared.columnMeta,
+    options.tempTablesMaxTotalRows
   );
 
   const rejectLimit = stmt.rejectLimit ?? null;
@@ -10249,7 +10319,8 @@ async function executeImport(
     };
     if (stmt.validationErrorTable && tempTables) appendValidationErrors(
       tempTables, stmt.validationErrorTable, columns, errors,
-      (options as BatchExecuteOptions).tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS, new Map()
+      (options as BatchExecuteOptions).tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS, new Map(),
+      (options as BatchExecuteOptions).tempTablesMaxTotalRows
     );
     if (stmt.validateOnly) return result;
 
@@ -10262,7 +10333,8 @@ async function executeImport(
       if (!tempTables || !stmt.errorTable) throw new Error("ArgumentError: ON ERROR SKIP requires a batch and INTO error table.");
       appendValidationErrors(
         tempTables, stmt.errorTable, columns, errors,
-        (options as BatchExecuteOptions).tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS, new Map()
+        (options as BatchExecuteOptions).tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS, new Map(),
+        (options as BatchExecuteOptions).tempTablesMaxTotalRows
       );
     }
     const validParents = prepared.parents.filter((parent) => parent.valid);
@@ -10360,7 +10432,8 @@ async function executeImport(
       appendValidationErrors(
         tempTables, generated.validationErrorTable, result.columns, result.errors,
         (options as BatchExecuteOptions).tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS,
-        materializedMetaByValidationResult.get(result) ?? new Map()
+        materializedMetaByValidationResult.get(result) ?? new Map(),
+        (options as BatchExecuteOptions).tempTablesMaxTotalRows
       );
     }
     return withAudit(result);
@@ -10454,7 +10527,7 @@ async function executeCsvSubtableReplacement(
   const columns = [...payloadFields, ...IMPORT_VALIDATION_META_COLUMNS];
   if (stmt.validateOnly) {
     if (stmt.validationErrorTable && !tempTables) throw new Error("ArgumentError: VALIDATE ONLY INTO requires a batch.");
-    if (stmt.validationErrorTable && tempTables) appendValidationErrors(tempTables, stmt.validationErrorTable, columns, errors, (options as BatchExecuteOptions).tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS, new Map());
+    if (stmt.validationErrorTable && tempTables) appendValidationErrors(tempTables, stmt.validationErrorTable, columns, errors, (options as BatchExecuteOptions).tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS, new Map(), (options as BatchExecuteOptions).tempTablesMaxTotalRows);
     return {
     type: "VALIDATION", operation: "UPDATE", validatedRows: parents.length, validRows: parents.length - invalidParentRows.size,
     invalidRows: invalidParentRows.size, errorCount: errors.length, columns, errors,
@@ -10467,7 +10540,7 @@ async function executeCsvSubtableReplacement(
   }
   if (stmt.onErrorSkip) {
     if (!tempTables || !stmt.errorTable) throw new Error("ArgumentError: ON ERROR SKIP requires a batch and INTO error table.");
-    appendValidationErrors(tempTables, stmt.errorTable, columns, errors, (options as BatchExecuteOptions).tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS, new Map());
+    appendValidationErrors(tempTables, stmt.errorTable, columns, errors, (options as BatchExecuteOptions).tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS, new Map(), (options as BatchExecuteOptions).tempTablesMaxTotalRows);
   }
   if (validPlan.length) {
     if (!options.supportsImportConfirmDetail || !options.confirm) throw new Error("UnsupportedError: CSV subtable replacement requires explicit rendered detail approval.");
@@ -10566,7 +10639,8 @@ async function executeImportRecordNumberUpdate(
     if (stmt.validationErrorTable && !tempTables) throw new Error("ArgumentError: VALIDATE ONLY INTO requires a batch.");
     if (stmt.validationErrorTable && tempTables) appendValidationErrors(
       tempTables, stmt.validationErrorTable, columns, validation.errors,
-      (options as BatchExecuteOptions).tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS, new Map()
+      (options as BatchExecuteOptions).tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS, new Map(),
+      (options as BatchExecuteOptions).tempTablesMaxTotalRows
     );
     return validationResult;
   }
@@ -10578,7 +10652,8 @@ async function executeImportRecordNumberUpdate(
     if (!tempTables || !stmt.errorTable) throw new Error("ArgumentError: ON ERROR SKIP requires a batch.");
     appendValidationErrors(
       tempTables, stmt.errorTable, columns, validation.errors,
-      (options as BatchExecuteOptions).tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS, new Map()
+      (options as BatchExecuteOptions).tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS, new Map(),
+      (options as BatchExecuteOptions).tempTablesMaxTotalRows
     );
     if (stmt.rejectLimit != null && validation.invalidRows > stmt.rejectLimit) {
       throw new RejectLimitExceededError(
