@@ -46,6 +46,8 @@ npm install -g @rex0220/kintone-sql-tools
 ksql --help
 ```
 
+CLI と MCP は利用者の PC の Node.js で動きます（配布物に Node.js は入っていません）。サポートが続いている系列（22 以降）の最新の修正版を勧めます（20 系はサポートが終わり、セキュリティの修正が出ません）。Claude Desktop の `.mcpb` は Desktop に同梱の Node.js で動くので、Desktop を最新にしてください（[インストール手順](docs/ksql_mcpb_claude_desktop_install.md)）。kintone との通信には Node.js の `fetch` を使います。
+
 ## ローカル開発
 
 ```bash

@@ -19,6 +19,7 @@ MCPB 版では Claude Desktop が提供する Node.js 実行環境を使うた�
 
 Node.js や npm は通常不要。
 MCPB 版は Claude Desktop 側の Node.js 実行環境で起動する。
+Node.js の脆弱性の修正は Claude Desktop の更新で入るので、Claude Desktop は最新にしておく。
 
 ## 2. ksql-mcp.mcpb をダウンロード
 
