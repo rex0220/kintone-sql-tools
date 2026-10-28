@@ -7,7 +7,14 @@ export { parseSqlStatement, parseSqlStatements, parseSqlStatementsForScript } fr
 export type { ScriptSqlParseResult } from "./sql";
 export { validateKlikeStatement, KlikeValidationError } from "./klikeValidation";
 export { analyzeBatch, BatchAnalysisError, MAX_TEMP_TABLES, MAX_BATCH_VARIABLES } from "./batch";
-export { normalizeBatchVariableName, normalizeBatchVariables, validateDeclaredBatchVariables } from "./batchVariables";
+export {
+  DEFAULT_VARIABLE_ARRAY_MAX_ELEMENTS,
+  normalizeBatchVariableName,
+  normalizeBatchVariables,
+  validateDeclaredBatchVariables,
+  type BatchVariableInput,
+  type BatchVariableLimits,
+} from "./batchVariables";
 export {
   getInsertValuesCount,
   getStatementType,

@@ -192,7 +192,10 @@ export interface ExplainScriptOptions extends ParseScriptOptions {
   client: FlowKintoneClient;
   /** /flow 本実行を想定する native UPSERT 設定。省略時は有効、false は opt-out。 */
   enableNativeUpsert?: boolean;
-  variables?: Readonly<Record<string, string>>;
+  /** `DECLARE` へ注入する値。文字列配列は配列として宣言した変数だけ（B203）。 */
+  variables?: Readonly<Record<string, string | readonly string[]>>;
+  /** 配列変数の要素数の上限（既定 500。B203） */
+  variableArrayMaxElements?: number;
   /** dialect 1 の @ 付き時刻関数が共有する explain 呼出し単位の基準時刻。 */
   asOf?: Date;
   /** @TODAY() などの暦日境界に使う IANA timezone。省略時はホスト timezone。 */
@@ -217,7 +220,21 @@ export interface CreateExecutionContextOptions extends ParseScriptOptions {
   script?: string;
   statements?: readonly Statement[];
   meta?: ScriptHeaderMeta;
-  variables?: Readonly<Record<string, string>>;
+  /**
+   * `DECLARE` した変数へ注入する値（キーは `@` なし・大文字小文字を区別しない）。
+   * **宣言が種類を決めます**（B203）。`DECLARE @x = '…'` にはスカラーの文字列、
+   * `DECLARE @ids = [];` には文字列配列を渡してください。食い違いと、文字列以外の要素は
+   * `createExecutionContext` が `ArgumentError`（records API 0 回・書込 0 回）。
+   * 配列は `IN @ids` / `NOT IN @ids` でだけ使えます（スカラーの位置はエラー）。
+   */
+  variables?: Readonly<Record<string, string | readonly string[]>>;
+  /**
+   * 配列変数の要素数の上限（正の安全な整数。省略時は 500。B203）。
+   * 注入と `DECLARE` の既定値の両方に効き、超える配列は実行開始前に `ArgumentError`。
+   * 要素は kintone へ送るクエリ（URL）の `IN` の並びになるため、長い値を多数渡すと URL が伸びます
+   * （3 桁の ID なら 200 件でエンコード後 2.5 KB・500 件で 6.4 KB。日本語は 1 文字 9 字）。
+   */
+  variableArrayMaxElements?: number;
   maxRecords?: number;
   recursiveCteMaxDepth?: number;
   recursiveCteMaxRows?: number;

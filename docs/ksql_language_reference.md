@@ -4238,8 +4238,28 @@ SELECT * FROM APP100 WHERE 登録日 >= @since;
 - 未注入時は既定値を実行時に1回評価。CLI の `--var since=2026-07-01`、MCP `variables: { "since": "2026-07-01" }` で文字列値を上書きできる。注入時は既定値式を評価しない。
 - プラグインでも `DECLARE` 文は実行できるが注入 UI はなく、常に既定値を使う。
 - キーは `@` なし・大文字小文字を区別しない。未宣言キー、重複、不正名は API 呼び出しや DML より前にエラー。`SET` で定義した名前は注入対象にならない。
-- 既定値はリテラル・`NOW()` / `TODAY()`・文字列/数値関数・数値算術。サブクエリ、別変数、`NULL`、`LOGINUSER()`、`PRIMARY_ORGANIZATION()` は不可。採用値は文字列として束縛する。
+- 既定値はリテラル・`NOW()` / `TODAY()`・文字列/数値関数・数値算術・**配列リテラル（v3.89.0〜。下の「配列の変数」）**。サブクエリ、別変数、`NULL`、`LOGINUSER()`、`PRIMARY_ORGANIZATION()` は不可。採用値は配列の宣言を除いて文字列として束縛する。
 - `DECLARE` と使用文を含む2文以上のバッチが必要。値は EXPLAIN、結果メタデータに表示しない。CLI `--var` はプロセス一覧やシェル履歴に残り得るため秘密情報には使わない。
+
+既定値に**配列リテラル**を書くと、その変数は**配列の変数**になります（v3.89.0〜）。`IN @list` / `NOT IN @list` でだけ使えます。
+
+```sql
+DECLARE @ids = [];                 -- 空配列が既定。['A','B'] のように初期値も書ける
+SELECT * FROM APP100 WHERE $id IN @ids;
+-- /flow: variables: { ids: ["311", "301"] }  →  $id in ("311","301") へ押し下げ
+```
+
+- **宣言が種類を決めます。** 配列を宣言した変数には配列、スカラーを宣言した変数には文字列を注入してください。
+  食い違い（配列の宣言に文字列・スカラーの宣言に配列・`RELATIVE_DATE` の宣言に配列）と、文字列以外の要素は
+  **実行開始前**に `ArgumentError` です（レコード API 0 回・書込 0 回）。
+- 配列変数を**スカラーの位置**（`= @list` など）に書くと、`ParseError: array variable @x can only be used as IN @x.` で実行開始前に止まります。
+  逆にスカラーを `IN @list` に書いたときの既存のエラーも変わりません。
+- **要素数の上限**は `/flow` の `variableArrayMaxElements`（正の安全な整数・既定 500）。注入と既定値の両方に効き、超えると実行開始前に `ArgumentError`。
+  要素は kintone へ送るクエリの `IN` の並びになるため、**実際の壁は URL の長さ**です（3 桁の ID なら 200 件でエンコード後 2.5 KB・500 件で 6.4 KB・日本語は 1 文字 9 字）。
+- 空配列の動きは `SET` の配列と同じです（`IN` は 0 件でレコード API を呼ばない・`NOT IN` は真。DML の対象 `WHERE` が恒真になる形は実行前エラー）。
+- 要素は**文字列**だけです（`DECLARE @ids = [1];` は構文エラー）。`$id` や数値フィールドとの比較は `SET` の配列と同じ規則で、`in ("311")` の形で押し下げます。
+- 注入は **`/flow` の `variables`** だけが配列を受けます（CLI の `--var` と MCP の `variables` は従来どおり文字列）。
+- 保存時の検査などで「この `DECLARE` は配列か」を見分けるときは、AST の `default.type === "ARRAY"` を見てください。
 
 `RELATIVE_DATE` 注釈を付けると、文字列ではなく kintone の相対日付関数トークンを安全に束縛できます。
 
@@ -4284,7 +4304,7 @@ SELECT @batch AS バッチID, 顧客No FROM APP100 WHERE 顧客ランク IN @ran
 - `IN @list` は非空配列を通常の literal IN へ展開する。`IN (@x)` は従来どおりスカラー 1 要素で、配列展開ではない。
 - 空配列は `IN @empty`=偽、`NOT IN @empty`=真として AND/OR/NOT/括弧を簡約する。SELECT の恒偽 WHERE はレコード API を呼ばず空入力を後段へ渡す。UPDATE/DELETE/非 ALL REORDER の最終 WHERE が恒真になる場合は全件更新防止のため実行前エラー、恒偽は 0 件 no-op。
 
-**現時点で非対応（今後のフェーズ）**: `NULL` の代入・数値/混在配列・配列のサブクエリ代入・`IN (@list)` での配列展開・`SET` 右辺での別変数参照・スカラーサブクエリ結果への算術・関数引数への `NOW()` 直接指定・`LOGINUSER()`・`PRIMARY_ORGANIZATION()`。
+**現時点で非対応（今後のフェーズ）**: `NULL` の代入・数値/混在配列・配列のサブクエリ代入・`IN (@list)` での配列展開・`SET` 右辺での別変数参照・スカラーサブクエリ結果への算術・関数引数への `NOW()` 直接指定・`LOGINUSER()`・`PRIMARY_ORGANIZATION()`・CLI / MCP での配列の注入（`/flow` だけが受けます）。
 
 > **`APP@profile` との併用**: `SET @now = NOW(); SELECT * FROM APP100@dev WHERE 作成日時 = @now` のように、`@profile`（アプリ指定）と `@変数` は同居できます（CLI / MCP が profile だけを先に正規化するため混同しません）。
 
