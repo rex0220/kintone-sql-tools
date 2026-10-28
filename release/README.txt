@@ -1,23 +1,29 @@
-ksql 配布パッケージ (v3.87.0)
+ksql 配布パッケージ (v3.88.0)
 
 release 成果物:
-- ksql-plugin-v3.87.0.zip
-- ksql-mcp.mcpb (manifest version 3.87.0)
-- ksql-mcp.js (MCP server version 3.87.0)
+- ksql-plugin-v3.88.0.zip
+- ksql-mcp.mcpb (manifest version 3.88.0)
+- ksql-mcp.js (MCP server version 3.88.0)
 
-機能 (B196: /flow の一時テーブルの合計の上限 tempTablesMaxTotalRows・純加法。プラグイン・CLI・MCP の動きは不変):
-- createExecutionContext に tempTablesMaxTotalRows を渡すと、残っている一時テーブル (エラー表を含む) の行数の合計が
-  上限を超える文を TempTableTotalLimitError で止めます (表は登録しない・書き込み 0 回)。出来た行数で登録の前に確かめ、
-  CREATE TEMP TABLE の読み取りも残りで止めます。StatementResult.metrics.tempTableRows に文が終わった時点の合計。
+機能 (B198 / B200: /flow の APPLY の書込とサブテーブルの全置換・純加法。プラグイン・CLI・MCP の動きは不変):
+- createExecutionContext に allowApplyMutation を渡すと、サブテーブルの行を書き換える APPLY が /flow で書けます。
+  confirm と同時でなければ受けません (APPLY は不可逆のため)。確認フックには applyDetail (親件数・テーブルごとの
+  patch/append/remove の行数) が文に 1 回渡ります。多値 APPLY (チェックボックス等の ADD / REMOVE '値') は開きません。
+- UPDATE ... APPLY <テーブル> (REMOVE ALL ROWS; APPEND (子...) SELECT ...) で、別アプリの集計結果でテーブルを全置換
+  できます。親は 1 件に決まる WHERE に限り、2 件以上は書き込む前に ApplyAppendSelectMultipleParentsError で止まります。
+- APPLY の APPEND ... VALUES に as-of 関数 (@NOW() など) を書けるようになりました (素の INSERT ... VALUES と揃え)。
 
-v3.86.0 / v3.85.0 の節は畳みました (B195 /flow の書込前の確認フック confirm = 純加法 /
-  B193 HAVING のウィンドウ別名参照を実行前に拒否 = 結果が変わる)。
+改善 (B201: ORDER BY / KORDER BY のキーに集計式を書いた形を構文エラーに・実行できなかった形のみ):
+- ORDER BY SUM(金額) DESC のような形は、これまで parse を通って実行時に必ず失敗していました。書いた時点で止め、
+  別名の付け方 (SUM(金額) AS 金額合計 ... ORDER BY 金額合計 DESC) をエラー文で示します。
+  ウィンドウの OVER (ORDER BY SUM(x)) は対象外で、今までどおり書けます。
 
-v3.84.0 / v3.83.0 / v3.82.0 の節は畳みました (B191 式の中のウィンドウの PARTITION BY GROUPING() の内部エラー修正 /
-  B190 CTE／一時テーブルを元にした SELECT の CASE 条件のウィンドウ修正 / B188 残務 プラグインの実行画面に先行文の警告を表示)。
+v3.87.0 / v3.86.0 / v3.85.0 の節は畳みました (B196 /flow の一時テーブルの合計の上限 tempTablesMaxTotalRows /
+  B195 /flow の書込前の確認フック confirm = 純加法 / B193 HAVING のウィンドウ別名参照を実行前に拒否 = 結果が変わる)。
 
-v3.81.0 / v3.80.0 の節は畳みました (B184 ウィンドウ関数を集計と同じ SELECT に・ウィンドウ結果を式の中で = 純加法 /
-  B187 HAVING に直接書いた集計を SELECT 列に無くても評価 = 結果が変わる修正)。
+v3.84.0 〜 v3.80.0 の節は畳みました (B191 式の中のウィンドウの PARTITION BY GROUPING() の内部エラー修正 /
+  B190 CTE／一時テーブルを元にした SELECT の CASE 条件のウィンドウ修正 / B188 残務 先行文の警告を表示 /
+  B184 ウィンドウ関数を集計と同じ SELECT に = 純加法 / B187 HAVING の集計評価 = 結果が変わる修正)。
 
 v3.79.0 の節は畳みました (診断と警告の穴 4 件 = B185 EXPLAIN の SELECT 列検査 / B186 混在 JOIN の
   EXPLAIN 偽陽性 / B188 一時テーブル経由の警告伝播 / B189 CLI 単文 SELECT の警告表示。実行結果は不変)。
@@ -28,11 +34,8 @@ v3.76.0 / v3.75.0 の節は畳みました (B178 /flow IMPORT source の materia
   B177 /flow named IMPORT source 公開 API = enableImport 既定 OFF・安定 error code)。
 v3.74.0 の節は畳みました (B176 EXPLAIN の native UPSERT 適格性が常に UNKNOWN だった修正 =
   対象アプリのフォーム定義を 1 回取得して判定。native UPSERT 本体は不変)。
-v3.73.0 の節は畳みました (B173 native UPSERT = /flow は既定 ON・CLI は --native-upsert /
+v3.73.0 の節は畳みました (B173 native UPSERT = /flow は既定 ON・CLI は --allow-dml --native-upsert /
   B175 KLIKE 索引ラグの文書化)。
-  MCP、プラグイン、engine-library。いずれも従来の経路と結果のままです。
-- CLI は --allow-dml --native-upsert を明示した実行だけが同じ経路を使います。
-- EXPLAIN が native の適格性を表示します (MCP / プラグイン / CLI)。
 
 v3.72.0 の節は畳みました (B171 ASSERT 大小比較の辞書順修正 = fail-open 解消 /
   B171 F-2 dialect 1 の INSERT VALUES で as-of 関数)。
@@ -43,17 +46,9 @@ v3.68.0 の節は畳みました (B168 Stage 1-3 = dialect 1 の解析基盤・�
 v3.67.0 の節は畳みました (B169 CURRENT_DATE/CURRENT_TIMESTAMP を文単位の固定時刻へ =
 結果が変わる形あり)。内容は CHANGELOG.md にあります。
 
-v3.66.1 の節は畳みました (B167 バッチ EXPLAIN の一時テーブル JOIN 失敗の修正 =
-EXPLAIN 面のみ・実行は不変)。内容は CHANGELOG.md にあります。
-
-v3.66.0 の各節は畳みました (B53 WITH RECURSIVE / CYCLE = 再帰 CTE・新機能 /
-B166 JOIN ON 逆順の修正 / B160 警告文言の一般化・B165 再帰診断とレシピ)。
-内容は CHANGELOG.md にあります。
-
-v3.65.0 の各節は畳みました (B164 @変数を含む集計の比較位置の誤り = 結果が変わる修正)。
-内容は CHANGELOG.md にあります。
-
-v3.64.0 の各節は畳みました (B162/B163 EXPLAIN だけが通らない 2 形の解消)。
+v3.66.1 〜 v3.64.0 の各節は畳みました (B167 バッチ EXPLAIN の一時テーブル JOIN 失敗の修正 = EXPLAIN 面のみ /
+B53 WITH RECURSIVE / CYCLE = 再帰 CTE・新機能 / B166 JOIN ON 逆順の修正 / B160・B165 再帰診断とレシピ /
+B164 @変数を含む集計の比較位置の誤り = 結果が変わる修正 / B162・B163 EXPLAIN だけが通らない 2 形の解消)。
 内容は CHANGELOG.md にあります。
 
 v3.63.0 の各節は畳みました (B158 CROSS JOIN = 直積・2 軸格子・CROSS が予約語に /
@@ -111,16 +106,17 @@ B124 集計算術式 / B125 集計のウィンドウ関数 / B123 GROUP BY だ�
 - CHANGELOG.md と GitHub Releases に版ごとの内容と移行案内があります。
   https://github.com/rex0220/kintone-sql-tools/releases
 
-1. ksql-plugin-v3.87.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.88.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.87.0): B196 /flow の一時テーブルの合計の上限 tempTablesMaxTotalRows (純加法)。
+本リリース (v3.88.0): B198 /flow の APPLY の書込 (allowApplyMutation・confirm 必須) / B200 APPEND ... SELECT と
+APPEND ... VALUES の as-of 関数 (いずれも純加法) / B201 ORDER BY に集計式を書いた形を構文エラーに (実行できなかった形のみ)。
 
-前リリース (v3.86.0〜v3.81.0): B195 /flow の書込前の確認フック confirm (純加法) / B193 HAVING のウィンドウ別名参照を
-実行前に拒否 (結果が変わります) / B191 式の中のウィンドウの PARTITION BY GROUPING() 修正 / B190 CTE／一時テーブルを
-元にした SELECT の CASE 条件のウィンドウ修正 / B188 残務 = 先行文の警告を表示 (UI のみ) /
+前リリース (v3.87.0〜v3.81.0): B196 /flow の一時テーブルの合計の上限 tempTablesMaxTotalRows (純加法) /
+B195 /flow の書込前の確認フック confirm (純加法) / B193 HAVING のウィンドウ別名参照を実行前に拒否 (結果が変わります) /
+B191 式の中のウィンドウの PARTITION BY GROUPING() 修正 / B190 CASE 条件のウィンドウ修正 / B188 残務 = 先行文の警告を表示 /
 B184 ウィンドウ関数を集計と同じ SELECT に・ウィンドウ結果を式の中で (純加法)。
 
 前リリース (v3.80.0 / v3.79.0): B187 HAVING に直接書いた集計を SELECT 列に無くても評価 (結果が変わります) /
