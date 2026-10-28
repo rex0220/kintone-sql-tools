@@ -570,6 +570,14 @@ export class Parser {
         default: this.parseRelativeDateVariableToken(),
       };
     }
+    // B203: 配列リテラルの既定値は「配列の変数」の宣言。SET と同じ parseArrayLiteral を使う。
+    if (this.peek().kind === TokenKind.LBRACKET) {
+      return {
+        type: "DECLARE_VARIABLE",
+        name: variable.value.slice(1).toLowerCase(),
+        default: this.parseArrayLiteral(),
+      };
+    }
     const expr = this.parseScalarExpr("DECLARE", false);
     if (expr.type === "SCALAR_SUBQUERY") {
       // allowScalarSubquery=false で到達しないが、型の絞り込みを明示する。

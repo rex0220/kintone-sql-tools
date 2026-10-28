@@ -1,6 +1,6 @@
 # B203 外部注入（`DECLARE` + `variables`）で文字列配列を受ける
 
-- 状態: 📋 **仕様確定・実装待ち（2026-10-28 起票。v3.89.0 見込み）**。言語（`IN @list` / `NOT IN @list`）と押し下げ、空配列の畳み込みは**既にある**。足りないのは宣言と注入の型だけ
+- 状態: 🚧 **実装済み・リリース待ち（2026-10-28。v3.89.0 予定）**。テスト 31 件（`src/flow-library/__tests__/b203ArrayVariableInjection.test.ts` 24 件・`src/parser/__tests__/b203DeclareArray.test.ts` 7 件）。言語（`IN @list` / `NOT IN @list`）と押し下げ、空配列の畳み込みは**既にある**。足りないのは宣言と注入の型だけ
 - 種別: 機能（公開 API の純加法追加）
 - 優先: 中（急ぎではない。依頼元の Ver.1 は「条件で絞る」形で出せる）
 - 版: minor（v3.89.0 想定）。`variables` に文字列を渡す既存の呼び出しは型も動きも不変
@@ -75,7 +75,25 @@ kintone は **`in (…)` の要素数もクエリ長も文書で定めていな�
 7. `APPEND … SELECT` のソースの `WHERE` で使える。
 8. 既存の文字列注入は不変。
 
-## 6. 再現
+## 6. 実装（2026-10-28）
+
+| 触った場所 | 内容 |
+|---|---|
+| `src/types/ast.ts` | `DeclareVariableStatement.default` に `ArrayLiteral` を足した（1 行） |
+| `src/parser/parser.ts` | `parseDeclareVariable` に `LBRACKET` の分岐（`SET` と同じ `parseArrayLiteral`） |
+| `src/core/batch.ts` | 変数の種類の判定に「DECLARE の既定値が配列」を足した（**既存の静的チェック 2 本がそのまま効く**＝配列をスカラー位置で使えば `analyzeBatch` が止める・スカラーを `IN @x` に書いた既存のエラーは不変） |
+| `src/core/batchVariables.ts` | `BatchVariableInput = string \| readonly string[]`・要素の型の検査・**宣言と注入の種類の突き合わせ**・要素数の上限（`DEFAULT_VARIABLE_ARRAY_MAX_ELEMENTS = 500`。注入と `DECLARE` の既定値の両方） |
+| `src/execute.ts` | `BatchExecuteOptions.variables` の型と `variableArrayMaxElements`・DECLARE 実行の配列分岐（注入と既定値）・`prepareRelativeDateVariables` の型・EXPLAIN の配列プレースホルダー・3 か所の `validateDeclaredBatchVariables` へ上限を渡す |
+| `src/flow-library/` | `CreateExecutionContextOptions` と `ExplainScriptOptions` の `variables` を union へ・`variableArrayMaxElements`・`explainScript` の配線 |
+| 文書 | 言語リファレンス §25 に「配列の変数」、README の `/flow` に「外部パラメータ注入」 |
+
+**実装して分かったこと**: 受入基準 3（配列をスカラー位置に書いたら実行前にエラー）は**新しいコードを書かずに満たせた**。
+`analyzeBatch` が変数の使い方を `scalar` / `select-column` / `array-in-list` で持ち、
+「配列の定義 × 非 array-in-list の使用」を既に拒否していたため（`src/core/batch.ts:336-341`）、
+**DECLARE の種類判定に 1 行足すだけで静的チェックが有効になった**。
+CLI / MCP は注入の型を広げていないので、配列を渡す経路は `/flow` だけに閉じている。
+
+## 7. 再現
 
 work-link の `ksql-action-kj4-array-probe.mjs`（押し下げクエリの長さの表・空配列・`DECLARE` の parse エラー）と
 `ksql-action-kj4-append-select-probe.mjs`（受入基準 7 の形。要 v3.88.0）。どちらもモックの client で kintone に接続しない。

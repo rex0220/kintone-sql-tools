@@ -363,7 +363,10 @@ export function analyzeBatch(statements: Statement[]): BatchAnalysis {
       }
       variableDefs.set(stmt.name, {
         index,
-        kind: stmt.type === "SET_VARIABLE" && stmt.expr.type === "ARRAY" ? "array" : "scalar",
+        // B203: DECLARE の既定値が配列リテラルなら、その変数は配列（IN @x だけで使える）。
+        kind: (stmt.type === "SET_VARIABLE" && stmt.expr.type === "ARRAY")
+          || (stmt.type === "DECLARE_VARIABLE" && stmt.default.type === "ARRAY")
+          ? "array" : "scalar",
         relativeDate: stmt.type === "DECLARE_VARIABLE" && stmt.annotation === "RELATIVE_DATE",
         referencedBy: [],
       });

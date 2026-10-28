@@ -66,7 +66,11 @@ import {
 } from "./core/fieldSemantics";
 import type { ProcessStatusState } from "./core/processStatus";
 import type { NumberPrecision } from "./core/numberPrecision";
-import { validateDeclaredBatchVariables } from "./core/batchVariables";
+import {
+  DEFAULT_VARIABLE_ARRAY_MAX_ELEMENTS,
+  validateDeclaredBatchVariables,
+  type BatchVariableInput,
+} from "./core/batchVariables";
 import { isOuterJoinNonPreservedTable, statementContainsOuterJoin } from "./core/outerJoinSearchAbortGuard";
 import { compareCanonicalValues, compareScalarValues } from "./core/scalarCompare";
 import { stringFunctionSemanticKind } from "./core/expressionSemantics";
@@ -1596,8 +1600,16 @@ async function executeExistingRecordValidationCore(
 export const TEMP_TABLE_MAX_ROWS = 10_000;
 
 export interface BatchExecuteOptions extends ExecuteOptions {
-  /** DECLARE されたバッチ変数の外部注入値（キーは @ なし、大文字小文字を区別しない） */
-  variables?: Readonly<Record<string, string>>;
+  /**
+   * DECLARE されたバッチ変数の外部注入値（キーは @ なし、大文字小文字を区別しない）。
+   * B203: 文字列配列は `DECLARE @x = [];` と宣言した変数にだけ注入でき、`IN @x` / `NOT IN @x` で使う。
+   */
+  variables?: Readonly<Record<string, BatchVariableInput>>;
+  /**
+   * B203: 注入・既定値の配列の要素数の上限（正の安全な整数。既定 500）。
+   * 超える配列は実行開始前に ArgumentError（records API 0 回・書込 0 回）。
+   */
+  variableArrayMaxElements?: number;
   /** 実行時エラー後も後続文を実行する（read-only バッチのみ指定可。既定 false = fail-fast） */
   continueOnError?: boolean;
   /** バッチ合計のタイムアウト（ミリ秒）。到達時: 実行中の文 = error(TimeoutError)、未実行の文 = skipped("timeout") */
@@ -1782,7 +1794,8 @@ export async function executeBatch(
     throw new Error("UnsupportedError: APPLY mutation requires allowApplyMutation=true");
   }
   // API 呼び出しや文実行より前に、注入キーの正規化と DECLARE 照合を完了する。
-  const injectedVariables = validateDeclaredBatchVariables(statements, options.variables);
+  const injectedVariables = validateDeclaredBatchVariables(statements, options.variables,
+    { arrayMaxElements: options.variableArrayMaxElements });
   const relativeDateVariables = prepareRelativeDateVariables(statements, injectedVariables);
   const batchOptions: BatchExecuteOptions = { ...options, variables: injectedVariables };
 
@@ -2052,7 +2065,8 @@ export function createManagedStatementExecutionContext(
       item.index
     );
   }
-  const injectedVariables = validateDeclaredBatchVariables(mutableStatements, options.variables);
+  const injectedVariables = validateDeclaredBatchVariables(mutableStatements, options.variables,
+    { arrayMaxElements: options.variableArrayMaxElements });
   const relativeDateVariables = prepareRelativeDateVariables(mutableStatements, injectedVariables);
   const normalizedOptions = withNativeUpsertExecutionOption(
     { ...options, variables: injectedVariables, captureColumnMeta: true },
@@ -2629,7 +2643,16 @@ export async function executeBatchStatement(
     }
     const injected = options.variables ?? {};
     if (Object.prototype.hasOwnProperty.call(injected, stmt.name)) {
-      variables.set(stmt.name, { type: "string", value: injected[stmt.name] });
+      const value = injected[stmt.name];
+      // B203: 宣言と注入の種類の一致は validateDeclaredBatchVariables が実行開始前に確かめている。
+      variables.set(stmt.name, Array.isArray(value)
+        ? { type: "array", elements: value.map((element) => ({ type: "string" as const, value: element })) }
+        : { type: "string", value: value as string });
+    } else if (stmt.default.type === "ARRAY") {
+      variables.set(stmt.name, {
+        type: "array",
+        elements: stmt.default.elements.map((element) => ({ type: "string", value: element.value })),
+      });
     } else {
       const value = evaluateScalarExpr(
         stmt.default as Exclude<ScalarExpr, ScalarSubquery>,
@@ -3239,15 +3262,24 @@ function parseRelativeDateVariableValue(name: string, value: string): KintoneFun
 
 function prepareRelativeDateVariables(
   statements: readonly Statement[],
-  injectedVariables: Readonly<Record<string, string>>
+  injectedVariables: Readonly<Record<string, BatchVariableInput>>
 ): ReadonlyMap<string, KintoneFunction> {
   const prepared = new Map<string, KintoneFunction>();
   for (const stmt of statements) {
     if (stmt.type !== "DECLARE_VARIABLE" || stmt.annotation !== "RELATIVE_DATE") continue;
+    const injected = Object.prototype.hasOwnProperty.call(injectedVariables, stmt.name)
+      ? injectedVariables[stmt.name]
+      : undefined;
+    if (injected !== undefined && typeof injected !== "string") {
+      // B203: 相対日付の宣言に配列は注入できない（宣言が種類を決める）。
+      throw new Error(
+        `ArgumentError: variable @${stmt.name} is declared as RELATIVE_DATE; inject a relative date token string.`
+      );
+    }
     prepared.set(
       stmt.name,
-      Object.prototype.hasOwnProperty.call(injectedVariables, stmt.name)
-        ? parseRelativeDateVariableValue(stmt.name, injectedVariables[stmt.name])
+      injected !== undefined
+        ? parseRelativeDateVariableValue(stmt.name, injected)
         : stmt.default as KintoneFunction
     );
   }
@@ -13837,7 +13869,7 @@ type BatchExplainResult = {
 export async function buildBatchExplainPlans(
   sql: string,
   client: KintoneClient,
-  injectedVariables?: Readonly<Record<string, string>>,
+  injectedVariables?: Readonly<Record<string, BatchVariableInput>>,
   cacheContext = "batch-explain",
   maxRecords = 10_000,
   cursorMaxActive = 2,
@@ -13850,7 +13882,9 @@ export async function buildBatchExplainPlans(
   recursiveCteMaxExpansions?: number,
   asOf?: Date,
   timezone?: string,
-  nativeUpsertOptions: NativeUpsertExplainOptions = { surface: "DOCUMENT_ONLY" }
+  nativeUpsertOptions: NativeUpsertExplainOptions = { surface: "DOCUMENT_ONLY" },
+  /** B203: 配列変数の要素数の上限（省略時は既定 500） */
+  variableArrayMaxElements?: number
 ): Promise<BatchExplainResult> {
   // executeBatch と同じく、parse / metadata API より前に呼出単位で一度だけ固定する。
   const asOfClock = createAsOfClock(asOf ?? new Date(), timezone);
@@ -13861,7 +13895,9 @@ export async function buildBatchExplainPlans(
   try {
     const { statements, meta } = parseSqlStatementsForScript(sql, { import: enableImport });
     const analysis = analyzeBatch(statements); // 未定義参照等はここで拒否
-    const normalizedInjectedVariables = validateDeclaredBatchVariables(statements, injectedVariables);
+    const normalizedInjectedVariables = validateDeclaredBatchVariables(
+      statements, injectedVariables, { arrayMaxElements: variableArrayMaxElements }
+    );
     const relativeDateVariables = prepareRelativeDateVariables(statements, normalizedInjectedVariables);
     const variables = new Map<string, VarValue>();
     for (const [name, value] of Object.entries(asOfClock.values)) {
@@ -13984,10 +14020,19 @@ export async function buildBatchExplainPlans(
       if (planStmt.type === "DROP_TEMP_TABLE") tempSchemaLedger.delete(planStmt.name);
       if (stmt.type === "SET_VARIABLE" || stmt.type === "DECLARE_VARIABLE") {
         // EXPLAIN は関数を評価しない。後続プランでは名前を値プレースホルダーとして使う。
+        const injectedForPlan = stmt.type === "DECLARE_VARIABLE"
+          && Object.prototype.hasOwnProperty.call(normalizedInjectedVariables, stmt.name)
+          ? normalizedInjectedVariables[stmt.name]
+          : undefined;
         variables.set(stmt.name, stmt.type === "DECLARE_VARIABLE" && stmt.annotation === "RELATIVE_DATE"
           ? { type: "relative-date", value: relativeDateVariables.get(stmt.name)! }
           : stmt.type === "SET_VARIABLE" && stmt.expr.type === "ARRAY"
           ? { type: "array", elements: stmt.expr.elements.map((element) => ({ type: "string", value: element.value })) }
+          // B203: 配列の宣言は配列のまま計画する（IN @x が EXPLAIN でも通るように）。
+          : Array.isArray(injectedForPlan)
+          ? { type: "array", elements: injectedForPlan.map((element) => ({ type: "string", value: element })) }
+          : stmt.type === "DECLARE_VARIABLE" && stmt.default.type === "ARRAY"
+          ? { type: "array", elements: stmt.default.elements.map((element) => ({ type: "string", value: element.value })) }
            : { type: "string", value: `@${stmt.name}`, placeholder: true });
         if (stmt.type === "DECLARE_VARIABLE" && stmt.annotation === undefined
           && (stmt.default.type === "STRING" || stmt.default.type === "NUMBER")) {

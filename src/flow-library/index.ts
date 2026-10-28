@@ -117,7 +117,8 @@ export async function explainScript(
         enableNativeUpsert: opts.enableNativeUpsert !== false,
         clientHasNativeUpsert: "upsertRecords" in explainClient
           && typeof explainClient.upsertRecords === "function",
-      }
+      },
+      opts.variableArrayMaxElements
     );
   } catch (error) {
     throw normalizeFlowError(error);

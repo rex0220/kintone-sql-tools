@@ -124,8 +124,12 @@ export interface DeclareVariableStatement {
   name: string;
   /** 明示された相対日付トークン型。注釈なし DECLARE では存在しない。 */
   annotation?: "RELATIVE_DATE";
-  /** 外部注入が無い場合だけ評価する既定値式 */
-  default: Exclude<ScalarExpr, ScalarSubquery> | RelativeDateFunction;
+  /**
+   * 外部注入が無い場合だけ評価する既定値式。
+   * B203: 配列リテラル（`DECLARE @ids = [];`）は「この変数は配列」の宣言でもある
+   * （`IN @ids` / `NOT IN @ids` だけで使える。注入も配列でなければならない）。
+   */
+  default: Exclude<ScalarExpr, ScalarSubquery> | RelativeDateFunction | ArrayLiteral;
 }
 
 /** SET RHS 専用。ScalarArithExpr はパーサーがフィールド参照を拒否する。 */

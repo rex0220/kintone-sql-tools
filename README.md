@@ -370,6 +370,34 @@ const ctx = createExecutionContext({
   文は答えを待たずに `error.code = "TimeoutError"` / `"ExecutionContextDisposedError"` で返ります。後から `true` が返っても書きません。
 - **対象外**: IMPORT を含むスクリプトとは併用できません（`createExecutionContext` が `ArgumentError`）。
 
+### 外部パラメータ注入（`variables`・文字列と文字列配列）
+
+`DECLARE` した変数へ `variables` で値を渡せます。**宣言が種類を決めます**（B203）。
+
+```ts
+const ctx = createExecutionContext({
+  client, statements, meta, apps: { 受注: 100 },
+  variables: { cust: "C001", ids: ["311", "301"] },   // string | readonly string[]
+  variableArrayMaxElements: 200,                      // 省略時は 500
+});
+```
+
+```sql
+-- @ksql dialect: 1
+DECLARE @cust = '';               -- スカラー → 文字列を注入
+DECLARE @ids = [];                -- 配列（IN / NOT IN だけで使える）→ 文字列配列を注入
+SELECT $id, 金額 FROM LAPP_受注 WHERE 顧客コード = @cust AND $id IN @ids;
+```
+
+- 食い違い（配列の宣言に文字列・スカラーの宣言に配列・`RELATIVE_DATE` の宣言に配列）、文字列以外の要素、
+  未宣言のキー、要素数の超過は、**`createExecutionContext` が `ArgumentError`**（レコード API 0 回・書込 0 回）。
+- 配列変数を `= @ids` のようなスカラーの位置に書いた場合も `createExecutionContext` で止まります。
+- **空配列は 0 件**として扱い、`IN @ids` はレコード API を呼びません。`NOT IN @ids` が `UPDATE` / `DELETE` / `REORDER` の
+  対象 `WHERE` を恒真にする形は、全件更新を防ぐため実行前にエラーです。
+- `variableArrayMaxElements`（既定 500）は注入と `DECLARE` の既定値の両方に効きます。要素は kintone へ送るクエリ（URL）の
+  `IN` の並びになるため、**実際の壁は URL の長さ**です（3 桁の ID なら 200 件でエンコード後 2.5 KB・500 件で 6.4 KB・日本語は 1 文字 9 字）。
+- CLI の `--var` と MCP の `variables` は従来どおり**文字列だけ**です。
+
 ### APPLY の書込（`allowApplyMutation`・B198）
 
 サブテーブルの行を書き換える `APPLY`（`PATCH` / `APPEND` / `REMOVE`）は、**`allowApplyMutation: true` と `confirm` を同時に渡したときだけ**書けます。
