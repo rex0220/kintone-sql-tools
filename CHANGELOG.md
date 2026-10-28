@@ -3,6 +3,29 @@
 リリースごとの変更点。**本ファイルは v3.45.0 以降だけを保持する。**
 それ以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) の各タグを参照。
 
+## v3.89.0（2026-10-28）
+
+### 機能（B203: 外部注入（`DECLARE` + `variables`）で文字列配列を受ける）**※ 純加法（文字列を渡す既存の呼び出しは型も動きも不変。CLI・MCP・プラグインは不変）**
+
+- **`DECLARE @ids = [];`**（既定値に配列リテラル）と書くと、その変数は**配列の変数**になります。初期値つき（`['A','B']`）も書けます。
+  要素は文字列だけで、`DECLARE @ids = [1];` は構文エラーです。
+- `/flow` の **`variables`** が **`Readonly<Record<string, string | readonly string[]>>`** を受けるようになりました。
+  配列は `IN @ids` / `NOT IN @ids` でだけ使え、`in ("311","301")` の形で kintone へ押し下がります。
+- **宣言が種類を決めます**（fail-closed）。配列の宣言に文字列、スカラーの宣言に配列、`RELATIVE_DATE` の宣言に配列、
+  文字列以外の要素（数値・`null`・入れ子）、未宣言のキーは、いずれも **`createExecutionContext` が `ArgumentError`**
+  （レコード API 0 回・書込 0 回）。配列変数を `= @ids` のようなスカラーの位置に書いた場合も実行開始前に止まります
+  （`ParseError: array variable @ids can only be used as IN @ids.`）。スカラーを `IN @x` に書いたときの既存のエラーは文言も変えていません。
+- **`variableArrayMaxElements`**（正の安全な整数・既定 **500**）を `createExecutionContext` / `explainScript` に追加しました。
+  注入と `DECLARE` の既定値の両方に効き、超える配列は実行開始前に `ArgumentError` です。
+  要素は kintone へ送るクエリ（URL）の `IN` の並びになるため、**実際の壁は URL の長さ**です
+  （3 桁の ID なら 200 件でエンコード後 2.5 KB・500 件で 6.4 KB・日本語は 1 文字 9 字）。
+- 空配列の動きは `SET` の配列と同じです（`IN` は 0 件でレコード API を呼ばない・`NOT IN` は真。
+  `UPDATE` / `DELETE` / `REORDER` の対象 `WHERE` が恒真になる形は従来どおり実行前エラー）。
+- `EXPLAIN` は配列の宣言（と配列の注入）を配列のまま計画します。**CLI の `--var` と MCP の `variables` は従来どおり文字列だけ**です。
+- 保存時の検査などで「この `DECLARE` は配列か」を見分けるときは、AST の `default.type === "ARRAY"` を見てください。
+- 依頼元: kSQL アクション（依頼 KJ-4。v3.88.0 の `APPEND … SELECT` が全置換なので、一覧で選んだ複数レコードをループで入れられないのが動機）。
+  テスト 31 件（`src/flow-library/__tests__/b203ArrayVariableInjection.test.ts`・`src/parser/__tests__/b203DeclareArray.test.ts`）。
+
 ## v3.88.0（2026-10-28）
 
 ### 機能（B198: `/flow` の APPLY の書込の公開 `allowApplyMutation`）**※ 純加法（渡さなければ従来どおり `UnsupportedError`。CLI・MCP・プラグインは不変）**

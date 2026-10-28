@@ -1,6 +1,6 @@
 # B203 外部注入（`DECLARE` + `variables`）で文字列配列を受ける
 
-- 状態: 🚧 **実装済み・リリース待ち（2026-10-28。v3.89.0 予定）**。テスト 31 件（`src/flow-library/__tests__/b203ArrayVariableInjection.test.ts` 24 件・`src/parser/__tests__/b203DeclareArray.test.ts` 7 件）。言語（`IN @list` / `NOT IN @list`）と押し下げ、空配列の畳み込みは**既にある**。足りないのは宣言と注入の型だけ
+- 状態: ✅ **v3.89.0 でリリース（2026-10-28）**。テスト 31 件（`src/flow-library/__tests__/b203ArrayVariableInjection.test.ts` 24 件・`src/parser/__tests__/b203DeclareArray.test.ts` 7 件）。言語（`IN @list` / `NOT IN @list`）と押し下げ、空配列の畳み込みは**既にある**。足りないのは宣言と注入の型だけ
 - 種別: 機能（公開 API の純加法追加）
 - 優先: 中（急ぎではない。依頼元の Ver.1 は「条件で絞る」形で出せる）
 - 版: minor（v3.89.0 想定）。`variables` に文字列を渡す既存の呼び出しは型も動きも不変
