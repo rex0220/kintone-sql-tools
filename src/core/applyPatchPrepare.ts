@@ -5,6 +5,7 @@ import type { UpdateStatement } from "../types/ast";
 import {
   buildApplyPatchPlans,
   normalizeApplyPatchPlan,
+  type ApplyAppendSelectRows,
   type ApplyPatchMetadata,
   type ApplyPatchPlan,
 } from "./applyPatchPlanner";
@@ -54,6 +55,8 @@ export interface PrepareApplyPatchWriteInput {
   readonly parentRowNumbers?: readonly number[];
   /** Read-only metadata loader. No records writer can cross the prepare boundary. */
   readonly loadNumberPrecision?: () => Promise<NumberPrecision>;
+  /** B200-2: APPEND ... SELECT の解決済みの行（operation ごと）。SELECT の実行は prepare の外で終わらせる。 */
+  readonly appendSelectRows?: ApplyAppendSelectRows;
 }
 
 /** Plan, validate, normalize and guard every parent without performing any write. */
@@ -74,7 +77,9 @@ export async function prepareApplyPatchWrite(
 
   // Keep the converter's revision contract as an explicit preflight gate.
   for (const snapshot of snapshots) requireRevision(snapshot);
-  const rawPlans = buildApplyPatchPlans(statement, snapshots, fieldInfos, metadata);
+  const rawPlans = buildApplyPatchPlans(
+    statement, snapshots, fieldInfos, metadata, undefined, input.appendSelectRows
+  );
   const fieldIndex = buildPostImageFieldIndex(
     fieldInfos,
     statement.assignments.map((assignment) => assignment.field)

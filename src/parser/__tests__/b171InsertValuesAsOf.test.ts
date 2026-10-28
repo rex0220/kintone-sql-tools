@@ -1,6 +1,6 @@
 import { parseSqlStatementsForScript } from "../../core/sql";
 import { asOfVariableName } from "../../core/asOfClock";
-import type { InsertStatement } from "../../types/ast";
+import type { AppendOperation, InsertStatement, UpdateStatement } from "../../types/ast";
 
 const header = "-- @ksql dialect: 1\n";
 
@@ -39,8 +39,17 @@ test("B171: dialect 0 は as-of INSERT VALUES を従来メッセージで拒否�
 
 test.each([
   "UPSERT INTO APP1 (key,v) VALUES ('A',@TODAY()) KEY (key)",
-  "UPDATE APP1 SET key = 'A' WHERE $id = 1 APPLY table (APPEND (v) VALUES (@TODAY()))",
-])("B171: UPSERT VALUES / APPLY APPEND は拒否し文型限定ヒントを返す: %s", (sql) => {
+])("B171: UPSERT VALUES は拒否し文型限定ヒントを返す: %s", (sql) => {
   expect(() => parseSqlStatementsForScript(`${header}${sql}`))
     .toThrow("INSERT ... VALUES では使用できます。この文型では INSERT ... SELECT で注入してください");
+});
+
+test("B200-1: APPLY APPEND VALUES の as-of 関数は受理する（素の INSERT ... VALUES と揃える）", () => {
+  const statement = parseSqlStatementsForScript(
+    `${header}UPDATE APP1 SET key = 'A' WHERE $id = 1 APPLY table (APPEND (v) VALUES (@TODAY()))`
+  ).statements[0] as UpdateStatement;
+  const operation = statement.applyBlocks![0].operations[0];
+  expect(operation).toMatchObject({ kind: "APPEND" });
+  expect((operation as AppendOperation).values[0][0])
+    .toEqual({ type: "VARIABLE", name: asOfVariableName("TODAY") });
 });

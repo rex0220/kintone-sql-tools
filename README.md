@@ -279,7 +279,7 @@ npm パッケージは 2 つのサブパスを **semver 対象の公開 API** �
 | サブパス | 用途 | 主な export |
 |---|---|---|
 | `@rex0220/kintone-sql-tools/engine` | **read-only** のクエリ実行（ダッシュボード等）。書込 API は構造的に遮断 | `runQuery` / `runBatch` / `explainQuery` / `createReadonlyKintoneClient` / `KsqlEngineError` / `version` |
-| `@rex0220/kintone-sql-tools/flow` | **Flow dialect 1**（→ [言語リファレンス §27](docs/ksql_language_reference.md)）のスクリプト解析・検証・**文単位実行**（バッチランナー向け・書込可能） | `parseScript` / `validateScript` / `explainScript`（`asOf`/`timezone` 注入可） / `createExecutionContext`（`onChunkWritten` 書込チャンク通知・`onImportSourceMaterialized` IMPORT receipt・`confirm` 書込前の確認フック） / `executeStatement` / `previewStatement`（dry-run 差分プレビュー・書込 0 回） / `disposeExecutionContext` / `createImportSourceResolver` / `FlowImportProviderError` / `createKintoneClient` / `isDmlResult`（`FlowDmlResult` 型ガード） / `version` |
+| `@rex0220/kintone-sql-tools/flow` | **Flow dialect 1**（→ [言語リファレンス §27](docs/ksql_language_reference.md)）のスクリプト解析・検証・**文単位実行**（バッチランナー向け・書込可能） | `parseScript` / `validateScript` / `explainScript`（`asOf`/`timezone` 注入可） / `createExecutionContext`（`onChunkWritten` 書込チャンク通知・`onImportSourceMaterialized` IMPORT receipt・`confirm` 書込前の確認フック・`allowApplyMutation` APPLY の書込） / `executeStatement` / `previewStatement`（dry-run 差分プレビュー・書込 0 回） / `disposeExecutionContext` / `createImportSourceResolver` / `FlowImportProviderError` / `createKintoneClient` / `isDmlResult`（`FlowDmlResult` 型ガード） / `version` |
 
 バッチ実行ランナー **kSQL Flow**（`/flow` API を使った公式ランナー・別リポジトリ）: https://github.com/rex0220/ksql-flow
 
@@ -368,7 +368,34 @@ const ctx = createExecutionContext({
 - **`count = 0` で呼ばれる**: 対象0件の UPDATE / DELETE / INSERT ... SELECT / REORDER、ON ERROR SKIP で合格0行。0件なら書込は起きないので、画面を出さずに `true` を返してよい。
 - **期限と dispose**: 答えを待つ間に `timeoutMs`（実行コンテキスト全体の期限）か `disposeExecutionContext` が来ると `info.signal` が中止され（`reason.name` は `TimeoutError` / `ExecutionContextDisposedError`）、
   文は答えを待たずに `error.code = "TimeoutError"` / `"ExecutionContextDisposedError"` で返ります。後から `true` が返っても書きません。
-- **対象外**: IMPORT を含むスクリプトとは併用できません（`createExecutionContext` が `ArgumentError`）。APPLY の書込は `/flow` の公開面では動かないため、APPLY の詳細は渡しません。
+- **対象外**: IMPORT を含むスクリプトとは併用できません（`createExecutionContext` が `ArgumentError`）。
+
+### APPLY の書込（`allowApplyMutation`・B198）
+
+サブテーブルの行を書き換える `APPLY`（`PATCH` / `APPEND` / `REMOVE`）は、**`allowApplyMutation: true` と `confirm` を同時に渡したときだけ**書けます。
+APPLY は不可逆（既存の子行は戻せない）で文がトランザクションでないため、`confirm` なしの `allowApplyMutation` は `ArgumentError` です。
+
+```ts
+const ctx = createExecutionContext({
+  client, statements, meta, apps: { 集計: 100 },
+  allowApplyMutation: true,
+  dmlMaxRows: 1, dmlMaxSubtableRows: 1_000,        // 明示で渡す（既定は親 100 / 子行 500）
+  async confirm(count, operation, info) {
+    // info.applyDetail = { kind, parentRows, changedSubtableRows, addedSubtableRows,
+    //                      tables: [{ table, patchRows, appendRows, removeRows }],
+    //                      deletedRows, deletedParentRows, irreversible, nonTransactional?, ... }
+    return showApplyDialog({ count, ...info.applyDetail });
+  },
+});
+```
+
+- `applyDetail` は **APPLY の書込の文だけ**に付き、**文に 1 回**です（100 親ごとのチャンクでは増えません）。`count` は書き込む親レコード数です。
+- `dmlMaxRows` は**親レコード数**の上限（既定 100）、`dmlMaxSubtableRows` は**変わる子行の数**の上限（既定 500）で、
+  子行は**全親・全テーブルの合計**かつ `REMOVE ALL ROWS` で消える既存行も数えます。超えると**最初の書込より前**に `ArgumentError` で止まります（書込 0 回）。
+- **親 0 件でも `count = 0` で呼ばれ**、書込は 0 回です（通常の UPDATE / DELETE と同じ）。`$id = <番号>` で親が無いときは `ArgumentError` です。
+- **多値 APPLY**（チェックボックスなどの値の集合を `ADD` / `REMOVE '<値>'` で直す形）は `/flow` では開きません（`createExecutionContext` が `UnsupportedError`）。
+- `applyDetail.nonTransactional` が立つ文は、100 親ごとのチャンクの前半だけが成功し得ます（`applyDetail.partialSuccessPossible`）。
+- MCP は APPLY の書込を常に拒否します（面の違いは [言語リファレンス §27](docs/ksql_language_reference.md) を参照）。
 
 `confirm` の有無にかかわらず、`/flow` の実行は**書込 API を呼ぶ直前に毎回**期限と dispose を確かめ、過ぎていれば書きません（B195）。
 期限切れの結果を返したあとに、切り離された実行が次のチャンクを書くことはありません。送信中だった1回分の書込は止められないため、

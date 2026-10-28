@@ -6,6 +6,7 @@ import {
   normalizeSqlAppProfiles,
   type AppBinding,
 } from "../core/logicalApps";
+import { statementHasMultiValueApply } from "../core/applyPatchScope";
 import { parseScript as parseScriptCore } from "../core/script";
 import {
   buildBatchExplainPlans,
@@ -28,6 +29,7 @@ import {
 import type {
   CreateExecutionContextOptions,
   Diagnostic,
+  FlowApplyConfirmDetail,
   ExecutionContext,
   ExecutionMetrics,
   ExplainScriptOptions,
@@ -162,6 +164,21 @@ export function createExecutionContext(opts: CreateExecutionContextOptions): Exe
       throw new KsqlFlowError(
         "ArgumentError",
         "ArgumentError: confirm does not cover IMPORT; remove confirm or run IMPORT in a separate execution context."
+      );
+    }
+    // B198: APPLY は不可逆で文がトランザクションでないため、確認なしでは開けない。
+    if (executeOptions.allowApplyMutation === true && confirm === undefined) {
+      throw new KsqlFlowError(
+        "ArgumentError",
+        "ArgumentError: allowApplyMutation requires confirm; APPLY replaces child rows irreversibly."
+      );
+    }
+    // B198: 多値 APPLY（値の集合を直す形）は /flow では開けない。確認の内訳が別物で用途でもない。
+    if (executeOptions.allowApplyMutation === true && statements.some(statementHasMultiValueApply)) {
+      throw new KsqlFlowError(
+        "UnsupportedError",
+        "UnsupportedError: allowApplyMutation does not cover multi-value APPLY (ADD / REMOVE '<value>'); "
+        + "use APPLY row operations on a subtable instead."
       );
     }
     const normalizedExportSinks = normalizeExportSinkDeclarations(statements, exportSinks);
@@ -336,8 +353,31 @@ function normalizedLogicalAppResult(source: string, apps: Readonly<Record<string
 }
 
 /**
+ * B195 / B198: 内部の確認の詳細を公開の形へ振り分ける唯一の場所。
+ * 公開の形が無い詳細（IMPORT・多値 APPLY）が付いた確認は、フックを呼ばずに止める（書かない）。
+ * `applyDiagnostic` は公開しない（`applyDetail` と同じ内容を内部の形で重複して持つため）。
+ */
+function routeConfirmDetail(
+  context: NonNullable<Parameters<NonNullable<ExecuteOptions["confirm"]>>[2]>
+): { applyDetail?: FlowApplyConfirmDetail } {
+  if (context.importDetail) {
+    throw new Error("UnsupportedError: confirm does not cover IMPORT detail; the statement was not written.");
+  }
+  if (!context.applyDetail) {
+    if (context.applyDiagnostic) {
+      throw new Error("UnsupportedError: confirm does not cover APPLY detail; the statement was not written.");
+    }
+    return {};
+  }
+  const { multiValues, ...applyDetail } = context.applyDetail;
+  if (multiValues) {
+    throw new Error("UnsupportedError: confirm does not cover multi-value APPLY detail; the statement was not written.");
+  }
+  return { applyDetail };
+}
+
+/**
  * B195: 内部の確認を公開の形へ。仮の ID を物理のアプリ ID と論理名に戻し、true 以外は取消にする。
- * 公開の形で渡せない詳細（APPLY / IMPORT）が付いた確認は、フックを呼ばずに止める（書かない）。
  */
 function routeConfirm(
   confirm: FlowDmlConfirm,
@@ -347,9 +387,7 @@ function routeConfirm(
     if (context === undefined || context.targetAppId === null || context.signal === undefined) {
       throw new Error("InternalError: confirm context is incomplete; the statement was not written.");
     }
-    if (context.applyDetail || context.applyDiagnostic || context.importDetail) {
-      throw new Error("UnsupportedError: confirm does not cover APPLY or IMPORT detail; the statement was not written.");
-    }
+    const detail = routeConfirmDetail(context);
     const binding = bindings?.get(context.targetAppId);
     const answer = await confirm(count, operation, {
       statementIndex: context.statementIndex,
@@ -358,6 +396,7 @@ function routeConfirm(
       targetAppId: binding?.appId ?? context.targetAppId,
       ...(binding?.source === "logical" ? { logicalAppName: binding.logicalName } : {}),
       signal: context.signal,
+      ...detail,
     });
     return answer === true;
   };
@@ -403,6 +442,7 @@ export type {
   ExplainScriptOptions,
   ExplainScriptResult,
   FieldInfo,
+  FlowApplyConfirmDetail,
   FlowDmlConfirm,
   FlowDmlConfirmContext,
   FlowImportProviderErrorCode,

@@ -9,8 +9,8 @@ import type {
 } from "../types/ast";
 import { isRelativeDateFunctionName } from "./relativeDateFunction";
 
-export type ApplyScopeVersion = "v1" | "v1.1" | "v1.2" | "phase10a" | "phase11" | "phase12" | "phase13a" | "phase14a" | "phase14b" | "phase14c" | "phase15a" | "phase15b";
-export type ApplyExecutionPhase = "phase10a" | "phase10b" | "phase10c" | "phase10d" | "phase11" | "phase12" | "phase13a" | "phase13b" | "phase13c" | "phase14a" | "phase14b" | "phase14c" | "phase15a" | "phase15b";
+export type ApplyScopeVersion = "v1" | "v1.1" | "v1.2" | "phase10a" | "phase11" | "phase12" | "phase13a" | "phase14a" | "phase14b" | "phase14c" | "phase15a" | "phase15b" | "phase16a";
+export type ApplyExecutionPhase = "phase10a" | "phase10b" | "phase10c" | "phase10d" | "phase11" | "phase12" | "phase13a" | "phase13b" | "phase13c" | "phase14a" | "phase14b" | "phase14c" | "phase15a" | "phase15b" | "phase16a";
 
 const APPLY_SYNTAX_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
   readonly operations: ReadonlySet<ApplyOperation["kind"]>;
@@ -24,6 +24,8 @@ const APPLY_SYNTAX_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
   readonly check: boolean;
   readonly onErrorSkip: boolean;
   readonly rejectLimit: boolean;
+  /** B200-2: `APPEND (…) SELECT …`（UPDATE の APPLY のみ）。 */
+  readonly appendSelect: boolean;
 }>> = Object.freeze({
   v1: Object.freeze({
     operations: new Set<ApplyOperation["kind"]>(["PATCH"]),
@@ -37,6 +39,7 @@ const APPLY_SYNTAX_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
     check: false,
     onErrorSkip: false,
     rejectLimit: false,
+    appendSelect: false,
   }),
   "v1.1": Object.freeze({
     operations: new Set<ApplyOperation["kind"]>(["PATCH", "APPEND"]),
@@ -50,6 +53,7 @@ const APPLY_SYNTAX_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
     check: false,
     onErrorSkip: false,
     rejectLimit: false,
+    appendSelect: false,
   }),
   "v1.2": Object.freeze({
     operations: new Set<ApplyOperation["kind"]>(["PATCH", "APPEND", "REMOVE"]),
@@ -63,6 +67,7 @@ const APPLY_SYNTAX_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
     check: false,
     onErrorSkip: false,
     rejectLimit: false,
+    appendSelect: false,
   }),
   phase10a: Object.freeze({
     operations: new Set<ApplyOperation["kind"]>(["PATCH", "APPEND", "REMOVE"]),
@@ -76,6 +81,7 @@ const APPLY_SYNTAX_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
     check: false,
     onErrorSkip: false,
     rejectLimit: false,
+    appendSelect: false,
   }),
   phase11: Object.freeze({
     operations: new Set<ApplyOperation["kind"]>(["PATCH", "APPEND", "REMOVE"]),
@@ -89,6 +95,7 @@ const APPLY_SYNTAX_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
     check: false,
     onErrorSkip: false,
     rejectLimit: false,
+    appendSelect: false,
   }),
   phase12: Object.freeze({
     operations: new Set<ApplyOperation["kind"]>(["PATCH", "APPEND", "REMOVE"]),
@@ -102,6 +109,7 @@ const APPLY_SYNTAX_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
     check: false,
     onErrorSkip: false,
     rejectLimit: false,
+    appendSelect: false,
   }),
   phase13a: Object.freeze({
     operations: new Set<ApplyOperation["kind"]>(["PATCH", "APPEND", "REMOVE"]),
@@ -115,6 +123,7 @@ const APPLY_SYNTAX_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
     check: false,
     onErrorSkip: false,
     rejectLimit: false,
+    appendSelect: false,
   }),
   phase14a: Object.freeze({
     operations: new Set<ApplyOperation["kind"]>(["PATCH", "APPEND", "REMOVE"]),
@@ -128,6 +137,7 @@ const APPLY_SYNTAX_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
     check: false,
     onErrorSkip: false,
     rejectLimit: false,
+    appendSelect: false,
   }),
   phase14b: Object.freeze({
     operations: new Set<ApplyOperation["kind"]>(["PATCH", "APPEND", "REMOVE"]),
@@ -141,6 +151,7 @@ const APPLY_SYNTAX_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
     check: false,
     onErrorSkip: false,
     rejectLimit: false,
+    appendSelect: false,
   }),
   phase14c: Object.freeze({
     operations: new Set<ApplyOperation["kind"]>(["PATCH", "APPEND", "REMOVE"]),
@@ -154,6 +165,7 @@ const APPLY_SYNTAX_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
     check: false,
     onErrorSkip: false,
     rejectLimit: false,
+    appendSelect: false,
   }),
   phase15a: Object.freeze({
     operations: new Set<ApplyOperation["kind"]>(["PATCH", "APPEND", "REMOVE", "ADD", "REMOVE_VALUE"]),
@@ -167,6 +179,7 @@ const APPLY_SYNTAX_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
     check: false,
     onErrorSkip: false,
     rejectLimit: false,
+    appendSelect: false,
   }),
   phase15b: Object.freeze({
     operations: new Set<ApplyOperation["kind"]>(["PATCH", "APPEND", "REMOVE", "ADD", "REMOVE_VALUE"]),
@@ -180,6 +193,22 @@ const APPLY_SYNTAX_CAPABILITIES: Readonly<Record<ApplyScopeVersion, {
     check: false,
     onErrorSkip: false,
     rejectLimit: false,
+    appendSelect: false,
+  }),
+  /** B200-2 で `APPEND (…) SELECT …` を開いた版。ほかは phase15b と同じ。 */
+  phase16a: Object.freeze({
+    operations: new Set<ApplyOperation["kind"]>(["PATCH", "APPEND", "REMOVE", "ADD", "REMOVE_VALUE"]),
+    insert: true,
+    upsert: true,
+    multipleBlocks: true,
+    multipleParents: true,
+    idxSelectors: true,
+    expectRows: true,
+    updateFrom: false,
+    check: false,
+    onErrorSkip: false,
+    rejectLimit: false,
+    appendSelect: true,
   }),
 });
 
@@ -204,7 +233,13 @@ const APPLY_EXECUTION_CAPABILITIES: Readonly<Record<ApplyExecutionPhase, {
   phase14c: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true, insertWrite: true, upsertWrite: true }),
   phase15a: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true, insertWrite: true, upsertWrite: true }),
   phase15b: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true, insertWrite: true, upsertWrite: true }),
+  phase16a: Object.freeze({ multipleParentPreflight: true, internalPreparedWrite: true, publicMultipleParentWrite: true, insertWrite: true, upsertWrite: true }),
 });
+
+/** 多値 APPLY の実行が接続されている phase。 */
+const MULTI_VALUE_EXECUTION_PHASES: ReadonlySet<ApplyExecutionPhase> = new Set<ApplyExecutionPhase>([
+  "phase15b", "phase16a",
+]);
 
 let activeVersion: ApplyScopeVersion = "v1";
 
@@ -278,9 +313,11 @@ function assertUpdateApplyOperations(
       if (!capabilities.operations.has(operation.kind)) unsupported(`${operation.kind} in this phase`);
     }
     assertApplyBlockOperationFamily(block);
+    assertAppendSelectBlockShape(block, capabilities);
     for (const operation of block.operations) {
       if (operation.kind === "APPEND") {
         for (const field of operation.fields) assertSafeChildField(field, "APPEND targets");
+        // SELECT 形のソースは APPLY の安全ノード検査の対象ではない（通常の SELECT として検査される）。
         assertSafeApplyNode(operation.values, "APPEND values");
         continue;
       }
@@ -307,6 +344,46 @@ function assertUpdateApplyOperations(
         assertSafeChildPredicate(operation.selector.where, capabilities.idxSelectors);
       }
     }
+  }
+}
+
+/**
+ * B200-2 の形の固定。`APPEND (…) SELECT …` は
+ *   - 対応した phase だけ（既存の phase はすべて拒否）
+ *   - 1 ブロックに 1 つまで
+ *   - 同じブロックに置けるのは `REMOVE ALL ROWS` だけで、しかも必須（全置換に固定し、再実行で積み増さない）
+ * に限る。緩めるのは純加法なので、実需が出てから広げる。
+ */
+function assertAppendSelectBlockShape(
+  block: ApplyBlock,
+  capabilities: (typeof APPLY_SYNTAX_CAPABILITIES)[ApplyScopeVersion]
+): void {
+  if (block.targetKind !== "SUBTABLE") return;
+  const operations = block.operations;
+  const appendSelects = operations.filter(
+    (operation) => operation.kind === "APPEND" && operation.select !== undefined
+  );
+  if (appendSelects.length === 0) return;
+  if (!capabilities.appendSelect) unsupported("APPEND ... SELECT in this phase");
+  if (appendSelects.length > 1) {
+    throw new Error(
+      `ArgumentError: APPLY ${block.field} allows only one APPEND ... SELECT per block.`
+    );
+  }
+  const others = operations.filter((operation) => operation !== appendSelects[0]);
+  for (const operation of others) {
+    if (operation.kind !== "REMOVE" || operation.selector.kind !== "ALL_ROWS") {
+      throw new Error(
+        `ArgumentError: APPLY ${block.field} with APPEND ... SELECT allows only REMOVE ALL ROWS beside it; `
+        + `${operation.kind} is not allowed in the same block.`
+      );
+    }
+  }
+  if (others.length === 0) {
+    throw new Error(
+      `ArgumentError: APPLY ${block.field} with APPEND ... SELECT requires REMOVE ALL ROWS in the same block `
+      + "(the table is replaced as a whole so re-running the statement is idempotent)."
+    );
   }
 }
 
@@ -378,6 +455,8 @@ function assertAppendOnlyBlocks(blocks: readonly ApplyBlock[], parent: string): 
   for (const block of blocks) {
     for (const operation of block.operations) {
       if (operation.kind !== "APPEND") unsupported(`${operation.kind} for ${parent} in this phase`);
+      // B200-2 は UPDATE の APPLY だけ。INSERT / UPSERT の APPLY では受けない。
+      if (operation.select !== undefined) unsupported(`APPEND ... SELECT for ${parent}`);
       for (const field of operation.fields) assertSafeChildField(field, "APPEND targets");
       assertSafeApplyNode(operation.values, "APPEND values");
     }
@@ -426,7 +505,7 @@ export function assertApplyExecutionScope(phase: ApplyExecutionPhase, statement:
   if (statement.type !== "EXPLAIN"
     && !isValidationOnly
     && statementHasMultiValueApply(statement)
-    && phase !== "phase15b") {
+    && !MULTI_VALUE_EXECUTION_PHASES.has(phase)) {
     throw new Error(`UnsupportedError: APPLY ${formatExecutionPhase(phase)} multi-value execution is not connected`);
   }
   if (statement.type === "UPSERT"

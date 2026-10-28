@@ -178,6 +178,9 @@ function buildPreparedInsertBranch(prepared: PreparedApplyInsert): ApplyDiagnost
         if (operation.kind !== "APPEND") {
           throw new Error(`InternalError: prepared APPLY INSERT contains ${operation.kind}.`);
         }
+        if (operation.select !== undefined) {
+          throw new Error("InternalError: prepared APPLY INSERT contains APPEND ... SELECT.");
+        }
         const addedRows = operation.values.length * prepared.guards.parentRows;
         return { kind: "APPEND", count: addedRows, addedRows };
       });
@@ -337,7 +340,10 @@ function staticBranch(
 
 function staticOperation(operation: ApplyOperation, parentRows: number | null): ApplyDiagnosticOperation {
   if (operation.kind === "APPEND") {
-    const addedRows = parentRows === null ? null : operation.values.length * parentRows;
+    // B200-2: SELECT 形の行数は文からは決まらない（実行時に確定する）。
+    const addedRows = parentRows === null || operation.select !== undefined
+      ? null
+      : operation.values.length * parentRows;
     return { kind: operation.kind, count: addedRows, addedRows };
   }
   if (operation.kind === "PATCH") return { kind: operation.kind, count: null, matchedRows: null, changedRows: null };

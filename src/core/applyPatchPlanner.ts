@@ -8,7 +8,7 @@ import {
 } from "../converter/dmlToKintone";
 import { evalWhere, type FieldTypeResolver, type ProcessRow } from "../engine/evalWhere";
 import type { EvaluationContext } from "../engine/evalFunc";
-import type { AppendOperation, ExpectRowsGuard, FieldRef, LiteralInsertRow, PatchOperation, RemoveOperation, UpdateStatement, WhereExpr } from "../types/ast";
+import type { AppendOperation, ExpectRowsGuard, FieldRef, InsertRow, PatchOperation, RemoveOperation, UpdateStatement, WhereExpr } from "../types/ast";
 import { buildApplyMultiValueFieldPlan, type ApplyMultiValueFieldPlan } from "./applyMultiValuePlan";
 import { assertApplyTargetFieldType } from "./applyPatchScope";
 
@@ -72,6 +72,12 @@ export interface ApplyPatchPlan {
   readonly postImage: Readonly<Record<string, { readonly value: unknown }>>;
 }
 
+/**
+ * B200-2: `APPEND (…) SELECT …` の解決済みの行。SELECT は文に 1 回だけ実行し、
+ * planner へ渡す前に子項目の値まで組み立てる（planner は読み取りを行わない）。
+ */
+export type ApplyAppendSelectRows = ReadonlyMap<AppendOperation, readonly ApplyPatchPostImageRow[]>;
+
 export interface ApplyPatchMetadata {
   readonly targetTables: ReadonlyMap<string, KintoneFieldInfo>;
   readonly targetMultiValueFields: ReadonlyMap<string, KintoneFieldInfo>;
@@ -85,6 +91,8 @@ export interface BuildApplyPatchPlanInput {
   readonly fieldInfos: readonly KintoneFieldInfo[];
   readonly metadata?: ApplyPatchMetadata;
   readonly evaluationContext?: EvaluationContext;
+  /** B200-2: APPEND ... SELECT の解決済みの行（operation ごと）。 */
+  readonly appendSelectRows?: ApplyAppendSelectRows;
 }
 
 function argument(message: string): never {
@@ -257,7 +265,7 @@ export function buildApplyPatchPlan(input: BuildApplyPatchPlanInput): ApplyPatch
   const expectedParentId = getApplyParentId(statement);
   if (parentId !== expectedParentId) argument(`APPLY snapshot $id ${parentId} does not match requested $id ${expectedParentId}.`);
   return buildApplyPatchPlanForSnapshot(
-    statement, snapshot, metadata, parentId, input.evaluationContext
+    statement, snapshot, metadata, parentId, input.evaluationContext, input.appendSelectRows
   );
 }
 
@@ -270,7 +278,8 @@ export function buildApplyPatchPlans(
   snapshots: readonly KintoneRecord[],
   fieldInfos: readonly KintoneFieldInfo[],
   metadata: ApplyPatchMetadata = resolveApplyPatchMetadata(statement, fieldInfos),
-  evaluationContext: EvaluationContext = {}
+  evaluationContext: EvaluationContext = {},
+  appendSelectRows?: ApplyAppendSelectRows
 ): readonly ApplyPatchPlan[] {
   const parentIds = new Set<number>();
   return snapshots.map((snapshot) => {
@@ -278,7 +287,7 @@ export function buildApplyPatchPlans(
     if (parentIds.has(parentId)) argument(`APPLY snapshots contain duplicate parentId ${parentId}.`);
     parentIds.add(parentId);
     return buildApplyPatchPlanForSnapshot(
-      statement, snapshot, metadata, parentId, evaluationContext
+      statement, snapshot, metadata, parentId, evaluationContext, appendSelectRows
     );
   });
 }
@@ -288,7 +297,8 @@ function buildApplyPatchPlanForSnapshot(
   snapshot: KintoneRecord,
   metadata: ApplyPatchMetadata,
   parentId: number,
-  evaluationContext: EvaluationContext = {}
+  evaluationContext: EvaluationContext = {},
+  appendSelectRows?: ApplyAppendSelectRows
 ): ApplyPatchPlan {
   const revision = requirePositiveInteger(snapshot["$revision"]?.value, "APPLY snapshot $revision");
   const tablePlans: ApplyPatchTablePlan[] = [];
@@ -326,7 +336,7 @@ function buildApplyPatchPlanForSnapshot(
     for (const [operationIndex, operation] of block.operations.entries()) {
       if (operation.kind === "APPEND") {
         const rows = buildApplyAppendRows(
-          operation, targetChildren, block.field, evaluationContext
+          operation, targetChildren, block.field, evaluationContext, appendSelectRows?.get(operation)
         );
         operationPlans.push({ kind: "APPEND", addedRows: rows.length });
         appended.push(...rows);
@@ -529,8 +539,19 @@ export function buildApplyAppendRows(
   operation: AppendOperation,
   children: ReadonlyMap<string, KintoneFieldInfo>,
   table: string,
-  evaluationContext: EvaluationContext = {}
+  evaluationContext: EvaluationContext = {},
+  /** B200-2: SELECT 形のときだけ渡る、解決済みの行。 */
+  selectRows?: readonly ApplyPatchPostImageRow[]
 ): ApplyPatchPostImageRow[] {
+  if (operation.select !== undefined) {
+    // 読み取りは planner の外（execute 側）で済ませる契約。未解決で来たら書かずに止める。
+    if (selectRows === undefined) {
+      throw new Error(
+        `InternalError: APPLY APPEND for ${table} has an unresolved SELECT source.`
+      );
+    }
+    return selectRows.map((row) => ({ value: row.value }));
+  }
   return operation.values.map((row) => ({
     value: buildAppendValue(operation, row, children, table, evaluationContext),
   }));
@@ -538,7 +559,7 @@ export function buildApplyAppendRows(
 
 function buildAppendValue(
   operation: AppendOperation,
-  row: LiteralInsertRow,
+  row: InsertRow,
   children: ReadonlyMap<string, KintoneFieldInfo>,
   table: string,
   evaluationContext: EvaluationContext

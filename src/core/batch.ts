@@ -249,7 +249,7 @@ export function analyzeBatch(statements: Statement[]): BatchAnalysis {
       throw error;
     }
     try {
-      assertApplyScope("phase15b", stmt);
+      assertApplyScope("phase16a", stmt);
       validateStatementStatic(stmt);
     } catch (error) {
       if (

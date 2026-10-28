@@ -1,4 +1,5 @@
-import type { Statement, UpsertSelectStatement, UpsertStatement, WhereExpr } from "../types/ast";
+import type { Statement, UpdateStatement, UpsertSelectStatement, UpsertStatement, WhereExpr } from "../types/ast";
+import { isSinglePositiveRecordIdWhere } from "./applyPatchScope";
 import type { KintoneFieldInfo } from "../execute";
 import { isRelativeDateFunctionName } from "./relativeDateFunction";
 import { serverOnlyFunctionOccurrencesInWhere } from "./optimization/relativeDateFullScanExactPlan";
@@ -82,8 +83,58 @@ export async function validateScriptCore(
     if (statementHasBareServerTimeFunctionInWhere(statement)) {
       add("warning", DiagnosticCodes.SERVER_TIME_FUNCTION_NOT_AS_OF, DIALECT1_SERVER_TIME_FUNCTION_WARNING);
     }
+
+    // B200-2: APPEND ... SELECT は親が 1 件に決まる WHERE でなければ実行時に止まる。
+    // 静的には決められないので、怪しい形だけ warning で知らせる（確定は実行時）。
+    if (statement.type === "UPDATE" && statementHasApplyAppendSelect(statement)) {
+      const issue = await appendSelectParentWhereIssue(statement, schema);
+      if (issue !== null) add("warning", DiagnosticCodes.APPLY_APPEND_SELECT_PARENT_NOT_UNIQUE, issue);
+    }
   }
   return diagnostics;
+}
+
+/** B200-2: UPDATE の APPLY に `APPEND (…) SELECT …` があるか。 */
+export function statementHasApplyAppendSelect(statement: UpdateStatement): boolean {
+  return (statement.applyBlocks ?? []).some((block) =>
+    block.targetKind === "SUBTABLE"
+    && block.operations.some((operation) => operation.kind === "APPEND" && operation.select !== undefined));
+}
+
+/** 親の WHERE が 1 件に決まると読める形かを見る。決まると読めれば null。 */
+async function appendSelectParentWhereIssue(
+  statement: UpdateStatement,
+  schema: Dialect1SchemaResolver | undefined
+): Promise<string | null> {
+  if (isSinglePositiveRecordIdWhere(statement.where)) return null;
+  const field = singleEqualityFieldName(statement.where);
+  if (field === null) {
+    return "APPEND ... SELECT は親が 1 件に決まる WHERE でなければ実行時にエラーになります。"
+      + "重複禁止のキーフィールドの等値（例: 顧客コード = @cust）か $id = <番号> にしてください。";
+  }
+  if (schema === undefined) return null;
+  const fields = await schema(statement.appId);
+  const info = fields.find((candidate) => candidate.code === field);
+  if (info?.isUnique === true) return null;
+  return `APPEND ... SELECT の親の WHERE が使っているフィールド「${field}」は`
+    + (info === undefined
+      ? `APP${statement.appId} のフォームに見つかりません。`
+      : info.isUnique === false
+        ? "重複禁止ではありません。"
+        : "重複禁止かどうかを schema resolver から確認できません。")
+    + "親が 2 件以上に当たると、最初の書き込みより前にエラーで止まります。";
+}
+
+/** `<field> = <値>` 1 つだけの WHERE なら、その field code を返す。 */
+function singleEqualityFieldName(where: WhereExpr): string | null {
+  if (where.type !== "BINARY" || where.op !== "=" || where.left.type !== "FIELD"
+    || where.left.tableAlias !== null) {
+    return null;
+  }
+  const right = where.right.type;
+  return right === "STRING" || right === "NUMBER" || right === "VARIABLE"
+    ? where.left.field
+    : null;
 }
 
 /** updateKey の三条件を静的検証と実行前 prepare で共有する。 */

@@ -101,6 +101,10 @@ export function resolveApplyInsertMetadata(
     childrenByTable.set(block.field, children);
     for (const operation of block.operations) {
       if (operation.kind !== "APPEND") return argument(`APPLY INSERT supports APPEND only (${operation.kind}).`);
+      // B200-2 は UPDATE の APPLY だけ（パーサーと scope でも断る）。
+      if (operation.select !== undefined) {
+        return argument(`APPLY INSERT does not support APPEND ... SELECT for ${block.field}.`);
+      }
       const specified = new Set<string>();
       for (const code of operation.fields) {
         if (specified.has(code)) return argument(`APPLY APPEND specifies child ${code} more than once.`);
