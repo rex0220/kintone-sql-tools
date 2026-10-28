@@ -1043,7 +1043,13 @@ export interface PatchOperation {
 export interface AppendOperation {
   kind: "APPEND";
   fields: string[];
-  values: LiteralInsertRow[];
+  /** VALUES 形の行。SELECT 形（B200-2）では空配列。 */
+  values: InsertRow[];
+  /**
+   * B200-2: SELECT 形のソース。UPDATE の APPLY だけで、`REMOVE ALL ROWS` と同じ block に 1 つまで。
+   * 設定されているとき values は空で、行は実行時に SELECT を解決して作る。
+   */
+  select?: SelectStatement;
 }
 
 /** v1.2 用の構文ノード。Phase 1 では scope validator が実行を拒否する。 */

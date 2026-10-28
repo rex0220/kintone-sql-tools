@@ -1,6 +1,7 @@
 import { resolveSelectMode, type SelectMode } from "../../converter/selectToKintone";
 import { whereToKintone } from "../../converter/whereToKintone";
 import type {
+  ApplyBlock,
   DeleteStatement,
   SelectStatement,
   Statement,
@@ -134,6 +135,21 @@ function relativeDateFunctionNamesInNode(node: unknown, stopAtNestedSelect: bool
 /** WHERE 内だけを走査する。SELECT source は statement walker が別 node として扱う。 */
 export function relativeDateFunctionNamesInWhere(where: WhereExpr | null): string[] {
   return relativeDateFunctionNamesInNode(where, true);
+}
+
+/**
+ * B200-2: `APPEND (…) SELECT …` のソースは nestedSelects が通常の SELECT として分類するため、
+ * APPLY 全体の相対日付走査（常に FORBIDDEN）からは外す。APPLY が押し下げを許さないのは
+ * 子行の値と選択子をローカル評価するからで、SELECT ソースはその経路を通らない。
+ */
+function applyNodesWithoutAppendSelectSources(blocks: readonly ApplyBlock[]): unknown {
+  return blocks.map((block) => ({
+    ...block,
+    operations: block.operations.map((operation) =>
+      operation.kind === "APPEND" && operation.select !== undefined
+        ? { ...operation, select: undefined }
+        : operation),
+  }));
 }
 
 function nestedSelects(node: unknown, root?: object): SelectStatement[] {
@@ -313,7 +329,9 @@ function collectStatement(
         });
       }
       if (statement.type === "UPDATE" && statement.applyBlocks?.length) {
-        const applyFunctions = relativeDateFunctionNamesInNode(statement.applyBlocks, true);
+        const applyFunctions = relativeDateFunctionNamesInNode(
+          applyNodesWithoutAppendSelectSources(statement.applyBlocks), true
+        );
         if (applyFunctions.length > 0) {
           candidates.push({
             kind: "FORBIDDEN",

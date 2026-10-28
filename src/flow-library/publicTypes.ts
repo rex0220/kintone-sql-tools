@@ -6,7 +6,7 @@ export type DiagnosticCode =
   | "KSQL1001" | "KSQL1002" | "KSQL1003" | "KSQL1004" | "KSQL1005" | "KSQL1006"
   | "KSQL1101"
   | "KSQL1201" | "KSQL1202" | "KSQL1203"
-  | "KSQL1301" | "KSQL1302" | "KSQL1303" | "KSQL1304" | "KSQL1305" | "KSQL1306";
+  | "KSQL1301" | "KSQL1302" | "KSQL1303" | "KSQL1304" | "KSQL1305" | "KSQL1306" | "KSQL1307";
 
 export interface Diagnostic {
   severity: "error" | "warning";
@@ -262,9 +262,69 @@ export interface CreateExecutionContextOptions extends ParseScriptOptions {
    * 書込の対象を読み、書く内容を準備した直後・最初の書込 API の前に await される（B195）。
    * true 以外（false・undefined など）は取消＝その文の書込 0 回・`OperationCancelledError`。
    * 省略時は確認なしで書く。IMPORT を含むスクリプトとは併用できない（ArgumentError）。
-   * APPLY の詳細は渡さない（/flow の公開面では APPLY の書込は動かない）。
+   * APPLY の書込（allowApplyMutation）では必須で、`applyDetail` が付いて呼ばれる（B198）。
    */
   confirm?: FlowDmlConfirm;
+  /**
+   * APPLY の書込（サブテーブルの行操作）を許可する（B198。省略・false は従来どおり `UnsupportedError`）。
+   * APPLY は不可逆で文がトランザクションでないため、**`confirm` と同時でなければ受けない**（単独で渡すと `ArgumentError`）。
+   * 開くのは行の操作の APPLY（`UPDATE` / `INSERT` / `UPSERT`）だけで、
+   * 多値 APPLY（チェックボックスなどの値の集合を直す形）は `/flow` では引き続き `UnsupportedError`。
+   */
+  allowApplyMutation?: boolean;
+}
+
+/**
+ * APPLY の書込の計画（B198）。確認フックが書く前に受け取る内訳で、`applyDetail` として渡る。
+ * 行数はすべて計画済みの実数（親をまたぐ合計ではなくテーブルごと）。
+ */
+export interface FlowApplyConfirmDetail {
+  kind: "APPLY_PATCH" | "APPLY_INSERT" | "APPLY_UPSERT";
+  /** 書き込む親レコード数（confirm の count と同じ）。 */
+  parentRows: number;
+  /** 変わる子行の数（PATCH + APPEND + REMOVE。全親・全テーブルの合計）。 */
+  changedSubtableRows: number;
+  /** 追加する子行の数。 */
+  addedSubtableRows: number;
+  tables: readonly {
+    table: string;
+    patchRows: number;
+    appendRows: number;
+    removeRows: number;
+  }[];
+  /** 消える子行の数。 */
+  deletedRows: number;
+  /** 子行が消える親レコードの数。 */
+  deletedParentRows: number;
+  revisionRequired: boolean;
+  /** APPLY は常に不可逆（元の子行は戻せない）。 */
+  irreversible: true;
+  retryOnRevisionConflict: false;
+  /** 100 親ごとに分割して書くため、前半だけ成功して後半が失敗し得る。 */
+  nonTransactional?: true;
+  partialSuccessPossible?: true;
+  /** INSERT APPLY のときだけ。 */
+  insertedParentRows?: number;
+  /** INSERT / UPSERT の作成側に含まれる初期の子行数。 */
+  initialSubtableRows?: number;
+  /** UPSERT APPLY のときだけ。 */
+  updatedParentRows?: number;
+  /** UPSERT の分岐 APPLY のときだけ。 */
+  applyBranches?: {
+    insert: {
+      parentRows: number;
+      initialSubtableRows: number;
+      tables: FlowApplyConfirmDetail["tables"];
+    };
+    update: {
+      parentRows: number;
+      changedSubtableRows: number;
+      addedSubtableRows: number;
+      tables: FlowApplyConfirmDetail["tables"];
+      deletedRows: number;
+      deletedParentRows: number;
+    };
+  };
 }
 
 /**
@@ -288,6 +348,11 @@ export interface FlowDmlConfirmContext {
    * reason は Error（name が "TimeoutError" または "ExecutionContextDisposedError"）。
    */
   signal: AbortSignal;
+  /**
+   * APPLY の書込のときだけ付く計画の内訳（B198）。
+   * `allowApplyMutation: true` で APPLY を書く文に限り、文に 1 回（チャンクごとには増えない）。
+   */
+  applyDetail?: FlowApplyConfirmDetail;
 }
 
 /** 確認フック（B195）。true を返したときだけ書く。 */

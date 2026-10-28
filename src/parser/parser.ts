@@ -346,6 +346,18 @@ export const WINDOW_RESULT_IN_EXPRESSION_MESSAGE = [
   "ウィンドウ結果を列として出し、それを使う式は次の段（CTE または一時テーブル）に書いてください",
 ].join("\n");
 
+/**
+ * B201: `ORDER BY SUM(x)` のように集計式そのものをソートキーに書いた形。
+ * 実行すると必ず `ORDER_KEY_UNRESOLVED`（KORDER は `KORDER_KEY_UNRESOLVED`）で止まるため、
+ * 書いた時点で別名の付け方を示して断る。ウィンドウの `OVER (ORDER BY …)` は対象外（動く）。
+ */
+export const ORDER_BY_AGGREGATE_KEY_MESSAGE = [
+  "ORDER BY / KORDER BY のキーに集計式は書けません（実行できません）。",
+  "  × SELECT 担当者, SUM(金額) FROM t GROUP BY 担当者 ORDER BY SUM(金額) DESC",
+  "  ○ SELECT 担当者, SUM(金額) AS 金額合計 FROM t GROUP BY 担当者 ORDER BY 金額合計 DESC",
+  "SELECT 側で別名を付け、その別名で並べてください（ウィンドウ関数の OVER (ORDER BY …) では集計式を書けます）",
+].join("\n");
+
 // ------------------------------------------------------------
 // Parser クラス
 // ------------------------------------------------------------
@@ -1344,14 +1356,14 @@ export class Parser {
     let orderBy: OrderByItem[] = [];
     if (this.consume(TokenKind.ORDER)) {
       this.expect(TokenKind.BY);
-      orderBy = this.parseOrderBy();
+      orderBy = this.parseOrderBy(true, true);
     } else if (this.consume(TokenKind.KORDER)) {
       if (!allowKorder) {
         throw new ParseError("KORDER BY は利用者へ結果を返すトップレベル SELECT でのみ使用できます", this.prev());
       }
       orderMode = "KINTONE_NATIVE";
       this.expect(TokenKind.BY);
-      orderBy = this.parseOrderBy();
+      orderBy = this.parseOrderBy(true, true);
     }
 
     const limit = this.consume(TokenKind.LIMIT)
@@ -3951,10 +3963,11 @@ export class Parser {
     return { type: "FIELD_NAME", name };
   }
 
-  private parseOrderBy(allowGrouping = true): OrderByItem[] {
+  /** rejectAggregateKey: B201。文の ORDER BY / KORDER BY だけ集計式のキーを断る（ウィンドウは対象外）。 */
+  private parseOrderBy(allowGrouping = true, rejectAggregateKey = false): OrderByItem[] {
     const items: OrderByItem[] = [];
     do {
-      const key = this.parseOrderByKey(allowGrouping);
+      const key = this.parseOrderByKey(allowGrouping, rejectAggregateKey);
       let direction: "ASC" | "DESC" = "ASC";
       if (this.consume(TokenKind.DESC))  direction = "DESC";
       else this.consume(TokenKind.ASC); // ASC は省略可
@@ -3970,15 +3983,17 @@ export class Parser {
    *   フィールド + 算術: 金額 * 1.1
    *   フィールド名/alias: 名前 / total
    */
-  private parseOrderByKey(allowGrouping = true): OrderByKey {
+  private parseOrderByKey(allowGrouping = true, rejectAggregateKey = false): OrderByKey {
     const aggregateStart = this.tryAggregateFunc();
     if (aggregateStart !== null) {
+      const keyToken = this.peek();
       const start = this.pos;
       const ref = this.parseAggregateRef(aggregateStart);
       if (this.isSoftKeyword("OVER")) {
         throw new ParseError(WINDOW_RESULT_IN_EXPRESSION_MESSAGE, this.peek());
       }
       if (!this.isArithOp(this.peek().kind)) {
+        if (rejectAggregateKey) throw new ParseError(ORDER_BY_AGGREGATE_KEY_MESSAGE, keyToken);
         return {
           type: "FIELD_NAME",
           name: aggregateSyntheticName(ref.func, ref.distinct, ref.arg),
@@ -4591,7 +4606,7 @@ export class Parser {
     const where = this.parseWhereExpr(undefined, true);
 
     const applyBlocks: ApplyBlock[] = [];
-    while (this.isApplyBlockStart()) applyBlocks.push(this.parseApplyBlock());
+    while (this.isApplyBlockStart()) applyBlocks.push(this.parseApplyBlock(true));
     if (this.isSoftKeyword("APPLY") && this.peekAt(1).kind === TokenKind.IDENT
       && this.peekAt(1).value.toUpperCase() === "SUBTABLE") {
       throw new ParseError(
@@ -4656,7 +4671,8 @@ export class Parser {
       && this.peekAt(2).kind === TokenKind.LPAREN;
   }
 
-  private parseApplyBlock(): ApplyBlock {
+  /** allowAppendSelect: B200-2 の `APPEND (…) SELECT …` を受けるのは UPDATE の APPLY だけ。 */
+  private parseApplyBlock(allowAppendSelect = false): ApplyBlock {
     this.advance(); // APPLY
     const field = this.parseIdentifier();
     this.expect(TokenKind.LPAREN);
@@ -4665,7 +4681,7 @@ export class Parser {
     }
     const operations: ApplyOperation[] = [];
     while (true) {
-      operations.push(this.parseApplyOperation());
+      operations.push(this.parseApplyOperation(allowAppendSelect));
       if (!this.consume(TokenKind.SEMICOLON)) break;
       if (this.peek().kind === TokenKind.RPAREN) break;
       if (this.peek().kind === TokenKind.SEMICOLON) {
@@ -4687,7 +4703,7 @@ export class Parser {
       : { field, targetKind: "SUBTABLE", operations: operations as Extract<ApplyBlock, { targetKind: "SUBTABLE" }>["operations"] };
   }
 
-  private parseApplyOperation(): ApplyOperation {
+  private parseApplyOperation(allowAppendSelect: boolean): ApplyOperation {
     if (this.isSoftKeyword("ADD")) {
       this.advance();
       const value = this.expect(TokenKind.STRING, "ADD の後には文字列リテラルが必要です").value;
@@ -4710,11 +4726,23 @@ export class Parser {
       const fields: string[] = [];
       do fields.push(this.parseIdentifier()); while (this.consume(TokenKind.COMMA));
       this.expect(TokenKind.RPAREN);
+      // B200-2: VALUES の代わりに SELECT を受ける（UPDATE の APPLY だけ）。
+      if (this.peek().kind === TokenKind.SELECT) {
+        if (!allowAppendSelect) {
+          throw new ParseError(
+            "APPEND のフィールド一覧の後の SELECT は UPDATE ... APPLY だけで使えます",
+            this.peek()
+          );
+        }
+        const select = this.parseSelect();
+        return { kind: "APPEND", fields, values: [], select };
+      }
       this.expect(TokenKind.VALUES, "APPEND のフィールド一覧の後には VALUES が必要です");
-      const values: LiteralInsertRow[] = [];
+      // B200-1: as-of 関数（@NOW() など）を素の INSERT ... VALUES と揃える。
+      const values: InsertRow[] = [];
       do {
         this.expect(TokenKind.LPAREN, "APPEND VALUES の各行は ( で始めてください");
-        values.push(this.parseInsertRow(fields.length, false));
+        values.push(this.parseInsertRow(fields.length, true));
         this.expect(TokenKind.RPAREN);
       } while (this.consume(TokenKind.COMMA));
       return { kind: "APPEND", fields, values };

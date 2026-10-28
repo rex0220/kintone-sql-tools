@@ -2000,6 +2000,10 @@ ORDER BY weekday ASC
 - ORDER BY 名が SELECT alias と入力行フィールドの両方に完全一致する場合は、**SELECT alias を優先**します。ドットを含む alias も完全一致を先に判定するため、同名の修飾物理列にはその ORDER BY からアクセスできません
 - 同じ alias を複数の SELECT 列へ指定した場合は、出力と同じく**後に記述した列が優先**されます
 - alias に一致しない名前は従来どおり入力行フィールドとして解決します。どちらにも解決できない名前は `ORDER_KEY_UNRESOLVED` で実行前に拒否します
+- **集計式そのものはソートキーに書けません**（v3.88.0〜。`ORDER BY SUM(金額)` / `KORDER BY COUNT(*)` などは**構文エラー**で、エラー文が別名の付け方を示します）。
+  `SUM(金額) AS 金額合計 … ORDER BY 金額合計 DESC` と書いてください。`ORDER BY SUM(金額) * 2` は従来どおり構文エラーです。
+  **ウィンドウの `OVER (ORDER BY SUM(金額) DESC)` は対象外**で、今までどおり書けます（v3.88.0 より前は、文の `ORDER BY` に集計式を書くと
+  構文は通り**実行時に** `ORDER_KEY_UNRESOLVED` で止まっていました。書いた時点で分かるように前倒ししました）
 - この alias 解決はトップレベルの通常 `ORDER BY` だけに適用します。`OVER (ORDER BY ...)` から参照できる同一 SELECT の alias は、集計を含む列の別名（`SUM(売上) AS 合計` → `OVER (ORDER BY 合計)`・v3.81.0〜）だけです。集計を含まない列の別名（`売上 * 2 AS 倍`・グループキーの別名）は参照できず、実行前に `unknown field code(s)` で止まります。必要な場合は CTE または一時テーブルで一度列を実体化してください
 - `KORDER BY` は SELECT alias を直接物理列として扱いません
 
@@ -3642,6 +3646,7 @@ APPLY 明細 (
 |------|------|
 | `PATCH SET … {WHERE 行条件 \| ALL ROWS \| _idx = n \| _rid = 'id'}` | 既存行のセル更新（行 id・行順・未指定セルを保持） |
 | `APPEND (子…) VALUES (…)` | 行追加（未指定の子は既定値で明示補完） |
+| `APPEND (子…) SELECT …` | **SELECT の結果でテーブルを全置換**（v3.88.0〜。`UPDATE` の APPLY のみ・下の「APPEND … SELECT」を参照） |
 | `REMOVE {WHERE 行条件 \| _idx = n \| _rid = 'id'}` | 行削除（存続行は全列を保持） |
 
 - **多値フィールド**（`CHECK_BOX` / `MULTI_SELECT` / `USER_SELECT` 等）: `APPLY <多値> (ADD '値'; REMOVE '値')`。
@@ -3659,6 +3664,36 @@ APPLY 明細 (
 - **複数親**: 親 `WHERE` が複数レコードに一致する `UPDATE APPLY` に対応（1対象親=1 PUT・100件/チャンク・**非トランザクション**・自動リトライなし・部分成功あり）。`INSERT APPLY`（親作成＋初期行）・`UPSERT APPLY`（`ON INSERT` / `ON UPDATE` 分岐）も可。
 - **ガード**: revision ガード必須。`dmlMaxRows`（親件数）と `dmlMaxSubtableRows`（変更子行数・既定500）の二重ガード。プラグインは「最大取得件数」設定を両ガードへ兼用します。
 - **MCP**: すべての `APPLY` mutation は実行前に fail-closed（`allowDml` / `dmlMaxSubtableRows` でも解禁されません）。`VALIDATE ONLY` / `EXPLAIN` は許可。
+- **`/flow`**: `createExecutionContext` に `allowApplyMutation: true` と `confirm` を**同時に**渡したときだけ書けます（v3.88.0〜。多値 APPLY は開きません）。→ README の `/flow` の節
+
+### APPEND … SELECT（v3.88.0〜）
+
+別アプリの集計結果でテーブルを置き換えます。**`UPDATE` の APPLY だけ**で使えます。
+
+```sql
+UPDATE APP100 SET 集計日時 = @NOW()
+ WHERE 顧客コード = @cust            -- 1 件に決まるキーの等値（または $id = <番号>）
+  APPLY 明細 (
+    REMOVE ALL ROWS;                 -- 必須（テーブルは全置換）
+    APPEND (担当者, 件数, 金額)
+    SELECT 担当者, COUNT(*) AS 件数, SUM(金額) AS 金額 FROM APP200
+     WHERE 顧客コード = @cust GROUP BY 担当者 ORDER BY 金額 DESC
+  )
+```
+
+- **形は固定**: 1 ブロックに `APPEND … SELECT` は 1 つまでで、**同じブロックに置けるのは `REMOVE ALL ROWS` だけ（必須）**。
+  `PATCH` / 選択子つき `REMOVE` / `APPEND … VALUES` との同居は `ArgumentError` です。全置換に固定しているので、同じ文を再実行しても結果は同じです（冪等）。
+  `INSERT` / `UPSERT` の APPLY では parse エラーです。
+- **親は 1 件**: 相関参照（親の値をソースの `WHERE` で使う形）は無く、SELECT は**文に 1 回**だけ実行します。
+  親が 2 件以上に当たる `WHERE` は、**最初の書込より前**に `ApplyAppendSelectMultipleParentsError` で止まります（書込 0 回・ソースの SELECT も実行しません）。
+  親が 1 件に決まると静的に読めない `WHERE`（重複禁止でない項目の等値など）には、dialect 1 の検証が warning `KSQL1307` を出します。
+- **列と型**: `APPEND` の列の並びと SELECT の列の並びで**位置対応**し、変換は `INSERT … SELECT` と同じです。列数が合わなければエラーです。
+  指定しなかった子項目は**項目の既定値**で埋まります（`APPEND … VALUES` と同じ）。`FILE`（添付ファイル）と書けない項目は対象にできません。
+- **行順**: `APPEND` した順＝テーブルの行順です（`REMOVE ALL ROWS` で存続行が無いため）。
+  `ORDER BY` は**別名**で書いてください（`ORDER BY SUM(金額)` のような集計式そのものは**構文エラー**です＝v3.88.0・B201。面を問わない制限で、素の `INSERT … SELECT` でも同じ）。
+- **0 行**: SELECT が 0 行なら**テーブルが空になり、親は書かれます**（集計元が無くなった集計先の後始末がこれで済みます）。
+- **上限**: `dmlMaxSubtableRows` は「`REMOVE ALL ROWS` で消える既存行 + SELECT の行数」で数えます。SELECT の読取そのものは `maxRecords`（既定 10,000）に従います。
+- **一時テーブル**: `FROM #名前` をソースにはできません（バッチ解析が `temp table references in UPDATE are not supported yet.` で止めます）。
 
 ---
 
@@ -4166,7 +4201,7 @@ WHERE 処理ステータス = '未処理';
 
 | ID | 使えない配置 | 境界 |
 |---|---|---|
-| R01 | VALUES の直接要素 | INSERT / UPSERT / APPEND の `VALUES (@x)` は不可。VALUES が受理する CASE / IF の内部では条件・式に変数が入り得る |
+| R01 | VALUES の直接要素 | INSERT / UPSERT / APPEND の `VALUES (@x)` は不可（`DECLARE` 変数。as-of 関数は INSERT と APPEND では可＝v3.88.0〜）。VALUES が受理する CASE / IF の内部では条件・式に変数が入り得る。`APPEND … SELECT` のソースの中では通常どおり使える |
 | R02 | 件数・位置を表す固定数値句 | `LIMIT @n` / `OFFSET @n` は不可。EXPECT ROWS / REJECT LIMIT も変数化できない |
 | R03 | 条件左辺・構造位置 | `@x = 列` は不可。GROUP BY / ORDER BY、アプリ ID・フィールドコード・演算子などの識別子位置にも置けない |
 | R04 | 外側の SET / DECLARE 式 | `SET @b = @a / 2` と `DECLARE @b = @a` は不可。A13 の SET スカラーサブクエリ内だけが先行変数参照の例外 |
@@ -4400,7 +4435,7 @@ EXIT SUCCESS IF (SELECT COUNT(*) FROM #summary) = 0,
 | `@MONTH_START()` | その暦日の月初 | `2026-08-01` |
 | `@NEXT_MONTH_START()` | 翌月初 | `2026-09-01` |
 
-- 使える場所: `WHERE` の比較・`SELECT` 列（**別名省略可**）・DML の値・**`INSERT ... VALUES`（v3.72.0〜）**・`SET` / `DECLARE` の右辺など、文字列リテラルが書ける位置。`UPSERT ... VALUES` と APPLY の値では使えません（`INSERT ... SELECT` / `UPSERT ... SELECT` で注入してください）。評価後は通常のリテラルとして扱われ、`WHERE` の押し下げにもそのまま乗ります
+- 使える場所: `WHERE` の比較・`SELECT` 列（**別名省略可**）・DML の値・**`INSERT ... VALUES`（v3.72.0〜）**・**`APPLY` の `APPEND ... VALUES`（v3.88.0〜）**・`SET` / `DECLARE` の右辺など、文字列リテラルが書ける位置。`UPSERT ... VALUES` では使えません（`UPSERT ... SELECT` で注入してください。`APPEND` だけ `INSERT ... VALUES` と揃い、`UPSERT ... VALUES` は不可のままという非対称があります）。評価後は通常のリテラルとして扱われ、`WHERE` の押し下げにもそのまま乗ります
 - 基準時刻とタイムゾーンの注入は公式 API（`/flow`・エンジンオプション `asOf` / `timezone`）で行います。**省略時は実行開始時刻・実行環境のタイムゾーン**です（CLI / MCP からの実行は現状この既定のみ）
 - 日時フィールドとの範囲比較は**半開区間**で書いてください: `受注日 >= @MONTH_START() AND 受注日 < @NEXT_MONTH_START()`
 
@@ -4421,8 +4456,11 @@ dialect 1 スクリプトには追加の検証が働きます。診断は `sever
 | `KSQL1304` | サブテーブル仮想テーブルへの DML（SELECT は可） | エラー |
 | `KSQL1305` | 素の `INSERT`（冪等性のため UPSERT / MERGE を推奨。strict 指定でエラー） | 警告 / エラー |
 | `KSQL1306` | `@` なし時刻関数は as-of の対象外 | 警告 |
+| `KSQL1307` | `APPEND … SELECT` の親 `WHERE` が 1 件に決まると読めない（v3.88.0〜。重複禁止でない項目の等値・等値でない条件・項目が見つからない） | 警告 |
 
 - `KSQL1301`〜`KSQL1304` は**実行時にも書込 API を呼ぶ前に検査**され、違反はエラーで停止します（実行前は安全側に倒し、重複禁止設定を確認できない場合もエラー）
+- `KSQL1307` は警告どまりで、**確定は実行時**です（親が 2 件以上に当たると `ApplyAppendSelectMultipleParentsError` で書込 0 回。§19.1 の「APPEND … SELECT」）。
+  重複禁止かどうかは schema resolver（`validateScript` の `schema` / `client`）がフォーム定義を返せるときだけ見ます
 - 複合キー・サブテーブル DML は **dialect 0 では従来どおり**使えます（本検証は dialect 1 限定）
 
 ### 27.7 EXPLAIN の推定 API 消費

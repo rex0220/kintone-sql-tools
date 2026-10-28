@@ -15,6 +15,7 @@ export const DiagnosticCodes = {
   SUBTABLE_DML_FORBIDDEN: "KSQL1304",
   BARE_INSERT_NOT_IDEMPOTENT: "KSQL1305",
   SERVER_TIME_FUNCTION_NOT_AS_OF: "KSQL1306",
+  APPLY_APPEND_SELECT_PARENT_NOT_UNIQUE: "KSQL1307",
 } as const;
 
 /** Structured diagnostics use an independent KSQL-prefixed number space. */

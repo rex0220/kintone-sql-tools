@@ -14,18 +14,22 @@
 
 import { Lexer, LexError } from "./lexer/lexer";
 import { Parser, ParseError } from "./parser/parser";
-import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, LegacyArithExpr, ArithNode, AggOperand, AggregateRef, AggregateArgExpr, UnionStatement, WithStatement, WhereExpr, BinaryExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, CaseResult, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ExitStatement, ScalarSubquery, ScalarExpr, ScalarValueExpr, ValidateStatement, CheckGroup, ImportStatement, CsvDmlSource, JsonDmlSource, ApplyOperation, GroupByKey, KintoneFunction, WindowColumn, GenerateSeriesStatement, CteDefinition } from "./types/ast";
+import type { Statement, SelectStatement, SelectColumn, InsertStatement, InsertSelectStatement, UpdateStatement, DeleteStatement, Assignment, LegacyArithExpr, ArithNode, AggOperand, AggregateRef, AggregateArgExpr, UnionStatement, WithStatement, WhereExpr, BinaryExpr, FieldValue, FieldRef, ShowAppsStatement, DescribeStatement, UpsertStatement, UpsertSelectStatement, TableRef, ReorderStatement, OrderByKey, OrderByItem, ExplainStatement, CaseWhenExpr, CaseResult, StringFuncExpr, StringFuncArg, AssertStatement, AssertOperand, ExitStatement, ScalarSubquery, ScalarExpr, ScalarValueExpr, ValidateStatement, CheckGroup, ImportStatement, CsvDmlSource, JsonDmlSource, ApplyBlock, ApplyOperation, AppendOperation, GroupByKey, KintoneFunction, WindowColumn, GenerateSeriesStatement, CteDefinition } from "./types/ast";
 import { NO_FROM_CTE_NAME, numberLiteralText } from "./types/ast";
 import { analyzeBatch, BatchAnalysisError, type BatchAnalysis } from "./core/batch";
 import { completeInputReasons, requiresCompleteInput, type CompleteInputReason } from "./core/dmlGuard";
 import { assertApplyExecutionScope, assertApplyPublicWriteScope, assertApplyScope, isSinglePositiveRecordIdWhere, statementHasMultiValueApply } from "./core/applyPatchScope";
 import {
+  appendDefaultValue,
   buildApplyPatchPlan,
   collectApplySnapshotFields,
   flattenSubtableSnapshotRow,
   getApplyParentId,
   normalizeApplyPatchPlan,
   resolveApplyPatchMetadata,
+  type ApplyAppendSelectRows,
+  type ApplyPatchMetadata,
+  type ApplyPatchPostImageRow,
 } from "./core/applyPatchPlanner";
 import { prepareApplyPatchWrite, type PreparedApplyWrite } from "./core/applyPatchPrepare";
 import { prepareApplyInsert, type PreparedApplyInsert } from "./core/applyInsertPrepare";
@@ -825,7 +829,7 @@ export interface ExecuteOptions {
   supportsImportConfirmDetail?: boolean;
   /** APPLY parent-row hard cap. Positive safe integer; core default is 100. */
   dmlMaxRows?: number;
-  /** APPLY changed-child-row hard cap. Positive safe integer; core default is 100. */
+  /** APPLY changed-child-row hard cap. Positive safe integer; core default is 500 (DEFAULT_APPLY_MAX_SUBTABLE_ROWS). */
   dmlMaxSubtableRows?: number;
   /** Surface capability gate. Omitted/false keeps APPLY mutation unavailable. */
   allowApplyMutation?: boolean;
@@ -1243,8 +1247,8 @@ async function executeParsedStatement(
   if (unresolved !== null && !isApplyParentKlikeStatement(stmt)) {
     throw new Error(undefinedBatchVariableMessage(unresolved, "in a batch"));
   }
-  assertApplyScope("phase15b", stmt);
-  assertApplyExecutionScope("phase15b", stmt);
+  assertApplyScope("phase16a", stmt);
+  assertApplyExecutionScope("phase16a", stmt);
   validateStatementStatic(stmt);
   if (stmt.type !== "EXPLAIN") {
     await validateStatementGroupingPlanning(stmt, client, cacheContext);
@@ -1770,7 +1774,7 @@ export async function executeBatch(
     : [];
   const analysis = analyzeBatch(statements);
   // APPLY execution capability は batch の先行文を含む一切の API 呼び出し前に検査する。
-  statements.forEach((statement) => assertApplyExecutionScope("phase15b", statement));
+  statements.forEach((statement) => assertApplyExecutionScope("phase16a", statement));
   if (options.allowApplyMutation !== true && statements.some((statement) =>
     statementHasMultiValueApply(statement)
     || (statement.type === "UPSERT" && statementHasApplyMutation(statement))
@@ -2028,7 +2032,7 @@ export function createManagedStatementExecutionContext(
   assertTempTablesMaxTotalRows(options.tempTablesMaxTotalRows);
   const mutableStatements = [...statements];
   const analysis = analyzeBatch(mutableStatements);
-  mutableStatements.forEach((statement) => assertApplyExecutionScope("phase15b", statement));
+  mutableStatements.forEach((statement) => assertApplyExecutionScope("phase16a", statement));
   if (options.allowApplyMutation !== true && mutableStatements.some((statement) =>
     statementHasMultiValueApply(statement)
     || (statement.type === "UPSERT" && statementHasApplyMutation(statement))
@@ -2640,8 +2644,8 @@ export async function executeBatchStatement(
   }
 
   const resolvedStmt = resolveBatchVariableReferences(stmt, variables);
-  assertApplyScope("phase15b", resolvedStmt);
-  assertApplyExecutionScope("phase15b", resolvedStmt);
+  assertApplyScope("phase16a", resolvedStmt);
+  assertApplyExecutionScope("phase16a", resolvedStmt);
   // KLIKE の %・右辺型は、バッチ変数を実リテラルへ置換した後にも検証する。
   validateStatementStatic(resolvedStmt);
   if (
@@ -2837,8 +2841,8 @@ async function previewBatchStatement(
     stmt, client, options, cacheContext, tempTables, variables, dialect,
   } = context;
   const resolvedStmt = resolveBatchVariableReferences(stmt, variables);
-  assertApplyScope("phase15b", resolvedStmt);
-  assertApplyExecutionScope("phase15b", resolvedStmt);
+  assertApplyScope("phase16a", resolvedStmt);
+  assertApplyExecutionScope("phase16a", resolvedStmt);
   validateStatementStatic(resolvedStmt);
   if (dialect === 1 && (resolvedStmt.type === "INSERT" || resolvedStmt.type === "UPDATE" || resolvedStmt.type === "DELETE")
       && resolvedStmt.subtableCode) {
@@ -10905,6 +10909,65 @@ async function executeUpdate(
   return { type: "UPDATE", updatedCount: ids.length };
 }
 
+/** B200-2: APPLY の中の `APPEND (…) SELECT …` を列挙する（UPDATE の SUBTABLE block だけ）。 */
+function collectApplyAppendSelectOperations(
+  stmt: UpdateStatement
+): readonly { readonly block: ApplyBlock; readonly operation: AppendOperation }[] {
+  const found: { block: ApplyBlock; operation: AppendOperation }[] = [];
+  for (const block of stmt.applyBlocks ?? []) {
+    if (block.targetKind !== "SUBTABLE") continue;
+    for (const operation of block.operations) {
+      if (operation.kind === "APPEND" && operation.select !== undefined) found.push({ block, operation });
+    }
+  }
+  return found;
+}
+
+/**
+ * B200-2: ソースの SELECT を**文に 1 回**解決し、子行の値まで組み立てる。
+ * 相関参照は無いので親ごとには実行しない。列は位置で対応させ、
+ * 指定の無い子項目は項目の既定値で埋める（APPEND … VALUES と同じ規則）。
+ */
+async function resolveApplyAppendSelectRows(
+  stmt: UpdateStatement,
+  metadata: ApplyPatchMetadata,
+  client: KintoneClient,
+  options: ExecuteOptions,
+  cacheContext: string
+): Promise<ApplyAppendSelectRows | undefined> {
+  const targets = collectApplyAppendSelectOperations(stmt);
+  if (targets.length === 0) return undefined;
+  const resolved = new Map<AppendOperation, readonly ApplyPatchPostImageRow[]>();
+  for (const { block, operation } of targets) {
+    const children = metadata.childrenByTable.get(block.field);
+    if (!children) throw new Error(`InternalError: APPLY children metadata for ${block.field} is missing.`);
+    const selected = await executeSelect(operation.select!, client, options, cacheContext);
+    if (selected.columns.length !== operation.fields.length) {
+      const emptySourceHint = selected.columns.length === 0 && selected.rows.length === 0
+        ? "。結果が 0 行のため列を特定できませんでした（SELECT * を空ソースに使うと列を決定できません。明示列で指定してください）"
+        : "";
+      throw new Error(
+        `ArgumentError: SELECT の列数（${selected.columns.length}）と APPLY ${block.field} の APPEND の`
+        + `フィールド数（${operation.fields.length}）が一致しません${emptySourceHint}`
+      );
+    }
+    const columnByField = new Map(operation.fields.map((code, index) => [code, selected.columns[index]]));
+    resolved.set(operation, selected.rows.map((row) => {
+      const value: Record<string, { value: unknown }> = {};
+      for (const field of children.values()) {
+        // FILE と書けない項目は APPEND の対象にできない（APPEND … VALUES と同じ）。
+        if (field.fieldType === "FILE" || field.writable === false) continue;
+        const column = columnByField.get(field.code);
+        value[field.code] = { value: column === undefined
+          ? appendDefaultValue(field)
+          : convertProcessRowValue(row[column] ?? "", field.fieldType) };
+      }
+      return { value };
+    }));
+  }
+  return resolved;
+}
+
 async function executeApplyPatchUpdate(
   stmt: UpdateStatement,
   client: KintoneClient,
@@ -10938,11 +11001,13 @@ async function executeApplyPatchUpdate(
     throw new Error(`ArgumentError: APPLY snapshot $id ${actualId} does not match requested $id ${requestedId}.`);
   }
   requireRevision(response.records[0]);
+  const appendSelectRows = await resolveApplyAppendSelectRows(stmt, metadata, client, options, cacheContext);
   const plan = buildApplyPatchPlan({
     statement: stmt,
     snapshot: response.records[0],
     fieldInfos,
     metadata,
+    ...(appendSelectRows ? { appendSelectRows } : {}),
     evaluationContext: statementEvaluationContext(options),
   });
   const fieldIndex = buildPostImageFieldIndex(
@@ -11065,14 +11130,17 @@ async function executeMultipleParentApplyPreflight(
   );
   const fieldInfos = await getFieldsCached(stmt.appId, client, cacheContext);
   const metadata = resolveApplyPatchMetadata(stmt, fieldInfos);
+  // B200-2: APPEND ... SELECT は相関参照を持たないため、親が 1 件に決まる文だけに限る。
+  const requiresSingleParent = collectApplyAppendSelectOperations(stmt).length > 0;
   let snapshots: KintoneRecord[];
   if (usesApplyParentResidualSelection(stmt)) {
     snapshots = await selectApplyParentSnapshots(stmt, client, options, fieldInfos, cacheContext);
   } else {
     // B47 carve-out 外は従来の exact DML converter と dmlMaxRows+1 早期停止を維持する。
+    // APPEND ... SELECT は 2 件目が見つかれば止めるので、検出は 2 件で打ち切る。
     const fields = collectApplySnapshotFields(stmt, fieldInfos);
     const baseQuery = updateToGetQuery(stmt).query;
-    const detectionLimit = dmlMaxRows + 1;
+    const detectionLimit = requiresSingleParent ? 2 : dmlMaxRows + 1;
     snapshots = await fetchAll(client.getRecords, stmt.appId, baseQuery, [...fields], {
       pageSize: Math.min(500, detectionLimit),
       parallel: options.fetchParallel ?? 1,
@@ -11081,10 +11149,21 @@ async function executeMultipleParentApplyPreflight(
       onLimit: "error",
     });
   }
+  // 最初の書き込みより前（ソースの SELECT も実行する前）に止める。
+  if (requiresSingleParent && snapshots.length > 1) {
+    throw new ApplyAppendSelectMultipleParentsError(
+      `APPLY APPEND ... SELECT requires a WHERE that resolves to one parent record; `
+      + `${snapshots.length === 2 ? "2 or more" : String(snapshots.length)} parents matched.`
+    );
+  }
   if (!stmt.validateOnly && snapshots.length > dmlMaxRows) {
     throw new Error(`ArgumentError: APPLY parent rows (${snapshots.length}) exceed dmlMaxRows (${dmlMaxRows}).`);
   }
 
+  // 親 0 件ならソースの SELECT も実行しない（読取 0 回・確認も呼ばれない）。
+  const appendSelectRows = snapshots.length === 0
+    ? undefined
+    : await resolveApplyAppendSelectRows(stmt, metadata, client, options, cacheContext);
   const prepared = await prepareApplyPatchWrite({
     statement: stmt,
     snapshots,
@@ -11093,11 +11172,12 @@ async function executeMultipleParentApplyPreflight(
     dmlMaxRows,
     dmlMaxSubtableRows,
     statementNumber,
+    ...(appendSelectRows ? { appendSelectRows } : {}),
     loadNumberPrecision: () => getNumberPrecisionCached(stmt.appId, client, cacheContext),
   });
   if (stmt.validateOnly) return materializePreparedApplyValidation(stmt, prepared, fieldInfos);
 
-  assertApplyPublicWriteScope("phase15b", stmt);
+  assertApplyPublicWriteScope("phase16a", stmt);
   const diagnostic = buildPreparedApplyUpdateDiagnostic(prepared);
   if (options.confirm) {
     const applyDetail = buildApplyConfirmDetailFromDiagnostic(diagnostic);
@@ -12388,7 +12468,7 @@ function parseSql(sql: string, enableImport = false) {
   try {
     const tokens = new Lexer(sql).tokenize();
     const stmt = new Parser(tokens, { import: enableImport }).parse();
-    assertApplyScope("phase15b", stmt);
+    assertApplyScope("phase16a", stmt);
     validateStatementStatic(stmt);
     return stmt;
   } catch (e) {
@@ -15343,7 +15423,9 @@ function buildUpdatePlan(
   maxRecords = 10_000
 ): string[] {
   if (stmt.applyBlocks?.length) {
-    return buildUpdateApplyPlan(stmt, label, dmlMaxRows, dmlMaxSubtableRows, maxRecords);
+    return buildUpdateApplyPlan(
+      stmt, label, dmlMaxRows, dmlMaxSubtableRows, maxRecords, capabilities, orderPlans
+    );
   }
   const isArith  = hasArithAssignment(stmt);
   const isStringFunc = stmt.assignments.some((a) => a.value.type === "STRING_FUNC");
@@ -15405,7 +15487,9 @@ function buildUpdateApplyPlan(
   label: string | undefined,
   dmlMaxRows: number,
   dmlMaxSubtableRows: number,
-  maxRecords: number
+  maxRecords: number,
+  capabilities?: ReadonlyMap<SelectStatement, PredicateCapabilityResult>,
+  orderPlans?: ReadonlyMap<SelectStatement, CanonicalOrderPlan>
 ): string[] {
   const diagnostic = buildStaticApplyDiagnostic(stmt, dmlMaxRows, dmlMaxSubtableRows);
   const branch = diagnostic.branches[0];
@@ -15423,6 +15507,7 @@ function buildUpdateApplyPlan(
   });
   const operationKinds = [...new Set(branch.targets.flatMap((target) => target.operations.map((operation) => operation.kind)))];
   const hasRemove = operationKinds.includes("REMOVE");
+  const appendSelectSources = collectApplyAppendSelectOperations(stmt);
   const selectionPlan = applyParentExplainPlan.get(stmt);
   const selectionLines = selectionPlan ? [
     "parent selection:       safe prefilter + JS residual evaluation",
@@ -15445,6 +15530,10 @@ function buildUpdateApplyPlan(
     `apply target:           ${branch.targets.map((target) => `${target.field} (${target.targetKind})`).join(" | ")}`,
     `operations:             ${operationKinds.join(" | ")}`,
     `selector:               ${selectorKinds.join(" | ")}`,
+    ...(appendSelectSources.length > 0
+      ? [`append source:          SELECT × ${appendSelectSources.length}`
+        + "（行数は実行時に確定。親は 1 件に限る）"]
+      : []),
     "snapshot evaluation:    yes",
     "inserted rows visible:  no",
     "revision guard:         required",
@@ -15459,6 +15548,19 @@ function buildUpdateApplyPlan(
     `dmlMaxSubtableRows:     ${dmlMaxSubtableRows}`,
     "MCP mutation:           disabled in v1",
     ...formatStaticApplyDiagnostic(diagnostic),
+    // B200-2: ソースの SELECT は実行時に 1 回解決する（行数の見積もりはしない）。
+    ...appendSelectSources.flatMap(({ block, operation }) => [
+      "",
+      ...buildSelectPlan(
+        operation.select!,
+        `[source SELECT: ${block.field}]`,
+        capabilities,
+        orderPlans,
+        undefined,
+        false,
+        false
+      ),
+    ]),
   ];
 }
 
@@ -15733,6 +15835,17 @@ function formatArithNodeStr(node: ArithNode): string {
 // ============================================================
 // エラー
 // ============================================================
+
+/**
+ * B200-2: `APPEND (…) SELECT …` の親が 1 件に決まらなかった。
+ * 最初の書き込みより前に投げる（書込 0 回）。/flow では error.code に同じ名前が入る。
+ */
+export class ApplyAppendSelectMultipleParentsError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ApplyAppendSelectMultipleParentsError";
+  }
+}
 
 export class OperationCancelledError extends Error {
   constructor(

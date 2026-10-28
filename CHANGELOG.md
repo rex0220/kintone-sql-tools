@@ -3,6 +3,64 @@
 リリースごとの変更点。**本ファイルは v3.45.0 以降だけを保持する。**
 それ以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) の各タグを参照。
 
+## v3.88.0（2026-10-28）
+
+### 機能（B198: `/flow` の APPLY の書込の公開 `allowApplyMutation`）**※ 純加法（渡さなければ従来どおり `UnsupportedError`。CLI・MCP・プラグインは不変）**
+
+- `createExecutionContext` に **`allowApplyMutation?: boolean`** を追加しました。サブテーブルの行を書き換える `APPLY`
+  （`PATCH` / `APPEND` / `REMOVE`）が `/flow` で書けるようになります。
+  **`confirm` と同時でなければ受けません**（単独で渡すと `ArgumentError`）。APPLY は不可逆（既存の子行は戻せない）で文がトランザクションでないためです。
+- `FlowDmlConfirmContext` に **`applyDetail?: FlowApplyConfirmDetail`** を追加しました。APPLY の書込の文だけに付き、**文に 1 回**です
+  （100 親ごとのチャンクでは増えません）。中身は `kind` / `parentRows` / `changedSubtableRows` / `addedSubtableRows` /
+  `tables[].{table, patchRows, appendRows, removeRows}` / `deletedRows` / `deletedParentRows` / `revisionRequired` /
+  `irreversible` / `retryOnRevisionConflict` / `nonTransactional?` / `partialSuccessPossible?` / `insertedParentRows?` /
+  `initialSubtableRows?` / `updatedParentRows?` / `applyBranches?` です。内部の `applyDiagnostic` は公開しません。
+- **多値 APPLY**（チェックボックスなどの値の集合を `ADD` / `REMOVE '<値>'` で直す形）は `/flow` では開きません
+  （`allowApplyMutation: true` と併せて渡すと `createExecutionContext` が `UnsupportedError`）。開くのは行の操作の APPLY だけです。
+- 親 0 件でも **`count = 0`・空の `applyDetail`** で確認が 1 回呼ばれ、書込は 0 回です（通常の UPDATE / DELETE と同じ）。
+  `$id = <番号>` で親が無いときは `ArgumentError` です（確認は呼ばれません）。
+- `dmlMaxSubtableRows` の JSDoc の既定値を 100 → **500**（`DEFAULT_APPLY_MAX_SUBTABLE_ROWS`）に訂正しました。動きは変えていません。
+- 依頼元: kSQL アクション（依頼 KJ-5）。テスト 10 件（`src/flow-library/__tests__/b198ApplyMutation.test.ts`）。
+  MCP の APPLY mutation は引き続き常に fail-closed です。
+
+### 機能（B200-1: `APPLY` の `APPEND … VALUES` で as-of 関数）**※ 純加法**
+
+- `APPLY <テーブル> (APPEND (…) VALUES (@NOW()))` のように、as-of 関数（`@NOW()` / `@TODAY()` / `@MONTH_START()` /
+  `@NEXT_MONTH_START()`）を `APPEND` の値に書けるようになりました（素の `INSERT … VALUES` と揃えました）。
+- `UPSERT … VALUES` の as-of は従来どおり書けません（`UPSERT … SELECT` で注入してください）。`APPEND` だけ `INSERT … VALUES` と揃い、
+  `UPSERT … VALUES` は不可のままという非対称を言語リファレンスに明記しました。`DECLARE` 変数はどの `VALUES` にも書けません（従来どおり）。
+
+### 機能（B200-2: `APPLY` の `APPEND (…) SELECT …`）**※ 純加法（新しい構文。既存の `APPEND … VALUES` は不変）**
+
+- `UPDATE … APPLY <テーブル> (REMOVE ALL ROWS; APPEND (子…) SELECT …)` で、**別アプリの集計結果でサブテーブルを全置換**できるようになりました。
+  値はエンジンの中だけを通り、呼出側が行を組み立てる必要がありません。
+- **形は固定**です: `UPDATE` の APPLY だけ（`INSERT` / `UPSERT` の APPLY では parse エラー）、1 ブロックに `APPEND … SELECT` は 1 つまで、
+  同じブロックに置けるのは **`REMOVE ALL ROWS` だけで必須**（`PATCH` / 選択子つき `REMOVE` / `APPEND … VALUES` との同居は `ArgumentError`）。
+  全置換に固定しているため、同じ文を再実行しても結果は同じです。
+- **親は 1 件**です。相関参照は無く、SELECT は**文に 1 回**だけ実行します。親が 2 件以上に当たる `WHERE` は、最初の書込より前に
+  **`error.code = "ApplyAppendSelectMultipleParentsError"`** で止まります（書込 0 回・ソースの SELECT も実行しません。親の検出は 2 件で打ち切ります）。
+  親 0 件ならソースの SELECT も実行しません。
+- 列は `APPEND` の並びと SELECT の並びで**位置対応**し、変換は `INSERT … SELECT` と同じです（列数が合わなければエラー）。
+  指定しなかった子項目は項目の既定値で埋まり、`FILE` と書けない項目は対象にできません。検証は post-image 検証です。
+- 行順は `APPEND` した順＝テーブルの行順です。SELECT が 0 行なら**テーブルが空になり、親は書かれます**。
+  `dmlMaxSubtableRows` は「`REMOVE ALL ROWS` で消える既存行 + SELECT の行数」で数えます（読取そのものは `maxRecords`）。
+- 新しい公開オプションはありません（B198 の `allowApplyMutation` + `confirm` で動きます）。`VALIDATE ONLY` でも SELECT を解決します（書込 0 回）。
+- **validate の警告 `KSQL1307`** を追加しました（親の `WHERE` が 1 件に決まると読めないとき＝重複禁止でない項目の等値・等値でない条件・項目が見つからない）。
+  確定は実行時です。`EXPLAIN` は `append source:` の行と `[source SELECT: <テーブル>]` の節を出します（行数の見積もりはしません）。
+- 一時テーブル（`FROM #名前`）はソースにできません（バッチ解析が `temp table references in UPDATE are not supported yet.` で止めます）。
+- 依頼元: kSQL アクション（依頼 KJ-6）。テスト 34 件
+  （`src/flow-library/__tests__/b200AppendSelect.test.ts`・`src/core/__tests__/b200AppendSelectScope.test.ts`）。
+
+### 改善（B201: `ORDER BY SUM(x)` を書いた時点で断る）**※ 構文エラーが増えます（実行できなかった形のみ）**
+
+- 文の `ORDER BY` / `KORDER BY` のキーに**集計式そのもの**（`ORDER BY SUM(金額) DESC`・`COUNT(*)`・`MAX(…)` など）を書くと、
+  **構文エラー**になりました。エラー文が別名の付け方（`SUM(金額) AS 金額合計 … ORDER BY 金額合計 DESC`）を示します。
+- これまでは parse も validate も通り、**実行時**に `ArgumentError: ORDER BY key has no canonical comparison contract (reason=ORDER_KEY_UNRESOLVED)`
+  （`KORDER` は `KORDER_KEY_UNRESOLVED`）で必ず失敗していました。**必ず失敗する形**なので、書いた時点で分かるように前倒ししました。
+- **変わらない形**: `ORDER BY <別名>` / `ORDER BY <列名>`、**ウィンドウの `OVER (ORDER BY SUM(x) DESC)`**（v3.81.0 で開いた形。今までどおり書けます）、
+  `ORDER BY SUM(x) * 2`（従来どおり別の構文エラー）、`REORDER … BY`（対象外）。
+- B200-2 の調査中に見つけた既存の制限です。テスト 22 件（`src/parser/__tests__/b201OrderByAggregateKey.test.ts`）。
+
 ## v3.87.0（2026-10-22）
 
 ### 機能（B196: `/flow` の一時テーブルの合計の上限 `tempTablesMaxTotalRows`）**※ 純加法（省略すれば従来どおり。CLI・MCP・プラグインは不変）**

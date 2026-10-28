@@ -141,20 +141,19 @@ test("APPLY は公開の options では書けない（allowApplyMutation が公�
   expect(mock.writes()).toBe(0);
 });
 
-test("型に無い allowApplyMutation で APPLY を通しても、APPLY の詳細は公開の形で渡せないのでフックを呼ばずに止める", async () => {
+test("B198 以降: allowApplyMutation + confirm なら APPLY は書ける（詳細は b198ApplyMutation.test.ts）", async () => {
   const mock = mockClient();
   const parsed = parseScript(applySql);
   const confirm = jest.fn<ReturnType<FlowDmlConfirm>, Parameters<FlowDmlConfirm>>(() => true);
   const context = createExecutionContext({
     client: mock.value, statements: parsed.statements, meta: parsed.meta, confirm,
-    ...({ allowApplyMutation: true } as object),
+    allowApplyMutation: true,
   });
-  await expect(executeStatement(parsed.statements[0], context)).resolves.toMatchObject({
-    status: "error", error: { code: "UnsupportedError" },
-  });
+  await expect(executeStatement(parsed.statements[0], context)).resolves.toMatchObject({ status: "success" });
   await disposeExecutionContext(context);
-  expect(confirm).not.toHaveBeenCalled();
-  expect(mock.writes()).toBe(0);
+  expect(confirm).toHaveBeenCalledTimes(1);
+  expect(confirm.mock.calls[0][2]).toMatchObject({ applyDetail: { kind: "APPLY_PATCH", parentRows: 1 } });
+  expect(mock.putRecords).toHaveBeenCalledTimes(1);
 });
 
 test("AC2 LAPP の文は物理のアプリ ID と正規化した論理名で渡る", async () => {
