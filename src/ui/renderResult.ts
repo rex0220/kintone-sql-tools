@@ -39,7 +39,10 @@ export function renderResult(result: ExecuteResult, opts: DisplayOptions = {}): 
       `登録 ${result.insertedCount} 件 / 更新 ${result.updatedCount} 件${isolationSuffix(result)}`
     ) + renderApplyDiagnostic(result.diagnostic);
     case "ASSERT": return renderSuccess(`アサーション成立: ${result.condition}`);
-    case "EXIT": return renderSuccess(result.exited ? result.message : `終了条件不成立: ${result.condition}`);
+    // B204: メッセージが空（'' や空に解決した変数）のときは条件を出す
+    case "EXIT": return renderSuccess(result.exited
+      ? (result.message === "" ? `終了条件成立: ${result.condition}` : result.message)
+      : `終了条件不成立: ${result.condition}`);
     case "VALIDATION": {
       const importSuffix = result.importDetail
         ? ` / IMPORT実データpreflight / mutation候補 ${result.importDetail.parents.mutationCandidates} 件 / 書込み 0`

@@ -176,7 +176,7 @@ export const STATEMENT_SYNTAX_CATALOG = {
     capabilities: { dialect1: true },
   },
   flowAssert: {
-    template: "Flow-ASSERT (-- @ksql dialect: 1 の宣言が必要): ASSERT [WARN] condition, 'message'",
+    template: "Flow-ASSERT (-- @ksql dialect: 1 の宣言が必要): ASSERT [WARN] condition, 'message' | @messageVariable",
     examples: [
       "-- @ksql dialect: 1\nASSERT 1 = 1, 'required invariant'",
       "-- @ksql dialect: 1\nASSERT WARN 1 = 2, 'continue with warning'",
@@ -185,7 +185,7 @@ export const STATEMENT_SYNTAX_CATALOG = {
     capabilities: { dialect1: true },
   },
   flowExit: {
-    template: "Flow-EXIT (-- @ksql dialect: 1 の宣言が必要): EXIT SUCCESS IF condition, 'message'",
+    template: "Flow-EXIT (-- @ksql dialect: 1 の宣言が必要): EXIT SUCCESS IF condition, 'message' | @messageVariable",
     examples: ["-- @ksql dialect: 1\nEXIT SUCCESS IF 1 = 1, 'nothing to do'"],
     expectedTypes: [["EXIT"]],
     capabilities: { dialect1: true },

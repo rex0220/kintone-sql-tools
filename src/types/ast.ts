@@ -164,6 +164,14 @@ export type AssertOperand =
   | LegacyArithExpr;
 
 /**
+ * B204: ASSERT / EXIT のメッセージを変数で書いた形。
+ * parseScript が返すのは常に VariableRef で、バッチの変数解決
+ * （resolveBatchVariableReferences）の後に StringLiteral / NumberLiteral へ置き換わる。
+ * left / right が AssertOperand で同じことをしているのと同じ扱い。
+ */
+export type AssertMessageRef = VariableRef | StringLiteral | NumberLiteral;
+
+/**
  * ASSERT <式> <比較演算子> <式> / ASSERT <式> BETWEEN <式> AND <式>
  *
  * op が比較演算子のとき right を使い、BETWEEN のとき low / high を使う。
@@ -179,8 +187,13 @@ export interface AssertStatement {
   text: string;
   /** dialect 1: 不成立でも警告として続行する。 */
   warn?: boolean;
-  /** dialect 1: 利用者向けのアサーションメッセージ。 */
+  /** dialect 1: 利用者向けのアサーションメッセージ（リテラルで書いた形）。 */
   message?: string;
+  /**
+   * dialect 1 (B204): メッセージを変数で書いた形（`ASSERT … , @m_x`）。message とは排他で、
+   * こちらがあるとき message は無い。空文字に解決したらメッセージを省いたのと同じ扱い。
+   */
+  messageVar?: AssertMessageRef;
 }
 
 /** dialect 1: 条件成立時にバッチを正常終了する。 */
@@ -193,7 +206,10 @@ export interface ExitStatement {
   high: AssertOperand | null;
   /** 条件部の正規化テキスト。 */
   text: string;
+  /** メッセージは必須（変数で書いたときは "" が入り、解決後の文は messageVar から取る）。 */
   message: string;
+  /** dialect 1 (B204): メッセージを変数で書いた形（`EXIT SUCCESS IF … , @m_x`）。このとき message は ""。 */
+  messageVar?: AssertMessageRef;
 }
 
 // ------------------------------------------------------------

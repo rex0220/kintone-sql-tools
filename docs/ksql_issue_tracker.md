@@ -1,8 +1,8 @@
 # kSQL 課題・改善案・Issue 一括管理
 
-- 最終更新: 2026-10-28（**v3.89.0 リリース**＝B203 を §1 から履歴へ。kSQL アクションの依頼 KJ-4。同日に v3.88.0＝B198 / B200 / B201 も出荷）
-- 現在の最新リリース: **v3.89.0**（2026-10-28・**B203**＝外部注入（`DECLARE @ids = [];` + `variables` の文字列配列）で選択の集合を 1 文に渡せる。`variableArrayMaxElements` 既定 500・宣言が種類を決める fail-closed。純加法。同日の v3.88.0 = B198 / B200 / B201、前の v3.87.0 = B196、v3.86.0 = B195）。→ [リリース履歴](ksql_release_history.md)
-- 次回リリース計画: **engine の残務なし**（B203 は v3.89.0 で出荷済み）。**B197**（1 表の上限が JOIN・UNION などで効かない）は判断待ち（直すと結果が変わる）。**B199**（`/flow` のサブテーブル IMPORT の公開）は保留＝依頼元が取り下げ、ほかの依頼元の実需なし。**B202**（`npm pack --json` の検証スクリプト 2 本）は起票のみ。**未回答の依頼が 1 件**＝kSQL ジョブ実行プラグインの KJ-3（`/flow` の論理アプリの診断と計画の表示・2026-10-22）。**v3.88.0 / v3.89.0 はどちらも npm（latest = 3.89.0）と GitHub Release とも公開済み**・公開した tarball での動作確認も済み。**残るのは実機確認**（サブテーブルの行順が `ORDER BY` の順か・`confirm` の件数・集計元 0 件でテーブルが空になるか・選択 100〜200 件で URL 長が持つか）
+- 最終更新: 2026-11-06（**v3.90.0 リリース**＝B204 を §1 から履歴へ。`ASSERT` / `EXIT SUCCESS IF` のメッセージを変数で受ける。kSQL アクションの依頼 KJ-7。前回は 2026-10-28 の v3.89.0＝B203）
+- 現在の最新リリース: **v3.90.0**（2026-11-06・**B204**＝`ASSERT` / `EXIT SUCCESS IF` のメッセージを変数で受けて、外部注入した文（利用者の言語で解決した文）をそのまま出せる。純加法。前の v3.89.0 = B203、v3.88.0 = B198 / B200 / B201、v3.87.0 = B196、v3.86.0 = B195）。→ [リリース履歴](ksql_release_history.md)
+- 次回リリース計画: **engine の残務なし**（B204 は v3.90.0 で出荷）。**B197**（1 表の上限が JOIN・UNION などで効かない）は判断待ち（直すと結果が変わる）。**B199**（`/flow` のサブテーブル IMPORT の公開）は保留＝依頼元が取り下げ、ほかの依頼元の実需なし。**B202**（`npm pack --json` の検証スクリプト 2 本）は起票のみ。**未回答の依頼が 1 件**＝kSQL ジョブ実行プラグインの KJ-3（`/flow` の論理アプリの診断と計画の表示・2026-10-22）。**v3.90.0 の残務**＝npm 公開（2 段階認証のため Takashi が実行）・GitHub Release・依頼元への実装報告。v3.88.0 / v3.89.0 は npm と GitHub Release とも公開済みで、**残るのは実機確認**（サブテーブルの行順が `ORDER BY` の順か・`confirm` の件数・集計元 0 件でテーブルが空になるか・選択 100〜200 件で URL 長が持つか）
 - 目的: 課題・改善案・Issue の**進捗 / 効果 / リリースバージョン**を1か所で俯瞰する。個別の詳細は各文書へリンク。
 
 ## 運用ルール
@@ -67,11 +67,11 @@
 
 | バージョン | 内容 |
 |---|---|
+| **v3.90.0** | **B204 `ASSERT` / `EXIT SUCCESS IF` のメッセージを変数で受ける（純加法）**＝`ASSERT …, @m_x` / `EXIT SUCCESS IF …, @m_x` と書けて、外部注入（`/flow` の `variables`・CLI の `--var`・MCP の `variables`）した文がそのままメッセージになる（依頼元の 3 か国語対応）。受けるのは変数 1 個だけ（式・連結・関数・数値は構文エラー）。配列・未宣言・`RELATIVE_DATE` の変数はレコード API 0 回で拒否。空に解決したメッセージは省いたのと同じ（リテラルの `''` も同じ規則にしたので、エラー文末尾の空白・空の `WARN` の警告・空の `EXIT` の表示の 3 点だけ表示が変わる）。EXPLAIN の計画には変数の名前が出る（注入値は出さない）。AST は `messageVar` を足す純加法で、`message` しか見ない読み手は不変。付随で単文の未解決変数を相対日付の計画より前に拒否。2026-11-06 |
 | **v3.89.0** | **B203 外部注入で文字列配列**＝`DECLARE @ids = [];` と宣言した変数に `/flow` の `variables` から文字列配列を注入でき、`IN @ids` / `NOT IN @ids` が `in ("311","301")` へ押し下がる。宣言が種類を決める fail-closed（食い違い・文字列以外・要素数の超過は `createExecutionContext` で `ArgumentError`）。上限は `variableArrayMaxElements`（既定 500。実際の壁は URL 長）。空配列は 0 件でレコード API を呼ばない。CLI / MCP は文字列のまま。2026-10-28 |
 | **v3.88.0** | **B198 `/flow` の APPLY の書込の公開**＝`allowApplyMutation` は `confirm` と同時のときだけ受け、確認に `applyDetail`（親件数・テーブルごとの patch / append / remove の行数）を文に 1 回渡す。多値 APPLY は非公開。**B200**＝`UPDATE … APPLY (REMOVE ALL ROWS; APPEND (…) SELECT …)` で別アプリの集計結果でサブテーブルを全置換（単一親・`REMOVE ALL ROWS` 必須・2 件以上は書く前に `ApplyAppendSelectMultipleParentsError`）／`APPEND … VALUES` の as-of 関数。**B201**＝`ORDER BY SUM(x)` を構文エラーに（実行できなかった形のみ）。B199 は依頼元の取り下げで保留。2026-10-28 |
 | **v3.87.0** | B196 **`/flow` の一時テーブルの合計の上限 `tempTablesMaxTotalRows`（純加法）**＝残っている一時テーブル（エラー表を含む）の行数の合計を、表の登録・エラー表への追加の前に出来た行数で確かめ、超える文は `TempTableTotalLimitError`（登録しない・書込 0 回）。`CREATE TEMP TABLE` の読取も残りで止める（集計も読む行数で数える）。`metrics.tempTableRows`。B197（1 表の上限の穴）は起票のみ。2026-10-22 |
 | **v3.86.0** | B195 **`/flow` の書込前の確認フック `confirm`（純加法）**＝`createExecutionContext` の `confirm` が書込の直前に件数・物理のアプリ ID・論理名・`signal` 付きで呼ばれ、`true` のときだけ書く。期限・dispose が答えより先に来たら `signal` を中止して答えを待たずに終える。`/flow` は `confirm` の有無によらず、期限切れ・dispose のあとに次のチャンクを書かない。APPLY の詳細は公開しない・IMPORT との併用は `ArgumentError`。2026-10-22 |
-| **v3.85.0** | B193 **`HAVING` から同じ SELECT のウィンドウ別名を参照しても止まらず空文字比較になっていた修正（結果が変わる）**＝`HAVING 順位 <= 5` が全件・`= 1` が 0 件を静かに返していた形を、静的検証・EXPLAIN・実行で `HAVING_WINDOW_ALIAS` として実行前に拒否。集計別名の HAVING・段を分けた WHERE・文レベルの ORDER BY は不変。Pro Ver.2 の取り込み確認で発見（2026-09-17） |
 | **v3.69.0** | B168 **Flow dialect 1 完成（Stage 4-6・新機能・opt-in・正式提供）**＝CLI/MCP/プラグインで実行可（v3.68.0 の到達面の穴を解消）・@時刻関数と `asOf`/`timezone` 注入・validate 拡張（updateKey/複合キー/サブテーブル DML/strict・診断コード KSQL1xxx）・EXPLAIN 分解形推定・公式 API `/flow`（文単位実行・書込可能クライアント）・MCP diagnostics/scriptMeta・§27/R18/README。dialect 0 は完全不変。 |
 | **v3.68.0** | B168 **Flow dialect 1 の解析基盤（Stage 1-3・新機能・opt-in・実験的）**＝`-- @ksql dialect: 1` 宣言時のみ有効。ヘッダ解析・`ASSERT , 'msg'`/WARN・`EXIT SUCCESS IF`・エイリアス（TEMP 裸名・`KEY()`・`MERGE`→UPSERT 正規化＝AST 痕跡ゼロ）。既存構文は完全不変。公式 API/MCP/文書対応は Stage 4-6 で。 |
 

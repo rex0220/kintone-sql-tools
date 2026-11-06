@@ -3,6 +3,32 @@
 リリースごとの変更点。**本ファイルは v3.45.0 以降だけを保持する。**
 それ以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) の各タグを参照。
 
+## v3.90.0（2026-11-06）
+
+### 機能（B204: `ASSERT` / `EXIT SUCCESS IF` のメッセージを変数で受ける）**※ 純加法（リテラルで書いた既存の SQL と、AST の `message` しか見ない既存の読み手は不変）**
+
+- **`ASSERT <条件>, @m_x;`**（`ASSERT WARN` と `BETWEEN` の形も同じ）と **`EXIT SUCCESS IF <条件>, @m_x;`** を書けるようになりました。
+  `DECLARE` した変数へ外部注入（`/flow` の `variables`・CLI の `--var`・MCP の `variables`）した文が、そのまま利用者向けのメッセージになります。
+  **呼び出し側が利用者の言語で解決した文を渡せば、同じ SQL のままメッセージだけ差し替えられます**（依頼元の 3 か国語対応）。
+- **受けるのは変数参照 1 個だけ**です。連結（`||`）・関数・数値リテラルは書けません
+  （`ASSERT のメッセージに式は書けません（文字列リテラルか変数 @名前 を 1 つだけ）`）。行の文脈が無いのでフィールド参照もできません。
+- AST は**純加法**＝`AssertStatement.messageVar` / `ExitStatement.messageVar`（`AssertMessageRef = VariableRef | StringLiteral | NumberLiteral`）を足しました。
+  `parseScript` が返すのは常に `{ type: "VARIABLE", name: "m_x" }`（**名前は小文字・`@` なし**）で、リテラルで書いた形は従来どおり `message` に入ります。
+  `EXIT` は `message` が必須なので、変数で書いた形では **`message: ""`** が入ります（`message` しか見ない読み手には「固定の文は無い」と見え、既定の文に落ちます）。
+- **空に解決したメッセージは「省いた」のと同じ**扱いです（`AssertError` は既定の文だけ・`ASSERT WARN` の `warning` も既定の文・`EXIT` の結果は `message: ""`）。
+  **リテラルの `''` にも同じ規則を効かせた**ので、表示が変わるのは次の 3 点です:
+  ①`ASSERT …, '';` のエラー文の末尾の空白が消える ②`ASSERT WARN …, '';` の `warning` が `""` から既定の文になる
+  ③`EXIT SUCCESS IF …, '';` の CLI / プラグイン UI の表示が、空の本文から `終了条件成立: <条件>` になる。
+- **配列を宣言した変数・未宣言の変数・`RELATIVE_DATE` の変数**をメッセージに書いた形は、**レコード API を 1 回も呼ぶ前**に拒否します
+  （`ParseError: array variable @ids can only be used as IN @ids.` など。バッチ解析が既に持っていた検査がそのまま効きます）。
+- **`EXPLAIN` の計画には変数の名前（`, '@m_x'`）が出ます**＝外部注入した値は計画の文に出しません
+  （as-of 関数（`@NOW()`）は従来どおり基準時刻の実値が出ます。`WHERE 日付 = @TODAY()` の押し下げと同じ扱い）。
+- 付随: **単文実行の未解決変数を、相対日付の計画（フォーム定義の取得）より前に拒否**するよう検査順を直しました。
+  これで「未解決の変数がある文は API を 1 回も呼ばずに止まる」が全文型で成り立ちます（診断の文言は従来どおり）。
+- 依頼元: kSQL アクション（依頼 KJ-7。`ASSERT` / `EXIT` のメッセージだけが 1 言語のまま取り残されるのが動機）。
+  テスト 48 件（`src/parser/__tests__/b204AssertMessageVariable.test.ts`・`src/__tests__/b204AssertMessageVariable.test.ts`・
+  `src/flow-library/__tests__/b204AssertMessageVariable.test.ts`）。Codex レビュー（BLOCKER 0 / MAJOR 2 / MINOR 3）は全件処置済み。
+
 ## v3.89.0（2026-10-28）
 
 ### 機能（B203: 外部注入（`DECLARE` + `variables`）で文字列配列を受ける）**※ 純加法（文字列を渡す既存の呼び出しは型も動きも不変。CLI・MCP・プラグインは不変）**
