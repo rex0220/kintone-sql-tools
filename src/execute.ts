@@ -85,7 +85,7 @@ import {
   type RecursiveCteLimits,
 } from "./core/recursiveCte";
 import {
-  buildJoinKeyPrefilterQueries,
+  buildJoinKeyPrefilterPredicates,
   JOIN_KEY_IN_CHUNK_SIZE,
   planJoinKeyPrefilter,
 } from "./core/optimization/joinKeyPrefilter";
@@ -119,6 +119,7 @@ import {
   SelectMode,
 } from "./converter/selectToKintone";
 import { whereToKintone } from "./converter/whereToKintone";
+import { serializeQueryForApp, type GeneratedPredicate } from "./converter/queryForApp";
 import {
   insertToPostBatches,
   updateToGetQuery,
@@ -8337,7 +8338,11 @@ async function resolveUpsertTargets(
     ? [...new Set(["$id", ...keyFields, ...previewFields])]
     : ["$id", ...keyFields];
   for (const chunk of splitChunks([...batchFirstKeys], UPSERT_IN_CHUNK_SIZE)) {
-    const query = `${keyFields[0]} in (${chunk.map(sqlQuote).join(",")})`;
+    // B205 段階 1: 生成述語も serializeQueryForApp を通す
+    const query = serializeQueryForApp({
+      appId,
+      generated: [{ field: keyFields[0], op: "in", values: chunk }],
+    });
     const records = await fetchAll(client.getRecords, appId, query, fields, { maxRecords, parallel });
     for (const rec of records) {
       const id = Number(rec["$id"]?.value);
@@ -8349,7 +8354,10 @@ async function resolveUpsertTargets(
 
   // 空文字キーを含む行は従来どおり行ごとに検索
   for (const parts of perRowKeys) {
-    const query = keyFields.map((f, i) => `${f} = ${sqlQuote(parts[i])}`).join(" and ");
+    const generated: GeneratedPredicate[] = keyFields.map((f, i) => ({
+      field: f, op: "=" as const, values: [parts[i]],
+    }));
+    const query = serializeQueryForApp({ appId, generated });
     const perRowFields = previewFields
       ? [...new Set(["$id", ...previewFields])]
       : ["$id"];
@@ -8488,7 +8496,9 @@ async function tryFetchJoinRecordsBySourceKeys(
   }
   if (keyPlan.kind === "RANGE_CANDIDATE") return null;
 
-  const prefilterQueries = buildJoinKeyPrefilterQueries(keyPlan, joinField, sqlQuote);
+  // B205 段階 1: 生成述語も serializeQueryForApp を通す（選択肢の値の変換を 1 か所に集めるため）
+  const prefilterQueries = buildJoinKeyPrefilterPredicates(keyPlan, joinField)
+    .map((generated) => serializeQueryForApp({ appId: join.table.appId, generated }));
   if (prefilterQueries.length === 0) {
     warnings.add(
       `JOINキーが 0 件のため ON 最適化をスキップし、JOIN先を全件取得します（上限 ${JOIN_IN_MAX_KEYS} 件）。`
@@ -13141,10 +13151,12 @@ async function buildExplainWhereAnalysis(
           );
           if (runtimePlanConsumesJoin) continue;
         }
-        const queries = buildJoinKeyPrefilterQueries(plan, joinField, sqlQuote);
+        // B205 段階 1: EXPLAIN も実行と同じ口でクエリを作る（計画と実際に送る文を一致させる）
+        const queries = buildJoinKeyPrefilterPredicates(plan, joinField)
+          .map((generated) => serializeQueryForApp({ appId: join.table.appId, generated }));
         const additionalCondition = resolvedPushdownPlan.joinConditions.get(joinAlias);
         const additionalQuery = additionalCondition
-          ? whereToKintone(additionalCondition)
+          ? serializeQueryForApp({ appId: join.table.appId, where: additionalCondition })
           : undefined;
         const additionalRelation = resolvedPushdownPlan.joinRelations.get(joinAlias);
         joinKeyPlans.set(joinAlias, { plan, queries, additionalQuery, additionalRelation });

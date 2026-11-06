@@ -1,3 +1,4 @@
+import type { GeneratedPredicate } from "../../converter/queryForApp";
 import type { ResolvedFieldSemantics } from "../fieldSemantics";
 import { compareCanonicalValues } from "../scalarCompare";
 import {
@@ -36,22 +37,28 @@ export interface JoinKeyPrefilterInput {
 
 export const JOIN_KEY_IN_CHUNK_SIZE = 50;
 
-/** Execution と EXPLAIN で共有する JOIN キー prefilter query serializer。 */
-export function buildJoinKeyPrefilterQueries(
+/**
+ * B205 段階 1: Execution と EXPLAIN が共有する JOIN キー prefilter を、**文字列になる前の述語**で返す。
+ * 1 要素が 1 本のクエリ（`and` で結ぶ述語の並び）。文字列化は `serializeQueryForApp` に任せる
+ * （選択肢の値の変換を 1 か所に集めるため。段階 2 で効く）。
+ */
+export function buildJoinKeyPrefilterPredicates(
   plan: JoinKeyPrefilterPlan,
-  field: string,
-  quoteValue: (value: string) => string
-): string[] {
+  field: string
+): GeneratedPredicate[][] {
   if (plan.kind === "RANGE") {
-    return [`${field} >= ${quoteValue(plan.min)} and ${field} <= ${quoteValue(plan.max)}`];
+    return [[
+      { field, op: ">=", values: [plan.min] },
+      { field, op: "<=", values: [plan.max] },
+    ]];
   }
   if (plan.kind !== "IN") return [];
-  const queries: string[] = [];
+  const groups: GeneratedPredicate[][] = [];
   for (let offset = 0; offset < plan.values.length; offset += JOIN_KEY_IN_CHUNK_SIZE) {
     const chunk = plan.values.slice(offset, offset + JOIN_KEY_IN_CHUNK_SIZE);
-    queries.push(`${field} in (${chunk.map(quoteValue).join(",")})`);
+    groups.push([{ field, op: "in", values: chunk }]);
   }
-  return queries;
+  return groups;
 }
 
 const DATETIME_TYPES = new Set(["DATETIME", "CREATED_TIME", "UPDATED_TIME"]);
