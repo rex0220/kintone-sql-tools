@@ -128,7 +128,8 @@ describe("ksql_app_metadata MCP surface", () => {
       // JOIN の行を §7 が保証する「INNER JOIN のみ・FROM → JOIN 先」の範囲に揃えた）。
       // B184（v3.81.0）: 5 行目を「集計と同じ SELECT に書けない」から「書ける・OVER の参照はグループキー・
       // 集計別名・集計式・GROUPING() に限る」へ（+17 語）。
-      expect(budget).toEqual({ total: 952, catalog: 347, prose: 605 });
+      // B204: Flow-ASSERT / Flow-EXIT の文型に `| @messageVariable` を追加（catalog +4 語）。
+      expect(budget).toEqual({ total: 956, catalog: 351, prose: 605 });
 
       // 以下の上限値には外部根拠がない（B81 §7）。MCP 仕様は instructions を
       // "Optional instructions for the client" と書くだけでサイズ規定を持たず、

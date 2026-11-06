@@ -3499,6 +3499,38 @@ class ScalarSubqueryError extends Error {
 }
 
 /**
+ * B204: ASSERT / EXIT の利用者向けメッセージ。
+ *
+ * - `messageVar` は、バッチの変数解決（resolveBatchVariableReferences）で
+ *   STRING / NUMBER リテラルへ置き換わっている。単文実行には変数が無いので、
+ *   未解決のまま届いたら条件を読む前に拒否する。
+ * - 空文字は「メッセージを省いた」のと同じに正規化する（リテラルの '' も同じ）。
+ */
+function assertMessageText(stmt: AssertStatement | ExitStatement): string | undefined {
+  const node = stmt.messageVar;
+  if (node !== undefined) {
+    if (node.type === "VARIABLE") {
+      throw new Error(`ParseError: unresolved batch variable @${node.name}.`);
+    }
+    const value = node.type === "NUMBER" ? numberLiteralText(node) : node.value;
+    return value === "" ? undefined : value;
+  }
+  return stmt.message === undefined || stmt.message === "" ? undefined : stmt.message;
+}
+
+/**
+ * B204: EXPLAIN の計画へ書き戻すメッセージ。
+ * EXPLAIN はスカラーの DECLARE を `@名前` のプレースホルダーへ解決するので、
+ * 変数で書いたメッセージは**名前**が出る（注入した値は計画の文に出さない）。
+ * 未解決のまま届いた場合も名前を出す（EXPLAIN は投げない）。
+ */
+function explainFlowMessageText(stmt: AssertStatement | ExitStatement): string | undefined {
+  const node = stmt.messageVar;
+  if (node?.type === "VARIABLE") return `@${node.name}`;
+  return assertMessageText(stmt);
+}
+
+/**
  * ASSERT 文を評価する。条件が false なら AssertError を投げる。
  * サブクエリの一時テーブル参照はバッチ実行時のみ解決できる（tempTables 経由）。
  */
@@ -3509,6 +3541,8 @@ async function executeAssert(
   cacheContext: string,
   tempTables?: Map<string, MaterializedTable>
 ): Promise<AssertResult> {
+  // メッセージの変数が未解決なら、レコードを読む前に拒否する（B204）
+  const message = assertMessageText(stmt);
   const evaluation = await evaluateAssertCondition(stmt, client, options, cacheContext, tempTables);
   if (!evaluation.passed) {
     if (stmt.warn === true) {
@@ -3516,10 +3550,10 @@ async function executeAssert(
         type: "ASSERT",
         condition: stmt.text,
         passed: false,
-        warning: stmt.message ?? `assertion failed: ${stmt.text} (actual: ${evaluation.actual}).`,
+        warning: message ?? `assertion failed: ${stmt.text} (actual: ${evaluation.actual}).`,
       };
     }
-    const suffix = stmt.message !== undefined ? ` ${stmt.message}` : "";
+    const suffix = message !== undefined ? ` ${message}` : "";
     throw new AssertError(`assertion failed: ${stmt.text} (actual: ${evaluation.actual}).${suffix}`);
   }
   // 既存 ASSERT 成功結果の列挙可能な形は変えない。
@@ -3533,12 +3567,15 @@ async function executeExit(
   cacheContext: string,
   tempTables?: Map<string, MaterializedTable>
 ): Promise<ExitResult> {
+  // メッセージの変数が未解決なら、レコードを読む前に拒否する（B204）
+  const message = assertMessageText(stmt);
   const evaluation = await evaluateAssertCondition(stmt, client, options, cacheContext, tempTables);
   return {
     type: "EXIT",
     condition: stmt.text,
     exited: evaluation.passed,
-    message: stmt.message,
+    // 空のメッセージは "" のまま返す（呼び出し側が自分の既定の文に落とせるように）
+    message: message ?? "",
   };
 }
 
@@ -14215,8 +14252,9 @@ function buildBatchStatementPlan(
     );
   }
   if (stmt.type === "ASSERT") {
+    const message = explainFlowMessageText(stmt);
     const lines: string[] = [
-      `ASSERT${stmt.warn === true ? " WARN" : ""} ${stmt.text}${stmt.message !== undefined ? `, '${stmt.message.replace(/'/g, "''")}'` : ""}`,
+      `ASSERT${stmt.warn === true ? " WARN" : ""} ${stmt.text}${message !== undefined ? `, '${message.replace(/'/g, "''")}'` : ""}`,
       stmt.warn === true
         ? "  check:         実行時に条件評価（不成立は警告として記録し、後続文を続行）"
         : "  check:         実行時に条件評価（不成立は AssertError でバッチ停止、以降の文は skipped）",
@@ -14238,7 +14276,7 @@ function buildBatchStatementPlan(
   }
   if (stmt.type === "EXIT") {
     const lines: string[] = [
-      `EXIT SUCCESS IF ${stmt.text}, '${stmt.message.replace(/'/g, "''")}'`,
+      `EXIT SUCCESS IF ${stmt.text}, '${(explainFlowMessageText(stmt) ?? "").replace(/'/g, "''")}'`,
       "  check:         実行時に条件評価（成立時は正常終了し、以降の文は skippedReason: exit）",
     ];
     const subqueries = [stmt.left, stmt.right, stmt.low, stmt.high].filter(

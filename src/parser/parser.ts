@@ -144,6 +144,9 @@ type ExpandedBetween = LogicalExpr;
 // MERGE はパース時に既存の UPSERT_SELECT へ完全に正規化する。
 type NormalizedMergeUpsert = UpsertSelectStatement;
 
+// B204: ASSERT / EXIT のメッセージ（リテラルか変数参照のどちらか一方）。
+type FlowMessage = { message?: string; messageVar?: VariableRef };
+
 export const PARSER_SCALAR_FUNCTION_TOKEN_MAP: Readonly<Partial<Record<TokenKind, StringFuncName>>> = Object.freeze({
   [TokenKind.UPPER]: "UPPER",
   [TokenKind.LOWER]: "LOWER",
@@ -1092,7 +1095,7 @@ export class Parser {
       type: "ASSERT",
       ...condition,
       ...(warn ? { warn: true } : {}),
-      ...(message !== undefined ? { message } : {}),
+      ...message,
     };
   }
 
@@ -1112,11 +1115,17 @@ export class Parser {
     if (!this.consume(TokenKind.COMMA)) {
       throw new ParseError("EXIT SUCCESS IF には末尾のメッセージ文字列が必要です", this.peek());
     }
-    const message = this.expect(TokenKind.STRING, "EXIT SUCCESS IF のメッセージには文字列リテラルが必要です");
-    return { type: "EXIT", ...condition, message: message.value };
+    const message = this.parseFlowMessageBody("EXIT SUCCESS IF");
+    return {
+      type: "EXIT",
+      ...condition,
+      // EXIT の message は必須のため、変数で書いた形では "" を入れる（B204）
+      message: message.message ?? "",
+      ...(message.messageVar !== undefined ? { messageVar: message.messageVar } : {}),
+    };
   }
 
-  private parseAssertCondition(): Omit<AssertStatement, "type" | "warn" | "message"> {
+  private parseAssertCondition(): Omit<AssertStatement, "type" | "warn" | "message" | "messageVar"> {
     const condStart = this.pos;
     const left = this.parseAssertOperand();
 
@@ -1151,10 +1160,41 @@ export class Parser {
   }
 
   /** ASSERT の dialect 1 メッセージ。カンマが無ければ既存形式。 */
-  private parseFlowMessage(): string | undefined {
-    if (!this.consume(TokenKind.COMMA)) return undefined;
+  private parseFlowMessage(): FlowMessage {
+    if (!this.consume(TokenKind.COMMA)) return {};
     this.requireDialect1(this.prev());
-    return this.expect(TokenKind.STRING, "ASSERT のメッセージには文字列リテラルが必要です").value;
+    return this.parseFlowMessageBody("ASSERT");
+  }
+
+  /**
+   * B204: ASSERT / EXIT のメッセージ。文字列リテラル 1 個、または変数参照 1 個。
+   * 連結（`||`）・関数・数値リテラルは受けない（式ではない）。
+   */
+  private parseFlowMessageBody(label: "ASSERT" | "EXIT SUCCESS IF"): FlowMessage {
+    const tok = this.peek();
+    if (tok.kind === TokenKind.VARIABLE) {
+      this.advance();
+      const messageVar = this.finishVariableReference(tok);
+      this.rejectFlowMessageExpression(label);
+      return { messageVar };
+    }
+    const message = this.expect(
+      TokenKind.STRING,
+      `${label} のメッセージには文字列リテラルまたは変数（@名前）が必要です`
+    ).value;
+    this.rejectFlowMessageExpression(label);
+    return { message };
+  }
+
+  /** B204: メッセージは式ではないので、連結・算術が続いたら専用の診断で止める。 */
+  private rejectFlowMessageExpression(label: "ASSERT" | "EXIT SUCCESS IF"): void {
+    const next = this.peek();
+    if (next.kind === TokenKind.CONCAT_OP || this.isArithOp(next.kind)) {
+      throw new ParseError(
+        `${label} のメッセージに式は書けません（文字列リテラルか変数 @名前 を 1 つだけ）`,
+        next
+      );
+    }
   }
 
   private requireDialect1(tok: Token): void {

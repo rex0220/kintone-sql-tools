@@ -398,6 +398,21 @@ SELECT $id, 金額 FROM LAPP_受注 WHERE 顧客コード = @cust AND $id IN @id
   `IN` の並びになるため、**実際の壁は URL の長さ**です（3 桁の ID なら 200 件でエンコード後 2.5 KB・500 件で 6.4 KB・日本語は 1 文字 9 字）。
 - CLI の `--var` と MCP の `variables` は従来どおり**文字列だけ**です。
 
+**`ASSERT` / `EXIT SUCCESS IF` のメッセージにもスカラーの変数を書けます**（B204）。
+利用者の言語で解決した文を注入すれば、同じ SQL のままメッセージだけ差し替えられます。
+
+```sql
+-- @ksql dialect: 1
+DECLARE @m_no_stock = '';
+ASSERT (SELECT COUNT(*) FROM LAPP_在庫 WHERE 残数 < 0) = 0, @m_no_stock;
+```
+
+- 受けるのは**変数参照 1 つだけ**（連結・関数・数値リテラルは不可）。空に解決したらメッセージを省いたのと同じです。
+- 不成立のときは `AssertError` の文末に、`ASSERT WARN` では `warning` に、`EXIT` では結果の `message` に入ります。
+- **`explainScript` の計画には変数の名前（`, '@m_no_stock'`）が出ます**（注入した値は計画の文に出しません）。
+- AST は `AssertStatement.messageVar` / `ExitStatement.messageVar`（`parseScript` が返すのは
+  `{ type: "VARIABLE", name: "m_no_stock" }`。**名前は小文字・`@` なし**）。リテラルで書いた形は従来どおり `message` です。
+
 ### APPLY の書込（`allowApplyMutation`・B198）
 
 サブテーブルの行を書き換える `APPLY`（`PATCH` / `APPEND` / `REMOVE`）は、**`allowApplyMutation: true` と `confirm` を同時に渡したときだけ**書けます。
