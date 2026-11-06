@@ -53,8 +53,17 @@ export interface AppOptionNameMap {
   /**
    * プロセス管理のステータスの対応（`fields` にも項目コードで入っているが、
    * **順序表の正本を切り替える**ときは項目コードを知らずに引きたいので別に持つ）。
+   * プロセス管理が無効なアプリでは `undefined`。
    */
   readonly status?: FieldOptionNames;
+  /**
+   * ステータスの順序表（**既定名** → 画面の並び）。`status` と**同じ 1 枚のスナップショット**から作る。
+   *
+   * 2 回目の実装レビューの MAJOR: `getProcessStatuses`（同じ endpoint の**別の取得**）と
+   * 突き合わせていたので、取得の間に設定が変わると正しい応答同士で落ちた。
+   * 正本をこの 1 枚に決めて、突き合わせをやめた。
+   */
+  readonly statusOrder?: ReadonlyMap<string, number>;
 }
 
 /** 表示名の取得で使う生のメタデータ（クライアントが返す形）。 */
@@ -62,12 +71,23 @@ export interface OptionNameSource {
   readonly appId: number;
   /** `form/fields`（`lang: "user"`）を平坦化したもの */
   readonly fields: readonly KintoneFieldInfo[];
+  /**
+   * プロセス管理が有効か（`app/status.json` の `enable`）。
+   *
+   * **`form/fields` の `STATUS` 項目はプロセス管理が無効でも返る**（`enabled: false`。
+   * 2026-11-06 にアプリ 4392 で確認＝`enable: false` / `states: null` でも項目は返る）。
+   * `flattenFormFieldProperties` は `enabled` を落とすので、**項目の有無で判定してはいけない**。
+   * ステータスの対応表が要るかどうかは必ずこの値で決める（2 回目の実装レビューの BLOCKER）。
+   */
+  readonly processEnabled: boolean;
   /** `app/status.json`（`lang: "user"`）。キー（既定名）と `name`（表示名）の対。プロセス管理が無ければ null */
   readonly statusStates: readonly OptionNamePair[] | null;
 }
 
 /** `app/status.json`（`lang: "user"`）の生の形。**キーが既定名・`name` が表示名**。 */
 export interface RawLocalizedStatusStates {
+  /** プロセス管理が有効か。無効なら `states` は見ない */
+  readonly enable?: unknown;
   readonly states: Readonly<Record<string, { readonly name?: unknown; readonly index?: unknown }>> | null;
 }
 
@@ -83,7 +103,9 @@ export function optionNameSourceFrom(
   userFields: readonly KintoneFieldInfo[],
   status: RawLocalizedStatusStates | null
 ): OptionNameSource {
-  const rawStates = status?.states ?? null;
+  // プロセス管理が無効なら状態は見ない（無効でも `states` を返す面があるため）
+  const processEnabled = status?.enable === true;
+  const rawStates = processEnabled ? status?.states ?? null : null;
   const statusStates = rawStates === null
     ? null
     : Object.entries(rawStates).map(([canonical, state]) => {
@@ -104,7 +126,7 @@ export function optionNameSourceFrom(
         }
         return { canonical, display: state.name, index };
       });
-  return { appId, fields: userFields, statusStates };
+  return { appId, fields: userFields, processEnabled, statusStates };
 }
 
 export class OptionNameMapError extends Error {
@@ -286,23 +308,31 @@ export function buildAppOptionNameMap(
     fields.set(field.code, fieldOptionNamesFrom(field.code, pairs));
   }
 
-  // プロセス管理が有効なアプリだけ `form/fields` に STATUS が入る。入っているのに
-  // ステータスの対応が無ければ「ステータスだけ表示名のまま」になるので止める（実装レビューの MAJOR）。
+  // **プロセス管理が有効かは `app/status.json` の `enable` で決める**（`form/fields` の STATUS 項目は
+  // 無効でも返るため。`OptionNameSource.processEnabled` の説明＝2 回目のレビューの BLOCKER）。
+  // 有効なのに対応が無ければ「ステータスだけ表示名のまま」になるので止める。
   const statusField = canonicalFields.find((field) => field.fieldType === STATUS_FIELD_TYPE);
-  if (statusField !== undefined) {
+  let statusOrder: ReadonlyMap<string, number> | undefined;
+  if (source.processEnabled && statusField !== undefined) {
     if (source.statusStates === null || source.statusStates.length === 0) {
       throw new OptionNameMapError(
-        `field ${statusField.code}: the app has process management (getFields returns a STATUS field) `
-        + "but the client returned no localized status names."
+        `field ${statusField.code}: the app has process management enabled but the client returned `
+        + "no localized status names."
       );
     }
     const pairs = [...source.statusStates].sort((a, b) => a.index - b.index);
     if (pairs.some((pair) => pair.canonical !== pair.display)) identity = false;
     status = fieldOptionNamesFrom(statusField.code, pairs);
     fields.set(statusField.code, status);
+    // 順序表も**この 1 枚から**作る（既定名 → 並び）。別の取得と突き合わせない。
+    statusOrder = new Map(pairs.map((pair) => [pair.canonical, pair.index]));
   }
 
-  return { appId, identity, fields, ...(status === undefined ? {} : { status }) };
+  return {
+    appId, identity, fields,
+    ...(status === undefined ? {} : { status }),
+    ...(statusOrder === undefined ? {} : { statusOrder }),
+  };
 }
 
 /** 対応表から「既定名 → 表示名」の変換関数を作る（知らない項目・値はそのまま）。 */

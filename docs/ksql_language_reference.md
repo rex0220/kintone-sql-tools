@@ -4353,8 +4353,13 @@ SELECT $id FROM LAPP_受注 WHERE ステータス = '未処理';
 - **言語ごとの表示名を設定していないアプリでは何も変わりません**（変換が恒等なので、包みも通しません）。
   追加の通信は `"canonical"` のときだけ、アプリごとに `form/fields`（`lang: "user"`）と
   `app/status.json`（`lang: "user"`）の 2 回です（呼出し単位でキャッシュ）。
-- **`client.getOptionNames` が要ります**（`/flow` の `createKintoneClient` は実装済み）。
-  無いクライアントに `"canonical"` を渡すと `createExecutionContext` が `ArgumentError`。
+  後者はプロセス管理の取得と**同じ 1 枚を使い回す**ので、`getProcessStatuses` は呼ばれません
+  （`ExecuteMetrics.processStatusCalls` は**メソッドの呼出し回数**で、`app/status.json` の
+  通信回数ではありません）。
+- **同梱のクライアントが要ります**（`/flow` の `createKintoneClient`）。`"canonical"` は内部で
+  `client.getOptionNames` を使いますが、**これは公開の `FlowKintoneClient` には入れていません**＝
+  **自作のクライアントでは `"canonical"` を使えません**（自作クライアントは `"raw"` のまま）。
+  実装の無いクライアントに `"canonical"` を渡すと `createExecutionContext` が `ArgumentError`。
   対応表が一意に決まらない場合（表示名の重複・`index` の不一致・既定名との交差など）も、
   **レコードを 1 件も読む前に** `ArgumentError` です。
 - **`EXPLAIN` とは併用できません**（`createExecutionContext` / `explainScript` が `ArgumentError`）。

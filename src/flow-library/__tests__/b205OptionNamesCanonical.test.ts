@@ -81,6 +81,7 @@ function mockClient() {
       return {
         appId,
         fields: fieldsFor("user"),
+        processEnabled: true,
         statusStates: [
           { canonical: "未処理", display: "みしょり", index: 0 },
           { canonical: "完了", display: "かんりょう", index: 1 },
@@ -203,6 +204,7 @@ test("B205: 一意に決まらない対応表は実行開始前に拒む（レ�
           code: "ラジオボタン", label: "", fieldType: "RADIO_BUTTON",
           optionOrder: { 同じ名前: 0, もう一つ: 1 },
         }],
+        processEnabled: false,
         statusStates: null,
       };
     },

@@ -1216,8 +1216,31 @@ async function buildOptionNameMaps(
     const canonicalFields = await getFieldsCached(appId, client, cacheContext);
     const source = await client.getOptionNames(appId);
     maps.set(appId, buildAppOptionNameMap(appId, canonicalFields, source));
+    seedProcessStatusCacheFromOptionNames(appId, source, cacheContext);
   }
   return maps;
+}
+
+/**
+ * B205: preflight で取った `app/status.json`（`lang: "user"`）を**プロセス管理のキャッシュにも載せる**。
+ *
+ * 2 回目の実装レビューの MAJOR: `getOptionNames` と `getProcessStatuses` は**同じ endpoint を 2 回**
+ * 取っていた（前者はキャッシュを埋めていなかった）。1 枚のスナップショットを共有すれば、
+ * 取得の間に設定が変わっても食い違わず、REST の呼び出しも 1 回減る。
+ * `name` は**表示名**＝`"raw"` の正本と同じなので、`getProcessStatuses` を呼んだときと同じ形になる。
+ */
+function seedProcessStatusCacheFromOptionNames(
+  appId: number,
+  source: KintoneOptionNameSource,
+  cacheContext: string
+): void {
+  if (getScopedCacheValue(processStatusCache, cacheContext, appId) !== undefined) return;
+  setScopedCacheValue(processStatusCache, cacheContext, appId, Promise.resolve({
+    enable: source.processEnabled,
+    states: source.statusStates === null
+      ? null
+      : source.statusStates.map((state) => ({ name: state.display, index: state.index })),
+  }));
 }
 
 function markLimitReached(client: KintoneClient, appId: number): void {
@@ -5941,9 +5964,13 @@ async function loadTypedPushdownMeta(
     const statusFields = collectCandidateFieldCodes(candidates)
       .filter((fieldCode) => fieldTypes.get(fieldCode) === "STATUS");
     if (statusFields.length > 0) {
-      const process = await getProcessStatusesCached(appId, client, cacheContext);
-      if (process.enable && process.states && process.states.length > 0) {
-        const states = new Set(process.states.map((state) => state.name));
+      // B205: ステータスの名称の正本はモードで変わる（`"raw"` は表示名・`canonical` は既定名）。
+      // `process.states[].name`（表示名）から作ると、canonical では AST のリテラル（既定名）が
+      // 「実在しない値」と判定され、**押し下げの対象から外れて全件取得に退行する**
+      // （3 回目の実装レビューの MAJOR）。順序表と同じ口から集合を作って正本を揃える。
+      const order = await loadProcessStatusOrder(appId, client, cacheContext);
+      if (order !== undefined && order.size > 0) {
+        const states = new Set(order.keys());
         for (const fieldCode of statusFields) fieldOptions.set(fieldCode, states);
       }
     }
@@ -8892,29 +8919,13 @@ async function loadProcessStatusOrder(
   if (!process.enable || process.states === null) return undefined;
   // B205 段階 3: canonical ではステータスの正本を**キー（既定名）**に切り替える。
   // `getProcessStatuses` は lang: "user" で取るので state.name は表示名＝raw の正本はそちら。
-  const status = optionNameMapsOf(client)?.get(appId)?.status;
-  if (status !== undefined) {
-    // 対応表が一部だけなら「ステータスだけ表示名のまま」になる（実装レビューの MAJOR）。
-    // 既定名の正本が無いのに黙って表示名を既定名として扱わない。
-    for (const state of process.states) {
-      if (!status.toCanonical.has(state.name)) {
-        throw new OptionNameMapError(
-          `app ${appId}: process status "${state.name}" is missing from the localized status names; `
-          + "the client must return every status."
-        );
-      }
-    }
-    if (process.states.length !== status.toCanonical.size) {
-      throw new OptionNameMapError(
-        `app ${appId}: the app has ${process.states.length} process statuses but the client returned `
-        + `${status.toCanonical.size} localized names.`
-      );
-    }
-  }
-  return new Map(process.states.map((state) => [
-    status?.toCanonical.get(state.name) ?? state.name,
-    state.index,
-  ]));
+  // 2 回目の実装レビューの MAJOR: `getProcessStatuses` の応答と突き合わせるのをやめ、
+  // **preflight の 1 枚のスナップショットから作った順序表**をそのまま使う
+  // （同じ endpoint の別の取得と比べると、取得の間の設定変更で正しい応答同士が落ちる）。
+  // preflight はこのキャッシュも埋めるので、ふつうは上の `process` も同じスナップショット。
+  const statusOrder = optionNameMapsOf(client)?.get(appId)?.statusOrder;
+  if (statusOrder !== undefined) return statusOrder;
+  return new Map(process.states.map((state) => [state.name, state.index]));
 }
 
 async function getFieldTypeMap(appId: number, client: KintoneClient, cacheContext: string): Promise<FieldTypeMap> {
@@ -9110,13 +9121,11 @@ async function buildOrderSemanticsForSelect(
     }
     let semantics = base;
     if (base.fieldType === "STATUS" && base.source && stmt.orderMode !== "KINTONE_NATIVE") {
-      const process = await getProcessStatusesCached(base.source.appId, client, cacheContext);
-      if (process.enable && process.states !== null) {
-        semantics = {
-          ...base,
-          optionOrder: new Map(process.states.map((state) => [state.name, state.index])),
-        };
-      }
+      // B205: 順序表は loadProcessStatusOrder から取る（canonical では**既定名**がキー）。
+      // ここで `process.states` から直に作ると、読み戻した値（既定名）が表示名のキーに
+      // 当たらず、ORDER BY ステータス が「未知の帯」に落ちる（3 回目の調査で見つけた）。
+      const order = await loadProcessStatusOrder(base.source.appId, client, cacheContext);
+      if (order !== undefined) semantics = { ...base, optionOrder: new Map(order) };
     }
     result.set(name, semantics);
   }

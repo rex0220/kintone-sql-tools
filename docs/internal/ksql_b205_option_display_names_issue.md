@@ -261,8 +261,8 @@ JOIN の押し下げは既定名のまま送っていた**（canonical でも効
 | `status.json` の `name` が空・非文字列 | `optionNameSourceFrom` | **既定名で埋めていた**ので「空の表示名を拒む」検査を迂回できた。`lang` 付きなら必ず名称が返るので、空は嘘のメタデータ |
 | 表示言語の側に**同じ項目コードが 2 つ** | `buildAppOptionNameMap` | `Map` の後勝ちで黙って決まる |
 | 同じ項目コードで**型が違う** | 同上 | 別のアプリか嘘のメタデータ。値の意味が変わる |
-| `getFields` に `STATUS` があるのに**ステータスの対応が無い・空** | 同上 | プロセス管理が有効なアプリだけ `form/fields` に `STATUS` が入る。無いと**ステータスだけ表示名のまま**になる |
-| ステータスの対応が**一部だけ**（件数・取りこぼし） | `loadProcessStatusOrder` | 既定名の正本が無い状態で表示名を既定名として扱わない。**`getProcessStatuses` と突き合わせる**（同じ endpoint なので REST の追加呼び出しは無い） |
+| ~~ステータスの対応が**一部だけ**（件数・取りこぼし）~~ | ~~`loadProcessStatusOrder`~~ | **やめた（§7.4）**。`getProcessStatuses` との突き合わせは**同じ endpoint の別の取得**で、「REST の追加呼び出しは無い」も誤りだった |
+| `getFields` に `STATUS` があるのに対応表が無い（**この判定は誤り。§7.4 で直した**） | `buildAppOptionNameMap` | `form/fields` は**プロセス管理が無効でも `STATUS` を返す**ので、ふつうのアプリが全部拒まれていた |
 
 **MAJOR（試験。直した）＝モックが本物より甘い。**
 `b205OptionNamesStrict.test.ts`（11 件）の**番人モック**を足した＝**クエリや書き込みに既定名が現れたら
@@ -287,6 +287,108 @@ REST 窓つき `SELECT`・`KORDER` のカーソル・`UPDATE` / `DELETE` の対�
 **検証**: `tsc` の新規エラー 0（既存の `src/ui/desktop.ts` 10 件のみ）。
 `jest 6814 passed`・失敗は **v3.90.0 のベースラインと同数・同内容**（8 suites / 45 tests＝
 接続設定の無い環境の CLI / MCP）。B205 の試験は **7 ファイル 65 件**。
+
+### 7.4 実装レビュー 2 回目で直したこと（2026-11-06。Codex。BLOCKER 1 / MAJOR 1 / MINOR 1）
+
+記録は `kintone-plugin/work-link/codex-review-ksql-b205-impl2-2026-11-06.md`。
+**1 回目の 4 件のうち 3 件は「閉じた」判定**で、`appId` の取り違え・`restQuery` の実送信・
+ほかの未変換の境目は**追加では見つかりませんでした**。残る 1 件（対応表の検査）は
+「不十分。別の穴が開いた」で、§7.3 で足した検査そのものが問題でした。
+
+**BLOCKER（確認済み。直した）＝`STATUS` 項目の有無でプロセス管理を判定していた。**
+`form/fields` は**プロセス管理を使っていないアプリでも `STATUS` 項目を返す**（`enabled: false`）。
+`flattenFormFieldProperties` は `enabled` を落とすので、`canonicalFields` には必ず `STATUS` が入る。
+その結果 §7.3 の検査は「`STATUS` があるのに `statusStates` が無い」として、**プロセス管理が無い
+ふつうのアプリで `canonical` を必ず失敗させていた**（レコードを読む前に `ArgumentError`）。
+
+- **実機で確認**（2026-11-06。アプリ 4392）: `app/status.json` は `enable: false` / `states: null`、
+  `form/fields` は `ステータス`（`STATUS`・`enabled: false`）・`作業者`・`カテゴリー` を返す。
+- 直し方: `OptionNameSource.processEnabled`（`app/status.json` の `enable`）を**正本**にした。
+  無効なら `states` は見ない（無効でも状態を返す面があるため）。有効で `STATUS` 項目があるときだけ
+  対応表を必須にする。
+- **試験が本物より甘かった**のが原因（また同じ罠）。`b205` の 3 つのモックは `getFields` に `STATUS`
+  項目を**返していなかった**。実 API の形（無効でも `STATUS` を返す）に直し、`/flow` 水準でも
+  「プロセス管理が無効でも `canonical` が通る」を固定した。
+
+**MAJOR（確認済み。直した）＝ステータスを別々に 2 回取っていて、突き合わせが同一スナップショットでない。**
+`getOptionNames`（`status.json?lang=user`）はプロセス管理のキャッシュを埋めないので、
+ステータスの順序が要るときに `getProcessStatuses` が**同じ endpoint を改めて**取っていた。
+§7.3 の「同じ endpoint なので REST の追加呼び出しは無い」は**誤り**で、2 回の間に設定が変わると
+**どちらも正しい応答なのに**件数・名称の突き合わせで落ちる形だった。
+
+- 直し方（レビューの案どおり）: 順序表（既定名 → 並び）を **preflight の 1 枚のスナップショットから作る**
+  （`AppOptionNameMap.statusOrder`）。`loadProcessStatusOrder` での突き合わせは**やめた**。
+- さらに preflight が**プロセス管理のキャッシュも埋める**（`seedProcessStatusCacheFromOptionNames`）。
+  `enable` の判定も同じ 1 枚になり、**REST の呼び出しが 1 回減る**（試験で `getProcessStatuses` の
+  呼び出しが 0 件になることを固定）。
+- 「一部だけ返す custom client」は**信頼境界として受け入れる**（1 回目のレビューも `lang` 無視や
+  別アプリの嘘は検知できないとしている）。`/flow` の内製クライアントは `status.json` を丸ごと返す。
+
+**MINOR（対応しない。2026-11-07 Takashi「そのままで OK」）＝ソース検査は「手組みクエリの新設」を防げない。**
+今の番人は `whereToKintone` と `serializeWhereForDisplay` の参照先を固定するが、
+`query: \`${field} in (…)\`` と**手で組み立てる新しい経路**は止められない。
+レビューの案は**送信クエリを branded type にする**（`type AppQuery = string & { __appQuery }`。
+内部の `fetchAll` / `fetchRecordsForSharedPlan` / カーソル起動だけが受け取る）。
+**入れません**＝現時点で手組みの実送信クエリは `$id` の数値条件だけで**選択肢の穴ではなく**、
+`whereToKintone` を通す類の退行は §7.3 のソース検査で止まる。送信経路の型を広く触る費用に対して
+守れる範囲が狭い。将来この形の穴が実際に出たら、そのときに起票する。
+
+**検証**: `tsc` の新規エラー 0。`jest 6816 passed`・失敗はベースラインと同数・同内容
+（8 suites / 45 tests）。B205 の試験は **7 ファイル 67 件**。
+
+### 7.5 実装レビュー 3 回目（2026-11-07。Codex。BLOCKER 0 / MAJOR 2 / MINOR 3）
+
+記録は `kintone-plugin/work-link/codex-review-ksql-b205-impl3-2026-11-07.md`。
+**2 回目の 3 件は全部「閉じた」判定**（branded type を入れない判断も支持された）。
+依頼の芯は「**言語に依る名称の集合・順序をどこから作っているかの全数確認**」で、
+19 か所の表が返ってきた。要対応は 2 件。
+
+**こちらで先に見つけて直した穴（投げる前）: `ORDER BY ステータス` が canonical で壊れていた。**
+項目意味解決が `process.states`（**表示名**）から `optionOrder` を直に作っていたので、
+読み戻した既定名が当たらず「未知の帯」に落ちていた（`DESC` で並ばない）。
+`loadProcessStatusOrder` から取る形に直した。**AC8 は選択肢と `WHERE` 経由のステータス比較しか
+踏んでいなかった**のが見落としの原因。
+
+**MAJOR 1（直した）＝typed pushdown の `STATUS` の存在集合だけ表示名のままだった。**
+`loadTypedPushdownMeta` が `process.states[].name`（表示名）で集合を作っていたため、
+canonical の AST のリテラル（既定名）が「実在しない値」と判定され、**押し下げの対象から外れて
+全件取得に退行**する（`classifySupportedLeaf` が `fieldOptions.has(値)` を要求する）。
+JOIN では読み取り上限に当たって失敗し得る。単一アプリの `SELECT` が通っていたのは、
+`=` → `IN` の正規化が先に `loadProcessStatusOrder`（既定名）で行われるためで、**無害ではなかった**。
+
+- 直し方: 集合も `loadProcessStatusOrder` のキーから作る（`"raw"` は表示名・canonical は既定名）。
+- 試験: **2 アプリ JOIN**（アプリ 1 は `みしょり`、アプリ 2 は `未A` と**別の表示名**）で
+  それぞれの表示名で押し下がることを固定。**直す前に落ちることも確かめた**（番人として有効）。
+
+**MAJOR 2（直さない。2026-11-07 Takashi）＝選択肢の既定名側と表示名側を、別の revision から index で結べる。**
+既定名側は `getFields`、表示名側は後続の `getOptionNames`（`form/fields?lang=user`）で**別々に取得**し、
+どちらも `revision` を捨てている。2 回の取得の間に選択肢を**並べ替えて**デプロイされると、
+件数・`index` の全単射検査を通りながら**誤った対応表**ができる（拒否ではなく**誤変換**）。
+ステータス側で直した「別のスナップショットを比べる」問題の、選択肢版。
+
+- 窓は「2 本の HTTP 呼び出しの間にアプリを更新してデプロイする」ミリ秒なので、起こる確率は極小。
+  ただし失敗の形が**黙って違う値を書く**なので、レビューは MAJOR（リリース前）としている。
+- 直し方の案（**追加の通信なし**。入れないが、必要になったときのために残す）: `/flow` のクライアントが
+  `getFields` のときに `form/fields` の `revision` を**アプリごとに覚えておき**、`getOptionNames` の
+  `lang: "user"` の `revision` と**一致しなければ `ArgumentError`**。覚えている revision は
+  「キャッシュに入っている既定名側を作った応答」のものなので、比べるべき 2 枚をちょうど比べられる。
+- **決定（2026-11-07 Takashi「直さない」）**: 窓が極小なので入れない。**実機確認の項目にだけ残す**
+  （設定変更中の取得で誤変換が起きないか）。この形の不具合が実際に出たら、上の案で起票する。
+
+**MINOR 3 件（全部対応）**
+
+| 指摘 | 直したこと |
+|---|---|
+| 公開の `FlowKintoneClient` に `getOptionNames` が無く、**自作クライアントでは canonical を実装できない** | 型を公開するのではなく、**資料に「自作のクライアントでは `"canonical"` を使えない」と明記**（README と言語リファレンス）。信頼境界の判断（§7.4）と揃える |
+| `processStatusCalls === 0` は **`app/status.json` の通信 0 ではない**（preflight が 1 回呼ぶ） | 「**メソッドの呼出し回数**で通信回数ではない」と資料に明記。計数の意味は変えない（互換） |
+| プロセス管理が**無効**の試験のレコードに `STATUS` が入っていた（実測では**出ない**） | 無効のときはモックの行から `STATUS` を外し、`SELECT *` の列にも出ないことを固定 |
+
+**キャッシュの相乗り・`processEnabled` の判定・`"raw"` の非退行**は「確認済みで問題なし」。
+プロセス管理を**後から無効化した**アプリも、既存の実測（B88 の 3 アプリ）では
+レコードに `STATUS` / `STATUS_ASSIGNEE` が出ないので穴は無い（実機確認に残す）。
+
+**検証**: `tsc` の新規エラー 0。`jest 6822 passed`・失敗はベースラインと同数・同内容
+（8 suites / 45 tests）。B205 の試験は **7 ファイル 73 件**。
 
 ### 段階 1 でやったこと（2026-11-06）
 

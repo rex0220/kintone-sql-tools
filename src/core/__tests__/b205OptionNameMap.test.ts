@@ -25,6 +25,7 @@ const userFields: KintoneFieldInfo[] = [
 const source = (overrides: Partial<OptionNameSource> = {}): OptionNameSource => ({
   appId: 4387,
   fields: userFields,
+  processEnabled: true,
   statusStates: [
     { canonical: "未処理", display: "みしょり", index: 0 },
     { canonical: "処理中", display: "しょりちゅう", index: 1 },
@@ -166,20 +167,40 @@ test("B205: 同じ項目コードで型が違えば拒む（別のアプリ・�
 test.each([
   ["null", null],
   ["空", [] as const],
-])("B205: STATUS があるのにステータスの対応が %s なら拒む", (_label, statusStates) => {
+])("B205: プロセス管理が有効なのにステータスの対応が %s なら拒む", (_label, statusStates) => {
   expect(() => buildAppOptionNameMap(4387, canonicalFields, source({
     statusStates: statusStates as never,
-  }))).toThrow("the app has process management (getFields returns a STATUS field)");
+  }))).toThrow("the app has process management enabled but the client returned");
 });
 
-test("B205: プロセス管理が無いアプリ（STATUS 項目が無い）は statusStates なしで通る", () => {
-  const withoutStatus = canonicalFields.filter((field) => field.fieldType !== "STATUS");
-  const map = buildAppOptionNameMap(4387, withoutStatus, source({
-    fields: userFields.filter((field) => field.fieldType !== "STATUS"),
+// **実 API の形**（2026-11-06 にアプリ 4392 で確認）: プロセス管理を使っていないアプリでも
+// `form/fields` は STATUS 項目を返す（`enabled: false`。`flattenFormFieldProperties` は
+// `enabled` を落とす）。**項目の有無で判定すると、ふつうのアプリが全部拒まれる**
+// ＝2 回目の実装レビューの BLOCKER。判定は `app/status.json` の `enable` で行う。
+test("B205: プロセス管理が無効なアプリ（STATUS 項目はあるが enable: false）は通る", () => {
+  const map = buildAppOptionNameMap(4387, canonicalFields, source({
+    processEnabled: false,
     statusStates: null,
   }));
   expect(map.status).toBeUndefined();
+  expect(map.statusOrder).toBeUndefined();
+  expect(map.fields.has("ステータス")).toBe(false);
+  // 選択肢の対応表はふつうに作れる
   expect(map.fields.get("ラジオボタン")!.toDisplay.get("sample1")).toBe("サンプル１");
+});
+
+test("B205: 無効なプロセス管理が states を返しても無視する（optionNameSourceFrom）", () => {
+  const built = optionNameSourceFrom(4387, userFields, {
+    enable: false,
+    states: { 未処理: { name: "みしょり", index: 0 } },
+  });
+  expect(built.processEnabled).toBe(false);
+  expect(built.statusStates).toBeNull();
+});
+
+test("B205: ステータスの順序表は既定名で、同じ 1 枚から作る", () => {
+  const map = buildAppOptionNameMap(4387, canonicalFields, source());
+  expect([...map.statusOrder!.entries()]).toEqual([["未処理", 0], ["処理中", 1], ["完了", 2]]);
 });
 
 test("B205: ステータスの index が重複していたら拒む（並びが決まらない）", () => {
@@ -203,18 +224,19 @@ test("B205: ステータスの index は連番でなくてよい（対にする�
 
 test("B205: status.json の name が空・非文字列なら既定名で埋めずに拒む", () => {
   expect(() => optionNameSourceFrom(4387, userFields, {
-    states: { 未処理: { name: "", index: 0 } },
+    enable: true, states: { 未処理: { name: "", index: 0 } },
   })).toThrow("has no usable localized name");
   expect(() => optionNameSourceFrom(4387, userFields, {
-    states: { 未処理: { name: undefined, index: 0 } },
+    enable: true, states: { 未処理: { name: undefined, index: 0 } },
   })).toThrow("has no usable localized name");
   expect(() => optionNameSourceFrom(4387, userFields, {
-    states: { 未処理: { name: 0, index: 0 } },
+    enable: true, states: { 未処理: { name: 0, index: 0 } },
   })).toThrow("has no usable localized name");
 });
 
 test("B205: status.json はキーが既定名・name が表示名（index は文字列でもよい）", () => {
   const built = optionNameSourceFrom(4387, userFields, {
+    enable: true,
     states: { 未処理: { name: "みしょり", index: "0" }, 完了: { name: "かんりょう", index: "1" } },
   });
   expect(built.statusStates).toEqual([

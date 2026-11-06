@@ -26,6 +26,9 @@ const fieldsFor = (lang: "default" | "user") => [
     optionOrder: lang === "user" ? { 甲: 0, 乙: 1 } : { a1: 0, a2: 1 },
   },
   { code: "メモ", label: "メモ", fieldType: "SINGLE_LINE_TEXT", writable: true },
+  // 実 API の形: プロセス管理を使っていないアプリでも form/fields は STATUS を返す
+  // （`enabled: false`。平坦化で enabled は落ちる）。項目の有無で判定すると全部拒まれる
+  { code: "ステータス", label: "ステータス", fieldType: "STATUS" },
 ];
 
 function strictClient() {
@@ -96,7 +99,7 @@ function strictClient() {
     async getNumberPrecision() { return { digits: 16, decimalPlaces: 4, roundingMode: "HALF_EVEN" as const }; },
     async getProcessStatuses() { return { enable: false, states: null }; },
     async getOptionNames(appId: number) {
-      return { appId, fields: fieldsFor("user"), statusStates: null };
+      return { appId, fields: fieldsFor("user"), processEnabled: false, statusStates: null };
     },
   } as unknown as FlowKintoneClient;
   return { value, queries, writes };

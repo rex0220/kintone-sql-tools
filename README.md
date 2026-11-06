@@ -436,8 +436,10 @@ UPDATE LAPP_受注 SET 選択肢 = 'sample2' WHERE $id = @id;
   `optionOrder` は既定名のままなので、**`ERR_CHOICE_INVALID` を緩めずに `SET` が通ります**。
 - 対象は `RADIO_BUTTON` / `DROP_DOWN` / `CHECK_BOX` / `MULTI_SELECT` と**プロセス管理のステータス**（サブテーブルの中も）。
   **知らない値はそのまま通します**。言語ごとの表示名が無いアプリでは**何も変わりません**。
-- **`client.getOptionNames` が必要**（`createKintoneClient` は実装済み）。無ければ `createExecutionContext` が
-  `ArgumentError`。一意に決まらない対応表（表示名の重複・`index` の不一致など）も**実行開始前**に `ArgumentError`。
+- **同梱の `createKintoneClient` が必要**（内部で `getOptionNames` を使う。公開の `FlowKintoneClient` には
+  入れていないので、**自作のクライアントでは `"canonical"` を使えません**）。実装が無ければ
+  `createExecutionContext` が `ArgumentError`。一意に決まらない対応表（表示名の重複・`index` の不一致など）も
+  **実行開始前**に `ArgumentError`。
 - **`EXPLAIN` とは併用できません**（計画の文は「実際に送るクエリ」を見せる場所のため）。
 - **ステータスだけ正本の向きが変わります**（`"raw"` は表示名・`"canonical"` は既定名）。
 - CLI・MCP・`/engine` では公開していません（言語の決まり方が認証方式で変わるため。詳細は言語リファレンス §25）。

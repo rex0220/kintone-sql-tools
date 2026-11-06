@@ -31,6 +31,8 @@ const fieldsFor = (display?: Record<string, string>) => {
       optionOrder: { [name("a1")]: 0, [name("a2")]: 1 },
     },
     { code: "メモ", label: "メモ", fieldType: "SINGLE_LINE_TEXT", writable: true },
+    // 実 API の形: プロセス管理を使っていないアプリでも form/fields は STATUS を返す
+    { code: "ステータス", label: "ステータス", fieldType: "STATUS" },
   ];
 };
 
@@ -75,7 +77,7 @@ function mockClient(lang: "ja" | "en") {
     async getNumberPrecision() { return { digits: 16, decimalPlaces: 4, roundingMode: "HALF_EVEN" as const }; },
     async getProcessStatuses() { return { enable: false, states: null }; },
     async getOptionNames(appId: number) {
-      return { appId, fields: fieldsFor(display), statusStates: null };
+      return { appId, fields: fieldsFor(display), processEnabled: false, statusStates: null };
     },
   } as unknown as FlowKintoneClient;
   return { value, queries };
