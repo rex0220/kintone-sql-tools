@@ -52,8 +52,85 @@ export function quoteKintoneValue(value: string): string {
   return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
-function serializeGeneratedPredicate(predicate: GeneratedPredicate): string {
-  const { field, op, values } = predicate;
+/**
+ * B205 段階 2: 選択肢とステータスの値を**既定名 → 表示名**に直す関数を、アプリごとに返す口。
+ * `optionNames: "canonical"` のときだけ中身が入る（`"raw"` では `undefined` を返す）。
+ */
+export interface OptionQueryTranslatorSource {
+  /** アプリに対応表があれば変換関数を返す。無ければ `undefined`（＝変換しない）。 */
+  readonly optionQueryTranslate: (appId: number) => ((field: string, value: string) => string) | undefined;
+  /** `"canonical"` が有効かどうか（`appId` を省いた入力を拒むかの判定に使う）。 */
+  readonly canonicalOptionNames: boolean;
+}
+
+function translatorFor(
+  input: SerializeQueryForAppInput,
+  source?: OptionQueryTranslatorSource
+): ((field: string, value: string) => string) | undefined {
+  if (source === undefined || !source.canonicalOptionNames) return undefined;
+  if (input.appId === undefined) {
+    // 段階 1 で残した「アプリが文脈から決まらない経路」を、canonical のときは黙って通さない。
+    throw new Error(
+      "InternalError: optionNames: \"canonical\" requires the target app for every kintone query; "
+      + "this query was built without one."
+    );
+  }
+  return source.optionQueryTranslate(input.appId);
+}
+
+/** 押し下げる AST のリテラルだけを変換する（構造は変えない。変わらなければ同じ参照）。 */
+function translateWhereLiterals(
+  where: WhereExpr,
+  translate: (field: string, value: string) => string
+): WhereExpr {
+  switch (where.type) {
+    case "BINARY": {
+      const field = where.left.type === "FIELD" ? where.left.field : undefined;
+      if (field === undefined) return where;
+      const right = where.right;
+      if (right.type === "STRING") {
+        const value = translate(field, right.value);
+        return value === right.value ? where : { ...where, right: { ...right, value } };
+      }
+      if (right.type === "IN_LIST") {
+        let changed = false;
+        const values = right.values.map((item) => {
+          if (item.type !== "STRING") return item;
+          const value = translate(field, item.value);
+          if (value === item.value) return item;
+          changed = true;
+          return { ...item, value };
+        });
+        return changed ? { ...where, right: { ...right, values } } : where;
+      }
+      return where;
+    }
+    case "LOGICAL": {
+      const left = translateWhereLiterals(where.left, translate);
+      const right = translateWhereLiterals(where.right, translate);
+      return left === where.left && right === where.right ? where : { ...where, left, right };
+    }
+    case "NOT": {
+      const expr = translateWhereLiterals(where.expr, translate);
+      return expr === where.expr ? where : { ...where, expr };
+    }
+    case "GROUP": {
+      const expr = translateWhereLiterals(where.expr, translate);
+      return expr === where.expr ? where : { ...where, expr };
+    }
+    default:
+      return where;
+  }
+}
+
+function serializeGeneratedPredicate(
+  predicate: GeneratedPredicate,
+  translate?: (field: string, value: string) => string
+): string {
+  const { field, op } = predicate;
+  const values = translate === undefined
+    ? predicate.values
+    : predicate.values.map((value) => translate(field, value));
   if (op === "in" || op === "not in") {
     return `${field} ${op} (${values.map(quoteKintoneValue).join(",")})`;
   }
@@ -67,15 +144,22 @@ function serializeGeneratedPredicate(predicate: GeneratedPredicate): string {
 
 /**
  * kintone へ送るクエリの条件部を作る。
- * **段階 1 の時点で、出力は移行前の文字列と同一**（`whereToKintone` と同じ引用・同じ並び）。
+ *
+ * `source`（通常はクライアント）が `optionNames: "canonical"` の対応表を持っているときだけ、
+ * **選択肢とステータスの値を既定名から表示名へ**直す。`"raw"`（既定）では段階 1 と同じ文字列を返す。
  */
-export function serializeQueryForApp(input: SerializeQueryForAppInput): string {
+export function serializeQueryForApp(
+  input: SerializeQueryForAppInput,
+  source?: OptionQueryTranslatorSource
+): string {
+  const translate = translatorFor(input, source);
   const parts: string[] = [];
   if (input.where !== null && input.where !== undefined) {
-    parts.push(whereToKintone(input.where));
+    const where = translate === undefined ? input.where : translateWhereLiterals(input.where, translate);
+    parts.push(whereToKintone(where));
   }
   for (const predicate of input.generated ?? []) {
-    parts.push(serializeGeneratedPredicate(predicate));
+    parts.push(serializeGeneratedPredicate(predicate, translate));
   }
   return parts.join(" and ");
 }

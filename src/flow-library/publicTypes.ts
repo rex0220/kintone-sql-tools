@@ -235,6 +235,21 @@ export interface CreateExecutionContextOptions extends ParseScriptOptions {
    * （3 桁の ID なら 200 件でエンコード後 2.5 KB・500 件で 6.4 KB。日本語は 1 文字 9 字）。
    */
   variableArrayMaxElements?: number;
+  /**
+   * B205: 選択肢とステータスの名称をどちら向きで扱うか。
+   *
+   * - `"raw"`（**既定**）: 今までとまったく同じ。kintone が返す / 受け付ける名称をそのまま使う
+   *   （項目に「言語ごとの表示名」を設定していれば**利用者の表示言語の名称**になります）。
+   * - `"canonical"`: **既定の名称を正本**にする。SQL には項目の設定画面で見える既定の名称を書き、
+   *   kintone との境目（読んだ値・クエリの値・書き込む値）でエンジンが表示名へ／から変換します。
+   *   同じ SQL が**利用者の表示言語に依らず**動きます。
+   *
+   * `"canonical"` には **`client.getOptionNames`** が必要で、無ければ `createExecutionContext` が
+   * `ArgumentError`（黙って変換しないのが最悪なので fail-closed）。`"raw"` ではこの口を 1 回も呼びません。
+   * 対応表は**最初の文を実行する前**に作り、**レコード API も書き込みもその前には呼びません**。
+   * 一意に決まらない対応表（表示名の重複・`index` の不一致など）も実行開始前に `ArgumentError` です。
+   */
+  optionNames?: "raw" | "canonical";
   maxRecords?: number;
   recursiveCteMaxDepth?: number;
   recursiveCteMaxRows?: number;

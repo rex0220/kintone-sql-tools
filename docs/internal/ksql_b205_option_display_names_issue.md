@@ -139,8 +139,9 @@ B203（配列の注入を `/flow` だけにした）と同じ判断で、根拠�
 |---|---|
 | 1 前提整備 | ✅ **済み（2026-11-06）**＝クエリの口・レコードの再帰の変換・対応表の契約と検査。**公開面は 1 つも変えていない** |
 | 2a クライアントの口 | ✅ **済み（2026-11-06）**＝`KintoneClient.getOptionNames?`・`/flow` の実装・`routeClient` と metrics の包みへの転送・公開面を `/flow` に閉じる判断（§2.1） |
-| 2b 選択肢の有効化 | 📋 **未着手（次はここ）**。**5 つが同時に入って初めて意味を持つ**（下） |
-| 3 ステータス | 📋 未着手 |
+| 2b 選択肢の有効化 | 🔧 **実行経路は済み（2026-11-06）**＝`optionNames` の公開・同期の能力確認・実行前の preflight・読み書きの包み・クエリの変換。受入基準 AC1〜5 が通る。**`EXPLAIN` との併用は今は拒む**（2c で対応） |
+| 2c EXPLAIN | 📋 未着手＝計画を組み立てる関数へ対応表を通し、`explainScript` の拒否を外す。`resolveMetadata: false` の扱いもここ |
+| 3 ステータス | 📋 未着手（順序表を `canonical` のときだけキー側へ） |
 
 ### 2b は分けられない 1 塊（2026-11-06 に着手して分かったこと）
 
@@ -163,6 +164,35 @@ preflight は**最初の `executeStatement` / `previewStatement` の冒頭**に�
 
 続いて `EXPLAIN` の扱い（`resolveMetadata: false` との併用拒否・実行と計画の一致の試験）と、
 `/flow` 水準の受入試験（§6 の AC1〜9）。**段階 1 の 3 本分くらいの量**。
+
+### 2b でやったこと（2026-11-06。実行経路）
+
+| # | 入れたもの | どこ |
+|---|---|---|
+| 1 | `optionNames?: "raw" \| "canonical"` | `CreateExecutionContextOptions`（`/flow`）と コアの `BatchExecuteOptions` |
+| 2 | **同期の能力確認** | `createExecutionContext`（`getOptionNames` が無ければ `ArgumentError`。`/flow` は同期の関数なのでここでは表を作らない） |
+| 3 | **最初の文を実行する前の非同期 preflight** | `executeManagedStatement` の冒頭（`ensureManagedOptionNameMaps`）。対象アプリは `analysis.statements[].appIds`。**アプリごとに 1 回**・`"raw"` では 1 回も呼ばない |
+| 4 | **読み・書きの包み** | `wrapClientWithOptionNames`（`getRecords` / カーソルの `nextPage` / `postRecords` / `putRecords` / `upsertRecords` の `updateKey` も）。**全部 identity なら包みを通さない** |
+| 5 | **クエリの変換** | 対応表を**クライアントに記号で載せて運ぶ**（`OPTION_NAME_MAPS`。`LIMIT_METRICS_SINK` と同じ仕組み）＝クエリを組み立てる所はどこでもクライアントを持っているので、引数を 19 か所に通さずに済み、spread で複製される包みを跨いでも保たれる。`serializeQueryForApp(input, optionNameQuerySource(client))` を**実行経路の 11 か所**に配線し、押し下げ AST のリテラル（`= 'x'` と `in (…)`）と生成述語の値を変換する |
+
+**実行前の拒否は例外で返す**（文の結果ではなく）。`OptionNameMapError` は `executeManagedStatement` の
+catch で**投げ直す**ので、呼び出し側は「実行して失敗した」と「実行する前に弾いた」を見分けられる
+（依頼元の仕様 §13 と同じ考え）。
+
+**`EXPLAIN` との併用は今は拒む**（`explainScript` が `ArgumentError`）。計画の文は「実際に送るクエリ」を
+見せる場所なので、**既定名のクエリを計画として見せるのは誤り**。配線（計画を組み立てる関数へ対応表を通す）は
+2c で入れる。依頼元が `explainScript` を呼ぶのは**設定画面の実行計画の表示だけ**で、そこは `optionNames` を
+渡さないため影響はない。
+
+**受入試験**（`src/flow-library/__tests__/b205OptionNamesCanonical.test.ts` 10 件）:
+AC1（`WHERE` の既定名が表示名で押し下がる）・AC2（`SET` が通る＝検査は既定名・送るのは表示名）・
+AC3（`GROUP BY` のキーが既定名で定義順）・AC4（`optionNames` なしは今までと同じ・`getOptionNames` を呼ばない）・
+AC5（どちらの表にも無い値はそのまま通る）・恒等の項目は不変・アプリごとに 1 回・能力が無ければ拒否・
+一意でない表は実行前に拒否（レコード 0 件）・`EXPLAIN` との併用拒否。
+
+**分かったこと**: 選択肢の `=` は**値が `optionOrder` に無いと元から押し下げない**（JS 評価に落ちる）。
+依頼書の「`= '表示名'` は素の `=` で送られて通る」は、実際には**押し下げずに JS で絞っていた**ため通っていた
+（`canonical` では既定名が `optionOrder` にあるので**押し下げが効くようになる**＝読む量も減る）。
 
 ### 段階 1 でやったこと（2026-11-06）
 

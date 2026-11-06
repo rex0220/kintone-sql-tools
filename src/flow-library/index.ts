@@ -92,6 +92,17 @@ export async function explainScript(
   const parsed = parseWithBindings(source, opts);
   const error = parsed.diagnostics.find((item) => item.severity === "error");
   if (error) throw new KsqlFlowError(error.code, `${error.message} (${error.line}:${error.column})`);
+  // B205: EXPLAIN の計画は「実際に送るクエリ」を見せる場所なので、canonical では表示名で出すべきだが、
+  // その配線（計画を組み立てる関数へ対応表を通す）はまだ入っていない。
+  // 既定名のクエリを「実際に送る文」として見せるのは誤りなので、**併用を拒む**（段階 2c で対応する）。
+  if ((opts as { optionNames?: unknown }).optionNames === "canonical") {
+    throw new KsqlFlowError(
+      "ArgumentError",
+      "ArgumentError: explainScript does not support optionNames: \"canonical\" yet; "
+      + "the plan would show default option names while execution sends the display names. "
+      + "Omit optionNames for the plan, and pass it to createExecutionContext for execution."
+    );
+  }
   const normalizedSource = normalizeLogicalApps(source, opts.apps);
   const bindings = bindingsByStatements.get(parsed.statements);
   const explainClient = bindings ? routeClient(opts.client, bindings) : opts.client;
@@ -160,6 +171,16 @@ export function createExecutionContext(opts: CreateExecutionContextOptions): Exe
     } = opts;
     if (confirm !== undefined && typeof confirm !== "function") {
       throw new TypeError("confirm must be a function.");
+    }
+    // B205: createExecutionContext は同期なので、ここでできるのは「能力があるか」の確認まで。
+    // 対応表そのものは最初の文を実行する前に非同期で作る（レコード API と書き込みより前）。
+    if (executeOptions.optionNames === "canonical"
+      && typeof (client as { getOptionNames?: unknown }).getOptionNames !== "function") {
+      throw new KsqlFlowError(
+        "ArgumentError",
+        "ArgumentError: optionNames: \"canonical\" requires a client with getOptionNames; "
+        + "use createKintoneClient from @rex0220/kintone-sql-tools/flow, or keep optionNames: \"raw\"."
+      );
     }
     if (confirm && statements.some(statementUsesImport)) {
       throw new KsqlFlowError(
