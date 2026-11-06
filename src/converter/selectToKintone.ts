@@ -28,7 +28,7 @@ import type {
   AggregateArgExpr,
 } from "../types/ast";
 import { numberLiteralText } from "../types/ast";
-import { whereToKintone } from "./whereToKintone";
+import { serializeQueryForApp, type OptionQueryTranslatorSource } from "./queryForApp";
 import { isLike } from "../core/like";
 import { aggregateSyntheticName } from "../core/aggregateExpression";
 import { normalizeGroupingSpec } from "../core/grouping";
@@ -125,14 +125,18 @@ function isFunc(fv: FieldValue): boolean {
  * SIMPLE モードの SELECT 文を kintone GET パラメータに変換する。
  * FULL_SCAN の場合は呼び出し元でエラー・または fetchAll() に切り替えること。
  */
-export function selectToKintoneParams(stmt: SelectStatement): KintoneGetParams {
+export function selectToKintoneParams(
+  stmt: SelectStatement,
+  optionNames?: OptionQueryTranslatorSource
+): KintoneGetParams {
   const queryParts: string[] = [];
   const hasPagination = stmt.limit !== null || stmt.offset !== null;
   const shouldInjectDefaultOrder = hasPagination && stmt.orderBy.length === 0;
 
   // WHERE
   if (stmt.where !== null) {
-    queryParts.push(whereToKintone(stmt.where));
+    // B205: 選択肢の値を表示名へ直すため 1 つの口を通す
+    queryParts.push(serializeQueryForApp({ appId: stmt.from.appId, where: stmt.where }, optionNames));
   }
 
   // ORDER BY
@@ -172,7 +176,8 @@ export function selectToKintoneParams(stmt: SelectStatement): KintoneGetParams {
  */
 export function selectToFetchAllParams(
   stmt: SelectStatement,
-  appId: number
+  appId: number,
+  optionNames?: OptionQueryTranslatorSource
 ): Omit<KintoneGetParams, "totalCount"> {
   const queryParts: string[] = [];
 
@@ -181,7 +186,7 @@ export function selectToFetchAllParams(
   // JOIN ありでは複数テーブル条件を単一アプリへ安全に押し込めないため、
   // API 側 WHERE 変換は行わず JS 側フィルタに一任する。
   if (stmt.where !== null && stmt.joins.length === 0 && !whereRequiresJsEval(stmt.where)) {
-    queryParts.push(whereToKintone(stmt.where));
+    queryParts.push(serializeQueryForApp({ appId, where: stmt.where }, optionNames));
   }
 
   return {

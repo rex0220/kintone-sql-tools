@@ -414,6 +414,36 @@ ASSERT (SELECT COUNT(*) FROM LAPP_在庫 WHERE 残数 < 0) = 0, @m_no_stock;
 - AST は `AssertStatement.messageVar` / `ExitStatement.messageVar`（`parseScript` が返すのは
   `{ type: "VARIABLE", name: "m_no_stock" }`。**名前は小文字・`@` なし**）。リテラルで書いた形は従来どおり `message` です。
 
+### 選択肢とステータスの「言語ごとの表示名」（`optionNames`・B205）
+
+kintone の項目に「言語ごとの表示名」を設定すると、**API が受け付ける値・返す値が利用者の表示言語の名称**に
+変わります（レコードの値・`query` の条件・書き込む値のすべて）。設定に保存した 1 つの SQL では全員に通りません。
+
+```ts
+const context = createExecutionContext({
+  client, statements, meta,
+  optionNames: "canonical",   // 既定は "raw"（今までの動き）
+});
+```
+
+```sql
+-- 既定の名称（項目の設定画面で見える値）を書けば、利用者の表示言語に依らず動く
+SELECT 選択肢 FROM LAPP_受注 WHERE 選択肢 = 'sample1';
+UPDATE LAPP_受注 SET 選択肢 = 'sample2' WHERE $id = @id;
+```
+
+- 変換するのは**kintone との境目だけ**（読んだ値は既定名へ、クエリと書き込む値は表示名へ）。
+  `optionOrder` は既定名のままなので、**`ERR_CHOICE_INVALID` を緩めずに `SET` が通ります**。
+- 対象は `RADIO_BUTTON` / `DROP_DOWN` / `CHECK_BOX` / `MULTI_SELECT` と**プロセス管理のステータス**（サブテーブルの中も）。
+  **知らない値はそのまま通します**。言語ごとの表示名が無いアプリでは**何も変わりません**。
+- **同梱の `createKintoneClient` が必要**（内部で `getOptionNames` を使う。公開の `FlowKintoneClient` には
+  入れていないので、**自作のクライアントでは `"canonical"` を使えません**）。実装が無ければ
+  `createExecutionContext` が `ArgumentError`。一意に決まらない対応表（表示名の重複・`index` の不一致など）も
+  **実行開始前**に `ArgumentError`。
+- **`EXPLAIN` とは併用できません**（計画の文は「実際に送るクエリ」を見せる場所のため）。
+- **ステータスだけ正本の向きが変わります**（`"raw"` は表示名・`"canonical"` は既定名）。
+- CLI・MCP・`/engine` では公開していません（言語の決まり方が認証方式で変わるため。詳細は言語リファレンス §25）。
+
 ### APPLY の書込（`allowApplyMutation`・B198）
 
 サブテーブルの行を書き換える `APPLY`（`PATCH` / `APPEND` / `REMOVE`）は、**`allowApplyMutation: true` と `confirm` を同時に渡したときだけ**書けます。

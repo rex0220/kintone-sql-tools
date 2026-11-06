@@ -27,7 +27,7 @@ import type {
 } from "../types/ast";
 import { collectCheckFieldRefs } from "../core/dmlCustomCheck";
 import { numberLiteralText } from "../types/ast";
-import { whereToKintone } from "./whereToKintone";
+import { serializeQueryForApp, type OptionQueryTranslatorSource } from "./queryForApp";
 import { evalWhere, evalCaseWhen, type ProcessRow } from "../engine/evalWhere";
 import { evalStringFunc, evalArithExpr, evalScalarValueExpr, type EvaluationContext } from "../engine/evalFunc";
 import { whereHasLike } from "../core/like";
@@ -143,12 +143,16 @@ function buildInsertRecord(
  * UPDATE の WHERE 句から、対象レコードの $id を取得するための
  * kintone GET クエリを生成する。
  */
-export function updateToGetQuery(stmt: UpdateStatement): KintoneGetForDmlParams {
+export function updateToGetQuery(
+  stmt: UpdateStatement,
+  optionNames?: OptionQueryTranslatorSource
+): KintoneGetForDmlParams {
   assertDmlWhereIsSafe(stmt.where);
   const checkFields = collectUpdateCheckTargetFields(stmt);
   return {
     app: stmt.appId,
-    query: whereToKintone(stmt.where),
+    // B205: kintone へ送るクエリはすべて 1 つの口を通す（選択肢の値を表示名へ直す）
+    query: serializeQueryForApp({ appId: stmt.appId, where: stmt.where }, optionNames),
     fields: ["$id", ...checkFields],
     totalCount: false,
   };
@@ -208,7 +212,10 @@ export function hasRowDependentAssignment(stmt: UpdateStatement): boolean {
  * 算術式 UPDATE 用の GET クエリを生成する。
  * $id に加えて、算術式で参照されるフィールド名も取得対象に含める。
  */
-export function updateToGetQueryForArith(stmt: UpdateStatement): KintoneGetForDmlParams {
+export function updateToGetQueryForArith(
+  stmt: UpdateStatement,
+  optionNames?: OptionQueryTranslatorSource
+): KintoneGetForDmlParams {
   assertDmlWhereIsSafe(stmt.where);
   const refFields = new Set<string>();
   for (const { value } of stmt.assignments) {
@@ -225,7 +232,8 @@ export function updateToGetQueryForArith(stmt: UpdateStatement): KintoneGetForDm
   collectUpdateCheckTargetFields(stmt).forEach((field) => refFields.add(field));
   return {
     app: stmt.appId,
-    query: whereToKintone(stmt.where),
+    // B205: kintone へ送るクエリはすべて 1 つの口を通す（選択肢の値を表示名へ直す）
+    query: serializeQueryForApp({ appId: stmt.appId, where: stmt.where }, optionNames),
     fields: ["$id", ...refFields],
     totalCount: false,
   };
@@ -509,11 +517,15 @@ function resolveArithOperand(operand: ArithNode, raw: KintoneRecord): number {
  * DELETE の WHERE 句から、対象レコードの $id を取得するための
  * kintone GET クエリを生成する。
  */
-export function deleteToGetQuery(stmt: DeleteStatement): KintoneGetForDmlParams {
+export function deleteToGetQuery(
+  stmt: DeleteStatement,
+  optionNames?: OptionQueryTranslatorSource
+): KintoneGetForDmlParams {
   assertDmlWhereIsSafe(stmt.where);
   return {
     app: stmt.appId,
-    query: whereToKintone(stmt.where),
+    // B205: kintone へ送るクエリはすべて 1 つの口を通す（選択肢の値を表示名へ直す）
+    query: serializeQueryForApp({ appId: stmt.appId, where: stmt.where }, optionNames),
     fields: ["$id"],
     totalCount: false,
   };

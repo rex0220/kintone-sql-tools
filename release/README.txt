@@ -1,33 +1,34 @@
-ksql 配布パッケージ (v3.90.0)
+ksql 配布パッケージ (v3.91.0)
 
 release 成果物:
-- ksql-plugin-v3.90.0.zip
-- ksql-mcp.mcpb (manifest version 3.90.0)
-- ksql-mcp.js (MCP server version 3.90.0)
+- ksql-plugin-v3.91.0.zip
+- ksql-mcp.mcpb (manifest version 3.91.0)
+- ksql-mcp.js (MCP server version 3.91.0)
 
-機能 (B204: ASSERT / EXIT のメッセージを変数で受ける・純加法。リテラルで書いた既存の SQL は不変):
-- ASSERT ... , @m_x / EXIT SUCCESS IF ... , @m_x と書けます (-- @ksql dialect: 1 が必要)。DECLARE した
-  変数へ外部注入 (variables / CLI の --var / MCP の variables) した文が、そのままメッセージになります。
-  利用者の言語で解決した文を渡せば、同じ SQL のままメッセージだけ差し替えられます。
-- 受けるのは変数 1 個だけです (式・連結・関数・数値は構文エラー)。配列変数・未宣言・RELATIVE_DATE 変数を
-  書いた形は、レコード API を 1 回も呼ぶ前に拒否します。
-- 空に解決したメッセージは「省いた」のと同じ扱いです (リテラルの '' も同じ)。これで ASSERT ... , '' の
-  エラー文末尾の空白・ASSERT WARN ... , '' の空の警告・空の EXIT の表示の 3 点だけ、表示が変わります。
-- EXPLAIN の計画には変数の名前 (, '@m_x') が出ます。外部注入した値は計画の文に出しません。
+機能 (B205: 選択肢とステータスの「言語ごとの表示名」・オプトイン・/flow のみ。既定は今までと同じ):
+- kintone の項目に「言語ごとの表示名」を設定すると、API が受け付ける値・返す値が利用者の表示言語の
+  名称に変わります。設定に保存した 1 つの SQL が、実行する人の言語で壊れます。createExecutionContext に
+  optionNames: "canonical" を渡すと、SQL には既定の名称 (項目の設定画面で見える値) を書けます。
+  変換するのは kintone との境目だけです。
+- 対象はラジオボタン / ドロップダウン / チェックボックス / 複数選択とプロセス管理のステータス
+  (サブテーブルの中も)。知らない値はそのまま通します。言語ごとの表示名が無いアプリでは何も変わりません。
+- optionOrder は既定の名称のままなので、選択肢の検査 (定義外の選択肢) を緩めずに SET が通ります。
+  表示名で書く形は通しません (正本は 1 つ)。
+- ステータスだけ正本の向きが変わります。"raw" は表示名 (WHERE ステータス = 'みしょり')、"canonical" は
+  既定名 (WHERE ステータス = '未処理')。移行のときは SQL の書き換えが要ります。
+- 対応表が一意に決まらないアプリは、レコードを 1 件も読む前に ArgumentError で止めます。EXPLAIN とは
+  併用できません。同梱の createKintoneClient が要ります (自作のクライアントでは使えません)。
+  CLI・MCP・/engine では公開していません。
 
-v3.89.0 / v3.88.0 の節は畳みました (B203 外部注入で文字列配列 = DECLARE @ids = []; と variables・
-  variableArrayMaxElements 既定 500 / B198 /flow の APPLY の書込 = confirm 必須 / B200 APPEND ... SELECT と
-  APPEND ... VALUES の as-of / B201 ORDER BY に集計式を書いた形を構文エラーに)。
+v3.90.0 / v3.89.0 / v3.88.0 の節は畳みました (B204 ASSERT / EXIT のメッセージを変数で受ける =
+  ASSERT ... , @m_x / B203 外部注入で文字列配列 = DECLARE @ids = []; と variables / B198 /flow の
+  APPLY の書込 = confirm 必須 / B200 APPEND ... SELECT と APPEND ... VALUES の as-of / B201 ORDER BY に
+  集計式を書いた形を構文エラーに)。
 
-v3.87.0 / v3.86.0 / v3.85.0 の節は畳みました (B196 /flow の一時テーブルの合計の上限 tempTablesMaxTotalRows /
-  B195 /flow の書込前の確認フック confirm = 純加法 / B193 HAVING のウィンドウ別名参照を実行前に拒否 = 結果が変わる)。
-
-v3.84.0 〜 v3.80.0 の節は畳みました (B191 式の中のウィンドウの PARTITION BY GROUPING() の内部エラー修正 /
-  B190 CTE／一時テーブルを元にした SELECT の CASE 条件のウィンドウ修正 / B188 残務 先行文の警告を表示 /
-  B184 ウィンドウ関数を集計と同じ SELECT に = 純加法 / B187 HAVING の集計評価 = 結果が変わる修正)。
-
-v3.79.0 の節は畳みました (診断と警告の穴 4 件 = B185 EXPLAIN の SELECT 列検査 / B186 混在 JOIN の
-  EXPLAIN 偽陽性 / B188 一時テーブル経由の警告伝播 / B189 CLI 単文 SELECT の警告表示。実行結果は不変)。
+v3.87.0 〜 v3.79.0 の節は畳みました (B196 /flow の一時テーブルの合計の上限 tempTablesMaxTotalRows /
+  B195 書込前の確認フック confirm / B193 HAVING のウィンドウ別名参照を拒否 / B191 ウィンドウの
+  PARTITION BY GROUPING() 修正 / B190 CASE 条件のウィンドウ修正 / B184 ウィンドウ関数を集計と同じ
+  SELECT に / B187 HAVING の集計評価の修正 / 診断と警告の穴 4 件 = B185・B186・B188・B189)。
 
 v3.78.0 / v3.77.0 の節は畳みました (B182 COALESCE で包んだ集計値の修正 = 結果が変わる /
   B181 別名の参照解決 / B183 MCP instructions の Writing rules / B179 CSV export = --export-csv・/flow 公開 API)。
@@ -107,27 +108,26 @@ B124 集計算術式 / B125 集計のウィンドウ関数 / B123 GROUP BY だ�
 - CHANGELOG.md と GitHub Releases に版ごとの内容と移行案内があります。
   https://github.com/rex0220/kintone-sql-tools/releases
 
-1. ksql-plugin-v3.90.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.91.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.90.0): B204 ASSERT / EXIT SUCCESS IF のメッセージを変数で受ける (純加法)。
+本リリース (v3.91.0): B205 選択肢とステータスの「言語ごとの表示名」を既定の名称で書ける optionNames
+(オプトイン・/flow のみ。既定の "raw" は今までと同じ)。
 
-前リリース (v3.89.0 / v3.88.0): B203 外部注入で文字列配列 (純加法) / B198 /flow の APPLY の書込
-(allowApplyMutation・confirm 必須) / B200 APPEND ... SELECT と APPEND ... VALUES の as-of 関数 (純加法) /
-B201 ORDER BY に集計式を書いた形を構文エラーに (実行できなかった形のみ)。
+前リリース (v3.90.0 / v3.89.0 / v3.88.0): B204 ASSERT / EXIT のメッセージを変数で受ける (純加法) /
+B203 外部注入で文字列配列 (純加法) / B198 /flow の APPLY の書込 (confirm 必須) / B200 APPEND ... SELECT と
+APPEND ... VALUES の as-of 関数 / B201 ORDER BY に集計式を書いた形を構文エラーに。
 
 前リリース (v3.87.0〜v3.81.0): B196 /flow の一時テーブルの合計の上限 tempTablesMaxTotalRows (純加法) /
 B195 /flow の書込前の確認フック confirm (純加法) / B193 HAVING のウィンドウ別名参照を実行前に拒否 (結果が変わります) /
 B191 式の中のウィンドウの PARTITION BY GROUPING() 修正 / B190 CASE 条件のウィンドウ修正 / B188 残務 = 先行文の警告を表示 /
 B184 ウィンドウ関数を集計と同じ SELECT に・ウィンドウ結果を式の中で (純加法)。
 
-前リリース (v3.80.0 / v3.79.0): B187 HAVING に直接書いた集計を SELECT 列に無くても評価 (結果が変わります) /
-診断と警告の穴 4 件 = B185 / B186 / B188 / B189 (実行結果は不変)。
-
-前リリース (v3.78.0): B182 COALESCE で包んだ集計値が静かに間違う修正 (結果が変わります)、
-B181 別名の参照解決 (純加法)、B183 MCP instructions に Writing rules 8 行 (エンジン不変)。
+前リリース (v3.80.0〜v3.78.0): B187 HAVING に直接書いた集計を SELECT 列に無くても評価 (結果が変わります) /
+診断と警告の穴 4 件 = B185 / B186 / B188 / B189 (実行結果は不変) / B182 COALESCE で包んだ集計値の修正
+(結果が変わります) / B181 別名の参照解決 / B183 MCP instructions に Writing rules。
 
 前リリース (v3.77.0〜v3.74.0): B179 CSV export (--export-csv・/flow 公開 API) / B178 /flow IMPORT の
 materialize 通知 / B177 /flow named IMPORT source 公開 API (既定 OFF) / B176 EXPLAIN の native UPSERT 適格性の修正。

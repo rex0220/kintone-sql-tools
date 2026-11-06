@@ -10,6 +10,11 @@ import {
   normalizeProcessStatusStates,
   type RawProcessStatusState,
 } from "../core/processStatus";
+import {
+  optionNameSourceFrom,
+  type OptionNameSource as KintoneOptionNameSource,
+  type RawLocalizedStatusStates,
+} from "../core/optionNameMap";
 import { isSearchAbortedWarning } from "../core/searchAbortWarning";
 import type {
   KintoneAppInfo,
@@ -192,6 +197,19 @@ export function createKintoneClient(config: CreateKintoneClientConfig): FlowKint
         enable: response.body.enable,
         states: normalizeProcessStatusStates(response.body.states),
       };
+    },
+    /** B205: 利用者の表示言語で見た選択肢とステータス（`optionNames: "canonical"` のときだけ呼ばれる）。 */
+    async getOptionNames(appId: number): Promise<KintoneOptionNameSource> {
+      const app = encodeURIComponent(String(appId));
+      const [form, status] = await Promise.all([
+        request<{ properties: Record<string, FormFieldProperty> }>(
+          `/app/form/fields.json?app=${app}&lang=user`, "GET", appId
+        ),
+        request<RawLocalizedStatusStates>(`/app/status.json?app=${app}&lang=user`, "GET", appId),
+      ]);
+      return optionNameSourceFrom(
+        appId, flattenFormFieldProperties(form.body.properties), status.body
+      );
     },
   };
   return client;

@@ -1,4 +1,4 @@
-import { whereToKintone } from "../../converter/whereToKintone";
+import { serializeWhereForDisplay } from "../../converter/queryForApp";
 import type {
   BinaryExpr,
   FieldRef,
@@ -137,7 +137,7 @@ export function decomposeRelativeDatePrefilter(
     fieldOptions: fieldMetadata.fieldOptions,
   });
 
-  const serialize = testSeam.serialize ?? whereToKintone;
+  const serialize = testSeam.serialize ?? serializeWhereForDisplay;
   const containsFunctions =
     testSeam.containsFunctions ?? serializationContainsFunctions;
   const confirmedLeaves: BinaryExpr[] = [];

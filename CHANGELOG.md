@@ -3,6 +3,34 @@
 リリースごとの変更点。**本ファイルは v3.45.0 以降だけを保持する。**
 それ以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) の各タグを参照。
 
+## v3.91.0（2026-11-07）
+
+### 機能（B205: 選択肢とステータスの「言語ごとの表示名」を既定の名称で書ける `optionNames`）**※ オプトイン（既定 `"raw"` は今までとまったく同じ。公開面は `/flow` だけ）**
+
+- kintone の項目に「言語ごとの表示名」を設定すると、**API が受け付ける値・返す値が利用者の表示言語の名称**に変わります
+  （レコードの値・`query` の条件・書き込む値のすべて）。設定に保存した 1 つの SQL は、実行する人の表示言語で壊れます。
+  **`createExecutionContext({ …, optionNames: "canonical" })` を渡すと、SQL には既定の名称（項目の設定画面で見える値）を書けます。**
+- **変換するのは kintone との境目だけ**です。読んだ値は表示名 → 既定名、クエリと書き込む値は既定名 → 表示名。
+  `optionOrder`（`ERR_CHOICE_INVALID` の判定・並び順・`IN` の畳み込み）は**既定の名称のまま**なので、
+  検査を緩めずに `SET` が通ります（検査 → 境目で変換 → kintone の順）。**表示名で書く形は通しません**（正本は 1 つ）。
+- 対象は `RADIO_BUTTON` / `DROP_DOWN` / `CHECK_BOX` / `MULTI_SELECT` と**プロセス管理のステータス**。**サブテーブルの中も対象**です。
+  **知らない値はそのまま通します**（言語ごとの表示名を設定する前に入った値で止めません）。
+  **言語ごとの表示名が 1 つも無いアプリでは何も変わりません**（変換が恒等なので包みも通しません）。
+- 対応表は**既定名の側（`getFields`）と表示名の側（`form/fields?lang=user`・`app/status.json?lang=user`）を `index` で突き合わせて**作り、
+  **一意に決まらない形はレコードを 1 件も読む前に `ArgumentError`**（表示名の重複・空・`index` の不一致・既定名との交差／循環・
+  項目コードの重複・型の不一致・プロセス管理が有効なのに対応が無い）。追加の通信はアプリごとに 2 回だけ（呼出し単位でキャッシュ）。
+- **ステータスだけ正本の向きが変わります**。`"raw"` は表示名が正本（`WHERE ステータス = 'みしょり'`）、
+  `"canonical"` は既定名（`WHERE ステータス = '未処理'`）。移行のときは SQL の書き換えが要ります。
+- **`EXPLAIN` とは併用できません**（`createExecutionContext` / `explainScript` が `ArgumentError`）。
+  計画の文は「実際に送るクエリ」を見せる場所で、`canonical` では表示名を送るためです。
+- **同梱の `createKintoneClient` が要ります**（内部で `getOptionNames` を使う）。自作のクライアントでは `"canonical"` を使えません。
+  CLI・MCP・`/engine` では公開していません。
+- 依頼元: kSQL アクション（依頼 KJ-8）。テスト 73 件（`b205QuerySeamGuard` / `b205OptionNameMap` / `b205RecordOptionValues` /
+  `b205OptionNamesCanonical` / `b205OptionNamesStrict` / `b205OptionNamesStatus` / `b205OptionNamesJoinAndOrder`）。
+  Codex レビュー 4 回（設計 1・実装 3）で BLOCKER 3 / MAJOR 10 / MINOR 8 を処置（`appId` を型で必須に・送信クエリの口を 1 つに・
+  番人モック・プロセス管理の判定を `app/status.json` の `enable` に）。**残した 2 件**＝手組みクエリ向けの branded type と、
+  既定名側／表示名側の `form/fields` の revision の突き合わせ（窓が 2 本の呼び出しの間のミリ秒）。
+
 ## v3.90.0（2026-11-06）
 
 ### 機能（B204: `ASSERT` / `EXIT SUCCESS IF` のメッセージを変数で受ける）**※ 純加法（リテラルで書いた既存の SQL と、AST の `message` しか見ない既存の読み手は不変）**

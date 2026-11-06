@@ -4313,6 +4313,63 @@ SELECT @batch AS バッチID, 顧客No FROM APP100 WHERE 顧客ランク IN @ran
 
 > **`APP@profile` との併用**: `SET @now = NOW(); SELECT * FROM APP100@dev WHERE 作成日時 = @now` のように、`@profile`（アプリ指定）と `@変数` は同居できます（CLI / MCP が profile だけを先に正規化するため混同しません）。
 
+### 選択肢とステータスの「言語ごとの表示名」（`optionNames`。v3.91.0〜・`/flow` のみ）
+
+kintone の項目に「**言語ごとの表示名**」（アプリの設定 → 言語ごとの名称）を設定すると、
+**kintone の API が受け付ける値・返す値が利用者の表示言語の名称に変わります**
+（レコードの値・`query` の条件・書き込む値のすべて）。`records.json` に言語を選ぶ口は無く、
+**データの言語は認証方式で決まります**（API トークン認証は `Administrator` の表示言語、
+それ以外は API を実行したユーザーの表示言語）。デフォルトの名称には**落ちません**。
+
+エンジンは項目定義を **`lang` なし（＝既定の名称）** で取るので、既定では次のようになります。
+
+| 書き方 | `optionNames: "raw"`（既定。今までの動き） |
+|---|---|
+| `WHERE 選択肢 = '既定名'` | `optionOrder` にあるので `in ("既定名")` に畳んで押し下げ → **kintone がクエリエラー** |
+| `WHERE 選択肢 = '表示名'` | `optionOrder` に無いので押し下げず、**JS 評価**で絞る（通るが全件読む） |
+| `SET 選択肢 = '既定名'` | 検査は通る → **kintone が 400** |
+| `SET 選択肢 = '表示名'` | **`ERR_CHOICE_INVALID`**（定義外の選択肢）で実行前に止まる |
+| `ORDER BY 選択肢` | 読んだ値が `optionOrder` に無く、**定義順にならない**（`KORDER BY` は kintone が並べるので正しい） |
+
+**`optionNames: "canonical"` を渡すと、既定の名称を正本にできます**（`/flow` の `createExecutionContext`）。
+
+```ts
+const context = createExecutionContext({ client, statements, meta, optionNames: "canonical" });
+```
+
+```sql
+-- 利用者の表示言語に依らず動く（SQL には項目の設定画面で見える既定の名称を書く）
+SELECT 選択肢 FROM LAPP_受注 WHERE 選択肢 = 'sample1';
+UPDATE LAPP_受注 SET 選択肢 = 'sample2' WHERE $id = @id;
+SELECT $id FROM LAPP_受注 WHERE ステータス = '未処理';
+```
+
+- **変換するのは kintone との境目だけ**です。読んだ値は表示名 → 既定名、クエリと書き込む値は既定名 → 表示名。
+  `optionOrder`（`ERR_CHOICE_INVALID` の判定・並び順・`IN` の畳み込み）は**既定の名称のまま**なので、
+  検査を緩めずに `SET` が通ります（検査 → 境目で変換 → kintone の順）。
+- 対象は `RADIO_BUTTON` / `DROP_DOWN` / `CHECK_BOX` / `MULTI_SELECT` と **プロセス管理のステータス**。
+  **サブテーブルの中も対象**です（`CHECK_BOX` などの配列は要素ごと）。
+- **知らない値はそのまま通します**（言語ごとの表示名を設定する前に入った値で止めません）。
+- **言語ごとの表示名を設定していないアプリでは何も変わりません**（変換が恒等なので、包みも通しません）。
+  追加の通信は `"canonical"` のときだけ、アプリごとに `form/fields`（`lang: "user"`）と
+  `app/status.json`（`lang: "user"`）の 2 回です（呼出し単位でキャッシュ）。
+  後者はプロセス管理の取得と**同じ 1 枚を使い回す**ので、`getProcessStatuses` は呼ばれません
+  （`ExecuteMetrics.processStatusCalls` は**メソッドの呼出し回数**で、`app/status.json` の
+  通信回数ではありません）。
+- **同梱のクライアントが要ります**（`/flow` の `createKintoneClient`）。`"canonical"` は内部で
+  `client.getOptionNames` を使いますが、**これは公開の `FlowKintoneClient` には入れていません**＝
+  **自作のクライアントでは `"canonical"` を使えません**（自作クライアントは `"raw"` のまま）。
+  実装の無いクライアントに `"canonical"` を渡すと `createExecutionContext` が `ArgumentError`。
+  対応表が一意に決まらない場合（表示名の重複・`index` の不一致・既定名との交差など）も、
+  **レコードを 1 件も読む前に** `ArgumentError` です。
+- **`EXPLAIN` とは併用できません**（`createExecutionContext` / `explainScript` が `ArgumentError`）。
+  計画の文は「実際に送るクエリ」を見せる場所で、`canonical` では表示名を送るためです。
+  計画を見るときは `optionNames` を渡さない実行コンテキストで `EXPLAIN` してください。
+- **ステータスだけ正本の向きが変わります**。`"raw"` では表示名が正本（`WHERE ステータス = 'みしょり'`）、
+  `"canonical"` では既定名（`WHERE ステータス = '未処理'`）。移行のときは設定の書き換えが要ります。
+- **既定は `"raw"`** です（読んだ値の文字列が変わるため、既存の出力を壊しません）。
+  CLI・MCP・`/engine` では `"canonical"` を公開していません。
+
 ### 注意
 
 - **トランザクションはありません**。バッチも非アトミックです（DML バッチ対応後も、途中失敗時に前半のみ反映された状態が起こり得ます）
