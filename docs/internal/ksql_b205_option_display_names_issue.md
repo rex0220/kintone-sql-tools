@@ -138,8 +138,31 @@ B203（配列の注入を `/flow` だけにした）と同じ判断で、根拠�
 | 段階 | 状態 |
 |---|---|
 | 1 前提整備 | ✅ **済み（2026-11-06）**＝クエリの口・レコードの再帰の変換・対応表の契約と検査。**公開面は 1 つも変えていない** |
-| 2 選択肢 | 📋 未着手（次はここ。オプションの配線・クライアントの口・包み・preflight） |
+| 2a クライアントの口 | ✅ **済み（2026-11-06）**＝`KintoneClient.getOptionNames?`・`/flow` の実装・`routeClient` と metrics の包みへの転送・公開面を `/flow` に閉じる判断（§2.1） |
+| 2b 選択肢の有効化 | 📋 **未着手（次はここ）**。**5 つが同時に入って初めて意味を持つ**（下） |
 | 3 ステータス | 📋 未着手 |
+
+### 2b は分けられない 1 塊（2026-11-06 に着手して分かったこと）
+
+**`optionNames` の型だけ先に出すのは罠**なので戻した＝`"canonical"` を渡せるのに変換が効かない状態は、
+この設計がいちばん避けたい「**黙って一部だけ canonical**」そのものになる。
+
+**なぜ分けられないか: クエリの変換が同期だから。**
+`serializeQueryForApp` はクエリの組み立て時に**同期**で呼ばれるので、**対応表がその時点でメモリにある**必要がある。
+つまり「レコード API を呼ぶ直前に遅延で取る」ではなく、**文を実行する前に preflight で対象アプリ分を作る**。
+`createExecutionContext` は**同期**なので（レビューの MAJOR）、そこでできるのは能力の確認だけで、
+preflight は**最初の `executeStatement` / `previewStatement` の冒頭**に置く。
+
+| # | 2b で同時に入れるもの |
+|---|---|
+| 1 | `optionNames?: "raw" \| "canonical"` の型（`CreateExecutionContextOptions` と `ExplainScriptOptions`）＋ コアの `BatchExecuteOptions` |
+| 2 | `createExecutionContext` の**同期の能力確認**（`getOptionNames` が無ければ `ArgumentError`） |
+| 3 | **最初の実行前の非同期 preflight**（対象アプリ分の対応表を作る。`identity` なら以降は素通し） |
+| 4 | **読み・書きの包み**（`mapRecordsOptionValues` を使う。`getRecords` / カーソルの `nextPage` / `postRecords` / `putRecords` / `upsertRecords`。**包む順序を固定**） |
+| 5 | **クエリの口に変換器**（`serializeQueryForApp` の第 2 引数・押し下げ AST のリテラル変換・**`appId` 省略を拒む fail-closed**・`relativeDateExplainLines` に app を通す） |
+
+続いて `EXPLAIN` の扱い（`resolveMetadata: false` との併用拒否・実行と計画の一致の試験）と、
+`/flow` 水準の受入試験（§6 の AC1〜9）。**段階 1 の 3 本分くらいの量**。
 
 ### 段階 1 でやったこと（2026-11-06）
 
