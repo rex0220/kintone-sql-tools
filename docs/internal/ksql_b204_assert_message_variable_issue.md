@@ -1,6 +1,6 @@
 # B204 `ASSERT` / `EXIT SUCCESS IF` のメッセージを変数で受ける
 
-- 状態: 🔧 **実装済み・レビュー済み・未リリース（2026-11-06。v3.90.0 見込み）**。テスト 48 件（`src/parser/__tests__/b204AssertMessageVariable.test.ts` 13 件・`src/__tests__/b204AssertMessageVariable.test.ts` 23 件・`src/flow-library/__tests__/b204AssertMessageVariable.test.ts` 12 件）。Codex レビュー（2026-11-06）は BLOCKER 0 / MAJOR 2 / MINOR 3 で、**全件を処置済み**（§5 の「レビューで分かったこと」）
+- 状態: ✅ **v3.90.0 でリリース（2026-11-06）**。テスト 48 件（`src/parser/__tests__/b204AssertMessageVariable.test.ts` 13 件・`src/__tests__/b204AssertMessageVariable.test.ts` 23 件・`src/flow-library/__tests__/b204AssertMessageVariable.test.ts` 12 件）。Codex レビュー（2026-11-06）は BLOCKER 0 / MAJOR 2 / MINOR 3 で、**全件を処置済み**（§5 の「レビューで分かったこと」）
 - 種別: 機能（**構文の受け口だけ**。変数の解決・外部注入・端の守りは B203 までで既にある）
 - 優先: 低〜中（急ぎではない。依頼元の Ver.1 は「1 言語のまま」で出せる）
 - 版: minor（v3.90.0 想定）。**純加法**＝リテラルで書いた既存の SQL と、`message` しか見ない既存の読み手は不変

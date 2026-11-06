@@ -1,21 +1,23 @@
-ksql 配布パッケージ (v3.89.0)
+ksql 配布パッケージ (v3.90.0)
 
 release 成果物:
-- ksql-plugin-v3.89.0.zip
-- ksql-mcp.mcpb (manifest version 3.89.0)
-- ksql-mcp.js (MCP server version 3.89.0)
+- ksql-plugin-v3.90.0.zip
+- ksql-mcp.mcpb (manifest version 3.90.0)
+- ksql-mcp.js (MCP server version 3.90.0)
 
-機能 (B203: 外部注入で文字列配列を受ける・純加法。プラグイン・CLI・MCP の動きは不変):
-- DECLARE @ids = []; と宣言すると「配列の変数」になり、/flow の variables に文字列配列を渡せます
-  (variables: { ids: ["311","301"] })。IN @ids / NOT IN @ids でだけ使え、in ("311","301") へ押し下がります。
-- 宣言が種類を決めます。食い違い (配列の宣言に文字列・スカラーの宣言に配列)・文字列以外の要素・未宣言のキー・
-  要素数の超過は createExecutionContext が ArgumentError (レコード API 0 回・書込 0 回)。
-- 要素数の上限は variableArrayMaxElements (既定 500)。要素は kintone へ送るクエリの IN の並びになるため、
-  実際の壁は URL の長さです (3 桁の ID なら 200 件でエンコード後 2.5 KB)。空配列は 0 件で読みに行きません。
+機能 (B204: ASSERT / EXIT のメッセージを変数で受ける・純加法。リテラルで書いた既存の SQL は不変):
+- ASSERT ... , @m_x / EXIT SUCCESS IF ... , @m_x と書けます (-- @ksql dialect: 1 が必要)。DECLARE した
+  変数へ外部注入 (variables / CLI の --var / MCP の variables) した文が、そのままメッセージになります。
+  利用者の言語で解決した文を渡せば、同じ SQL のままメッセージだけ差し替えられます。
+- 受けるのは変数 1 個だけです (式・連結・関数・数値は構文エラー)。配列変数・未宣言・RELATIVE_DATE 変数を
+  書いた形は、レコード API を 1 回も呼ぶ前に拒否します。
+- 空に解決したメッセージは「省いた」のと同じ扱いです (リテラルの '' も同じ)。これで ASSERT ... , '' の
+  エラー文末尾の空白・ASSERT WARN ... , '' の空の警告・空の EXIT の表示の 3 点だけ、表示が変わります。
+- EXPLAIN の計画には変数の名前 (, '@m_x') が出ます。外部注入した値は計画の文に出しません。
 
-v3.88.0 の節は畳みました (B198 /flow の APPLY の書込 = allowApplyMutation・confirm 必須 /
-  B200 APPEND ... SELECT とAPPEND ... VALUES の as-of = 純加法 /
-  B201 ORDER BY に集計式を書いた形を構文エラーに = 実行できなかった形のみ)。
+v3.89.0 / v3.88.0 の節は畳みました (B203 外部注入で文字列配列 = DECLARE @ids = []; と variables・
+  variableArrayMaxElements 既定 500 / B198 /flow の APPLY の書込 = confirm 必須 / B200 APPEND ... SELECT と
+  APPEND ... VALUES の as-of / B201 ORDER BY に集計式を書いた形を構文エラーに)。
 
 v3.87.0 / v3.86.0 / v3.85.0 の節は畳みました (B196 /flow の一時テーブルの合計の上限 tempTablesMaxTotalRows /
   B195 /flow の書込前の確認フック confirm = 純加法 / B193 HAVING のウィンドウ別名参照を実行前に拒否 = 結果が変わる)。
@@ -105,15 +107,16 @@ B124 集計算術式 / B125 集計のウィンドウ関数 / B123 GROUP BY だ�
 - CHANGELOG.md と GitHub Releases に版ごとの内容と移行案内があります。
   https://github.com/rex0220/kintone-sql-tools/releases
 
-1. ksql-plugin-v3.89.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.90.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.89.0): B203 外部注入 (DECLARE + variables) で文字列配列を受ける (純加法)。
+本リリース (v3.90.0): B204 ASSERT / EXIT SUCCESS IF のメッセージを変数で受ける (純加法)。
 
-前リリース (v3.88.0): B198 /flow の APPLY の書込 (allowApplyMutation・confirm 必須) / B200 APPEND ... SELECT と
-APPEND ... VALUES の as-of 関数 (いずれも純加法) / B201 ORDER BY に集計式を書いた形を構文エラーに (実行できなかった形のみ)。
+前リリース (v3.89.0 / v3.88.0): B203 外部注入で文字列配列 (純加法) / B198 /flow の APPLY の書込
+(allowApplyMutation・confirm 必須) / B200 APPEND ... SELECT と APPEND ... VALUES の as-of 関数 (純加法) /
+B201 ORDER BY に集計式を書いた形を構文エラーに (実行できなかった形のみ)。
 
 前リリース (v3.87.0〜v3.81.0): B196 /flow の一時テーブルの合計の上限 tempTablesMaxTotalRows (純加法) /
 B195 /flow の書込前の確認フック confirm (純加法) / B193 HAVING のウィンドウ別名参照を実行前に拒否 (結果が変わります) /
