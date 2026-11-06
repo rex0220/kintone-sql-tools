@@ -35,7 +35,8 @@ kintone が受け付ける値がずれる**。
 ## 2. 出すもの（要点。全文は回答 §3）
 
 1. **オプトイン 1 つ**: `optionNames?: "raw" | "canonical"`（既定 `"raw"`）。置き場所は**実行側**
-   （`createExecutionContext` / `executeBatch` / `execute` / `explainScript`。CLI・MCP も同名）。
+   （`createExecutionContext` / `explainScript`）。
+   **公開面は `/flow` だけに閉じる**（2026-11-06 に変更。下の「§2.1 公開面を `/flow` に閉じた理由」）。
 2. **クライアントに任意の口** `getOptionNames?(appId)`。返すのは**最終の対応表ではなく、コアが検算できる生のメタデータ**
    （`lang: "user"` の `form/fields` と、**キーを保てる** status）。`"canonical"` なのに口が無ければ `ArgumentError`。
    **`createExecutionContext` は同期**なので、ここでできるのは能力の存在確認まで＝**表は最初の実行前に非同期 preflight**。
@@ -48,6 +49,39 @@ kintone が受け付ける値がずれる**。
 6. 対応表が一意に決まらない形（**表示名の重複**・空・`index` の不一致・既定名との交差・循環）は**表を作る時点で `ArgumentError`**。
 7. 知らない値は**そのまま通す**（言語ごとの表示名を設定する前に入った値で業務を止めない）。
 8. `EXPLAIN` は**実行と同じ口**を使う。**`resolveMetadata: false` と `"canonical"` の併用は拒否**。
+
+### 2.1 公開面を `/flow` に閉じた理由（2026-11-06。段階 2 の実装中に決めた）
+
+回答（KJ-8）では「CLI・MCP にも同じ名前で足す」と書いたが、**`/flow` だけに閉じる**に変えた。
+B203（配列の注入を `/flow` だけにした）と同じ判断で、根拠は 2 つ。
+
+1. **クライアントを包む所が 10 か所あり、`getOptionNames` を落とす形が多い。**
+   `KintoneClient` を**メソッドの明示列挙**で包んでいる所は、新しい任意の能力を**黙って落とす**。
+   実測で数えたところ（`getProcessStatuses:` の出現で検索）**10 か所**あり、Codex が挙げた 2 つより多かった。
+
+   | 包み | 形 | `/flow` の経路か |
+   |---|---|---|
+   | `wrapClientWithMetrics`（`src/execute.ts`） | **明示列挙** → **直した** | はい |
+   | `routeClient`（`src/flow-library/index.ts`。論理アプリ） | **明示列挙** → **直した**（`appId` も呼び出し側の番号に戻す） | はい |
+   | `wrapClientWithSearchAbort` / `wrapClientWithCursorScope` / `wrapClientWithWriteGate` / `wrapClientWithChunkWrittenCallback` | `{ ...client, 上書き }`＝**spread なので自動で保たれる** | はい |
+   | `engine-library/readonlyClient.ts` / `cursorScope.ts` / `logicalApps.ts`・`cli/index.ts`（2 か所）・`api/requestGate.ts`・`node/runtime.ts` | 明示列挙（未対応） | **いいえ**（`/engine`・CLI・MCP・Node の経路） |
+
+   → **`/flow` は 2 か所直すだけで閉じる**。ほかの面まで広げると、落とし穴を 6 か所増やすことになる。
+
+2. **CLI・MCP は認証方式が違い、データの言語が別に決まる。**
+   公式文書のとおり **API トークン認証はレコードのデータの言語が `Administrator` の表示言語**になる。
+   `lang: "user"` が同じ言語に解決されるかは**面ごとに実測しないと言えない**（回答 §3.2 の申し送り）。
+   実需のある依頼元（kSQL アクション）は `/flow` を使うので、**先に `/flow` だけ出す**。
+   CLI・MCP・`/engine` は、実需が出たときに**面ごとの実測つきで**別に起票する。
+
+**したがって**: **口を実装するのも `/flow` の `createKintoneClient` だけ**にした。
+`/engine`・CLI・プラグインの内製クライアントには**足さない**（使わない能力を公開面に置かない）。
+
+- とくに `/engine` の `ReadonlyKintoneClient` には「**read のメソッドは 6 つだけ**」を固定する番人の試験がある
+  （`src/engine-library/__tests__/browserClient.test.ts`）。実装を足すと落ちる＝**設計の意図どおりの警告**だったので、
+  実装ごと引っ込めた（`optionNames` を `/engine` に出すときに、その試験と一緒に見直す）。
+- `KintoneClient`（コアの型）にだけ**任意のメソッド**として宣言する（コアが呼ぶため）。
+  自作クライアントは実装しなくてよく、`"canonical"` を渡したときだけ実行開始前に拒まれる。
 
 ## 3. BLOCKER だったところ（設計レビュー。検算済み）
 

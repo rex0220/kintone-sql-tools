@@ -419,6 +419,16 @@ function routeClient(
     getNumberPrecision: (appId) => client.getNumberPrecision(app(appId)),
     getProcessStatuses: (appId) => client.getProcessStatuses(app(appId)),
   };
+  // B205: 新しい能力も論理アプリの付け替えを通す。ここで落とすと、論理アプリ（LAPP_）で書いた
+  // スクリプトでは optionNames: "canonical" が黙って効かなくなる（レビューの指摘）。
+  if (typeof client.getOptionNames === "function") {
+    const getOptionNames = client.getOptionNames.bind(client);
+    routed.getOptionNames = async (appId) => {
+      const source = await getOptionNames(app(appId));
+      // 対応表の appId は呼び出し側（論理アプリの番号）に合わせて返す（コアの照合がここで一致する）
+      return { ...source, appId };
+    };
+  }
   if ("upsertRecords" in client && typeof client.upsertRecords === "function") {
     routed.upsertRecords = (params) => client.upsertRecords!({ ...params, app: app(params.app) });
   }

@@ -120,6 +120,12 @@ import {
 } from "./converter/selectToKintone";
 import { serializeQueryForApp, type GeneratedPredicate } from "./converter/queryForApp";
 import {
+  buildAppOptionNameMap,
+  type AppOptionNameMap,
+  type OptionNameSource as KintoneOptionNameSource,
+} from "./core/optionNameMap";
+export type { OptionNameSource as KintoneOptionNameSource } from "./core/optionNameMap";
+import {
   insertToPostBatches,
   updateToGetQuery,
   updateToPutBatches,
@@ -302,6 +308,18 @@ export interface KintoneClient {
   getNumberPrecision: (appId: number) => Promise<NumberPrecision>;
   /** GET /k/v1/app/status.json（プロセス管理設定） */
   getProcessStatuses: (appId: number) => Promise<KintoneProcessStatuses>;
+  /**
+   * B205: **利用者の表示言語で見た**選択肢とステータスの生のメタデータ
+   * （`form/fields` の `lang: "user"` と `app/status.json` の `lang: "user"`）。
+   *
+   * `optionNames: "canonical"` のときだけ呼ぶ（既定の `"raw"` では 1 回も呼ばない）。
+   * **任意**だが、`"canonical"` を渡したのにこの口が無いクライアントは
+   * 実行開始前に `ArgumentError` で拒む（黙って変換しないのが最悪なので fail-closed）。
+   *
+   * 返すのは**最終の対応表ではなく生のメタデータ**＝コアが既定名の側（`getFields`）と
+   * `index` で突き合わせて検算できるようにするため。
+   */
+  getOptionNames?: (appId: number) => Promise<KintoneOptionNameSource>;
 }
 
 export interface KintoneNativeUpdateKey { field: string; value: string }
@@ -1120,6 +1138,12 @@ function wrapClientWithMetrics(
       metrics.nativeUpsertCalls += 1;
       return client.upsertRecords!(params);
     };
+  }
+  // B205: 新しい能力も包みで落とさない（明示列挙なので、足すだけでは伝わらない）。
+  // 対応表の取得はメタデータなので fieldCalls / processStatusCalls には数えない
+  // （既存の metrics の意味を変えないため。追加の 2 回は optionNames: "canonical" のときだけ起きる）。
+  if (typeof client.getOptionNames === "function") {
+    wrapped.getOptionNames = (appId) => client.getOptionNames!(appId);
   }
   return wrapped;
 }

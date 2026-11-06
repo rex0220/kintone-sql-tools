@@ -61,6 +61,39 @@ export interface OptionNameSource {
   readonly statusStates: readonly OptionNamePair[] | null;
 }
 
+/** `app/status.json`（`lang: "user"`）の生の形。**キーが既定名・`name` が表示名**。 */
+export interface RawLocalizedStatusStates {
+  readonly states: Readonly<Record<string, { readonly name?: unknown; readonly index?: unknown }>> | null;
+}
+
+/**
+ * クライアントが `getOptionNames` で返す生のメタデータを組み立てる助け
+ * （内製クライアント 4 つが同じ正規化を使うため。写すとずれる）。
+ *
+ * - `userFields`: `form/fields`（**`lang: "user"`**）を `flattenFormFieldProperties` で平坦化したもの
+ * - `status`: `app/status.json`（**`lang: "user"`**）の本体。プロセス管理が無ければ `states: null`
+ */
+export function optionNameSourceFrom(
+  appId: number,
+  userFields: readonly KintoneFieldInfo[],
+  status: RawLocalizedStatusStates | null
+): OptionNameSource {
+  const rawStates = status?.states ?? null;
+  const statusStates = rawStates === null
+    ? null
+    : Object.entries(rawStates).map(([canonical, state]) => {
+        const index = Number(state?.index);
+        if (!Number.isSafeInteger(index) || index < 0) {
+          throw new OptionNameMapError(
+            `process status "${canonical}" has an invalid index (${String(state?.index)}).`
+          );
+        }
+        const display = typeof state?.name === "string" && state.name !== "" ? state.name : canonical;
+        return { canonical, display, index };
+      });
+  return { appId, fields: userFields, statusStates };
+}
+
 export class OptionNameMapError extends Error {
   constructor(message: string) {
     super(`ArgumentError: ${message}`);
