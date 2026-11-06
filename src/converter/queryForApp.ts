@@ -34,13 +34,13 @@ export interface GeneratedPredicate {
 
 export interface SerializeQueryForAppInput {
   /**
-   * 送り先のアプリ（段階 2 の対応表の引き当てに使う。段階 1 では使わない）。
+   * 送り先のアプリ（対応表の引き当てに使う）。
    *
-   * **省略できるのは、アプリが文脈から決まらない表示専用の経路だけ**（`EXPLAIN` の一部）。
-   * 段階 2 の変換器は、**`appId` が無い入力を拒む**（黙って変換しないのが最悪なので fail-closed）。
-   * 省略した箇所は段階 2 で呼び出し元からアプリを通す。
+   * **必須**。「アプリが分からないまま kintone へ送る」形を型で作れなくするため
+   * （実装レビューの MINOR）。条件部を**送らない**経路（計画の確かめ・`EXPLAIN` の表示）は
+   * この関数ではなく {@link serializeWhereForDisplay} を使う。
    */
-  readonly appId?: number;
+  readonly appId: number;
   /** WHERE の AST（押し下げる部分）。無い場合は条件なし */
   readonly where?: WhereExpr | null;
   /** AST を持たない生成述語。`and` で結ぶ */
@@ -67,14 +67,15 @@ function translatorFor(
   input: SerializeQueryForAppInput,
   source?: OptionQueryTranslatorSource
 ): ((field: string, value: string) => string) | undefined {
-  if (source === undefined || !source.canonicalOptionNames) return undefined;
-  if (input.appId === undefined) {
-    // 段階 1 で残した「アプリが文脈から決まらない経路」を、canonical のときは黙って通さない。
+  // 型で必須にしているが、JS からの呼び出しと将来の経路のために実行時も確かめる
+  // （黙って変換しないのが最悪なので、モードにかかわらず fail-closed）。
+  if (!Number.isSafeInteger(input.appId)) {
     throw new Error(
-      "InternalError: optionNames: \"canonical\" requires the target app for every kintone query; "
-      + "this query was built without one."
+      "InternalError: every kintone query must name its target app "
+      + `(got ${String(input.appId)}); use serializeWhereForDisplay for display-only strings.`
     );
   }
+  if (source === undefined || !source.canonicalOptionNames) return undefined;
   return source.optionQueryTranslate(input.appId);
 }
 
@@ -148,6 +149,23 @@ function serializeGeneratedPredicate(
  * `source`（通常はクライアント）が `optionNames: "canonical"` の対応表を持っているときだけ、
  * **選択肢とステータスの値を既定名から表示名へ**直す。`"raw"`（既定）では段階 1 と同じ文字列を返す。
  */
+/**
+ * **kintone へ送らない**条件部の文字列（計画の確かめと `EXPLAIN` の表示だけ）。
+ *
+ * 送る経路は必ず {@link serializeQueryForApp} を通す（アプリが必須＝対応表を引ける）。
+ * ここは「アプリが文脈から決まらない」「送らないので表示名に直す必要がない」場所の口で、
+ * **`whereToKintone` を直に呼ぶ唯一の代わり**。`optionNames: "canonical"` のとき
+ * `EXPLAIN` 自体を拒んでいるので、既定名が表示に残ることもない。
+ *
+ * 使っていい場所（2026-11-06 時点。増やすときは起票文書 §7.2 に理由を書く）:
+ *
+ * - `relativeDatePrefilterPlan` / `relativeDatePushdownGuard` の「関数が押し下がったか」の確かめ
+ * - `relativeDateExplainLines` の表示行
+ */
+export function serializeWhereForDisplay(where: WhereExpr): string {
+  return whereToKintone(where);
+}
+
 export function serializeQueryForApp(
   input: SerializeQueryForAppInput,
   source?: OptionQueryTranslatorSource

@@ -252,3 +252,25 @@ test("B205: EXPLAIN 文を含むバッチは createExecutionContext が拒む（
   // 弾いた時点でメタデータも取りに行かない
   expect(mock.optionNameCalls).toEqual([]);
 });
+
+test("B205: previewStatement も canonical を通る（差分の前後が既定名で揃う）", async () => {
+  const { previewStatement } = await import("../index");
+  const mock = mockClient();
+  // 対象の絞りは $id で（選択肢の = は DML の押し下げ要件を満たさず preview 自体が使えない＝既存の動き）
+  const parsed = parseScript(`${header}UPDATE APP1 SET ラジオボタン = 'sample2' WHERE $id = 1;`);
+  const context = createExecutionContext({
+    client: mock.value, statements: parsed.statements, meta: parsed.meta, ...canonical,
+  });
+  const preview = await previewStatement(parsed.statements[0], context);
+  await disposeExecutionContext(context);
+  // 差分の前後はどちらも既定名（読んだ値も SQL の値も canonical で揃う）
+  // モックは $id を絞らないので 3 件（件数そのものはここでは見ない）
+  expect(preview.counts.update).toBeGreaterThan(0);
+  expect(preview.samples[0]).toMatchObject({
+    kind: "update",
+    before: { ラジオボタン: "sample1" },
+    after: { ラジオボタン: "sample2" },
+  });
+  // 書き込みは 1 回も起きない
+  expect(mock.writes).toEqual([]);
+});

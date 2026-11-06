@@ -3,7 +3,10 @@ import type {
   FieldRef,
   WhereExpr,
 } from "../../types/ast";
-import { whereToKintone } from "../../converter/whereToKintone";
+import {
+  serializeQueryForApp,
+  type OptionQueryTranslatorSource,
+} from "../../converter/queryForApp";
 import { resolveFieldSemantics } from "../fieldSemantics";
 import { isKlike, type KlikeExpr } from "../like";
 import {
@@ -853,10 +856,12 @@ function collectRejections(
  */
 export function serializeJoinPushdownItem(
   item: JoinPushdownItem,
-  sources: readonly JoinPushdownSource[]
+  sources: readonly JoinPushdownSource[],
+  optionNames?: OptionQueryTranslatorSource
 ): string {
   assertPredicateOwnership(item.predicate, item, sources);
-  return whereToKintone(item.predicate);
+  // B205: JOIN の押し下げも 1 つの口を通す（選択肢の値を表示名へ直す）
+  return serializeQueryForApp({ appId: item.appId, where: item.predicate }, optionNames);
 }
 
 function classifyStep2AndLeaves(

@@ -1,5 +1,5 @@
 import { resolveSelectMode, type SelectMode } from "../../converter/selectToKintone";
-import { whereToKintone } from "../../converter/whereToKintone";
+import { serializeWhereForDisplay } from "../../converter/queryForApp";
 import type {
   ApplyBlock,
   DeleteStatement,
@@ -523,9 +523,11 @@ export async function buildRelativeDatePushdownPlan(
         && select.joins.length === 0;
       const selectMode = resolveSelectMode(select);
       const capability = await resolver.select(select);
+      // B205: この文字列は kintone へ送らない（「関数が押し下がったか」の確かめと EXPLAIN の表示だけ）。
+      // 送る条件部は execute.ts が serializeQueryForApp で作り直す。
       let restQuery = "";
       try {
-        restQuery = candidate.where === null ? "" : whereToKintone(candidate.where);
+        restQuery = candidate.where === null ? "" : serializeWhereForDisplay(candidate.where);
       } catch {
         restQuery = "";
       }
@@ -627,9 +629,10 @@ export async function buildRelativeDatePushdownPlan(
 
     const dml = candidate.source as UpdateStatement | DeleteStatement;
     const capability = await resolver.dml(dml);
+    // B205: 送らない文字列（上と同じ。確かめと表示だけ）。
     let restQuery = "";
     try {
-      restQuery = candidate.where === null ? "" : whereToKintone(candidate.where);
+      restQuery = candidate.where === null ? "" : serializeWhereForDisplay(candidate.where);
     } catch {
       restQuery = "";
     }

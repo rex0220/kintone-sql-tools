@@ -219,6 +219,75 @@ AC5（どちらの表にも無い値はそのまま通る）・恒等の項目�
 **移行の注意（依頼元へ）**: 今 `みしょり`（表示名）と書いて動いていた設定は、`canonical` にすると
 **`未処理`（既定名）に直す**必要があります。ここだけ正本の向きが変わります。
 
+### 7.3 実装レビューで直したこと（2026-11-06。Codex。BLOCKER 1 / MAJOR 2 / MINOR 1）
+
+記録は `kintone-plugin/work-link/codex-review-ksql-b205-impl-2026-11-06.md`。
+
+**BLOCKER（確認済み。直した）＝実送信のクエリが `serializeQueryForApp` を通らない経路が 9 か所残っていた。**
+`src/execute.ts` の中は全部通していたが、**converter と optimizer の中で `whereToKintone` を直に呼ぶ**
+経路を数え落としていた（`dmlToKintone` の `updateToGetQuery` / `updateToGetQueryForArith` /
+`deleteToGetQuery`、`selectToKintone` の `selectToKintoneParams` / `selectToFetchAllParams`、
+`korderCursorQuery` の `buildKorderCursorQuery`、`joinPredicatePushdown` の
+`serializeJoinPushdownItem`）。**つまり DML の対象選択・REST 窓つき `SELECT`・`KORDER` のカーソル・
+JOIN の押し下げは既定名のまま送っていた**（canonical でも効いていなかった）。
+
+- 直し方: 4 ファイルに `optionNames?: OptionQueryTranslatorSource` を通し、`serializeQueryForApp` に置き換え。
+  `src/execute.ts` の呼び出し 11 か所と `buildRuntimeJoinPushdownPlan`（3 か所から呼ばれる）に配線。
+  `UPDATE … FROM` のキーの `in` も `GeneratedPredicate` に。
+- **二度と戻らないようにする**: `src/converter/__tests__/b205QuerySeamGuard.test.ts` で
+  **ソースを検査**し、`whereToKintone` を**識別子として**使えるファイルを 2 つに固定した
+  （`queryForApp.ts` と定義元）。**参照渡し**（`testSeam.serialize ?? whereToKintone`）も拾う
+  ＝実際に残っていた迂回がその形だったため。行ではなく**ファイルで**固定する（無関係な変更で落ちないように）。
+
+**送らない文字列は別の口にした**＝`serializeWhereForDisplay(where)`。使うのは 3 ファイルだけ（試験で固定）:
+
+| 場所 | なぜ送らないか |
+|---|---|
+| `relativeDatePrefilterPlan` | 「関数が押し下がったか」の確かめに使い、**文字列は捨てる** |
+| `relativeDatePushdownGuard` | 同じ確かめ ＋ `RelativeDatePlanNode.restQuery`（**消費先は `EXPLAIN` の表示行だけ**。grep で確認） |
+| `relativeDateExplainLines` / `safeWhereToKintone`（`src/execute.ts`） | `EXPLAIN` と計画の表示。**canonical では `EXPLAIN` 自体を拒む**ので既定名が残ることもない |
+
+**MINOR（直した）＝`appId` 省略の fail-closed が identity の canonical では効かない。**
+対応表が全部 identity のときは包み（記号）を載せないので `canonicalOptionNames` が false になり、
+「canonical なら必ず拒む」契約と食い違っていた。**記号の有無に頼るのをやめ、`appId` を型で必須**にした
+（`SerializeQueryForAppInput.appId: number`。実行時も `Number.isSafeInteger` で確かめる）。
+型を必須にした時点で `safeWhereToKintone` の 1 か所が**コンパイルエラーで見つかった**（表示専用に移した）。
+
+**MAJOR（検査。直した）＝対応表の fail-closed が契約より弱い。** 足した検査:
+
+| 拒むもの | どこ | なぜ |
+|---|---|---|
+| ステータスの `index` の重複・負・非整数 | `assertUsableOptionNamePairs` | 並びが決まらない。**連番性は求めない**＝ステータスは**キーで対にする**ので `index` は並べ替えにしか使わない（選択肢は位置で対にするので `namesByIndex` で連番まで求める） |
+| `status.json` の `name` が空・非文字列 | `optionNameSourceFrom` | **既定名で埋めていた**ので「空の表示名を拒む」検査を迂回できた。`lang` 付きなら必ず名称が返るので、空は嘘のメタデータ |
+| 表示言語の側に**同じ項目コードが 2 つ** | `buildAppOptionNameMap` | `Map` の後勝ちで黙って決まる |
+| 同じ項目コードで**型が違う** | 同上 | 別のアプリか嘘のメタデータ。値の意味が変わる |
+| `getFields` に `STATUS` があるのに**ステータスの対応が無い・空** | 同上 | プロセス管理が有効なアプリだけ `form/fields` に `STATUS` が入る。無いと**ステータスだけ表示名のまま**になる |
+| ステータスの対応が**一部だけ**（件数・取りこぼし） | `loadProcessStatusOrder` | 既定名の正本が無い状態で表示名を既定名として扱わない。**`getProcessStatuses` と突き合わせる**（同じ endpoint なので REST の追加呼び出しは無い） |
+
+**MAJOR（試験。直した）＝モックが本物より甘い。**
+`b205OptionNamesStrict.test.ts`（11 件）の**番人モック**を足した＝**クエリや書き込みに既定名が現れたら
+その場で `GAIA_CU03` / 400 を投げる**（本物の kintone と同じ厳しさ）。これで未変換の経路は自動的に落ちる。
+REST 窓つき `SELECT`・`KORDER` のカーソル・`UPDATE` / `DELETE` の対象選択・`previewStatement`・
+`VALIDATE ONLY`・`UPDATE … FROM` の対象側の絞り込みを固定した。
+
+**canonical でも「表示名で書く」形は通さない**ことも試験に固定した（正本は既定名のまま）:
+`SET 選択 = '表示名'` は `ERR_CHOICE_INVALID` で拒み、`WHERE 選択 = '表示名'` は 0 件になる
+（`raw` では押し下げずに JS で絞っていたため当たっていた＝**移行で書き換えが要る所**）。
+`optionOrder` を表示名側へ差し替えれば表示名も書けるが、**検査の網が実行する人の言語で変わる**ので採らない。
+
+試験で分かった**元からの制限**（B205 の穴ではない。記録として試験に残した）:
+
+- **DML の対象選択に選択肢の `=` は `raw` でも書けない**（`WHERE_RESIDUAL` で実行前に拒否）。
+  `IN ('a1')` なら押し下がる。kintone の `query` が選択肢に `=` を持たないため。
+- `UPDATE … FROM` の**結合キーに選択肢は使えない**（`does not support target join field type DROP_DOWN`）。
+
+**ステータスの試験**（`b205OptionNamesStatus.test.ts` 3 件）: 既定名で書いた順序比較
+（`ステータス >= '処理中'`）が通り読み戻す値も既定名、一部だけ返すクライアントで止まる、件数が合わなければ止まる。
+
+**検証**: `tsc` の新規エラー 0（既存の `src/ui/desktop.ts` 10 件のみ）。
+`jest 6814 passed`・失敗は **v3.90.0 のベースラインと同数・同内容**（8 suites / 45 tests＝
+接続設定の無い環境の CLI / MCP）。B205 の試験は **7 ファイル 65 件**。
+
 ### 段階 1 でやったこと（2026-11-06）
 
 **`src/converter/queryForApp.ts`（新規）＝クエリの条件部を作る唯一の口。**
@@ -231,9 +300,9 @@ serializeQueryForApp({ appId, where, generated })   // 段階 2 で変換器を�
   `in` / `not in` / `=` / `>=` / `<=`）。文字列の置換はしない。
 - 値の引用（`\` と `"` の退避）も `quoteKintoneValue` に 1 つだけ置いた
   （`sqlQuote`・`whereToKintone` の中・`joinKeyPrefilter` の注入関数に 3 つ散っていた）。
-- **`appId` は必須にしていない**＝アプリが文脈から決まらない表示専用の経路が 1 か所だけ残っている
-  （`relativeDateExplainLines`。`src/execute.ts:13588`）。**段階 2 の変換器は `appId` の無い入力を拒む**
-  （fail-closed）ので、そのときに呼び出し元（3 か所）からアプリを通す。
+- **`appId` は必須にしていない**（段階 1 の時点）＝アプリが文脈から決まらない表示専用の経路が
+  残っているため。**段階 2 の変換器は `appId` の無い入力を拒む**（fail-closed）。
+  → **実装レビューの後に必須へ変えた**（§7.3）。表示専用は `serializeWhereForDisplay` に分けた。
 
 **通した経路（全部）**
 
@@ -241,8 +310,14 @@ serializeQueryForApp({ appId, where, generated })   // 段階 2 で変換器を�
 |---|---|
 | **JOIN キーの押し下げ**（BLOCKER） | `buildJoinKeyPrefilterQueries`（文字列を返す）→ **`buildJoinKeyPrefilterPredicates`（述語を返す）**。実行（`src/execute.ts:8492`）と **EXPLAIN（`13147`）の両方** |
 | **非ネイティブ `UPSERT` の既存照合**（BLOCKER） | `in` のチャンクと、空文字キーの行ごとの `=` |
-| ふつうの `WHERE`・DML の `WHERE`・集計の `totalCount`・共有プラン・`APPLY` の親の選択 | `whereToKintone` の直呼びを全廃（**19 か所**）。`appId` を明示に渡す |
+| ふつうの `WHERE`・DML の `WHERE`・集計の `totalCount`・共有プラン・`APPLY` の親の選択 | **`src/execute.ts` の**直呼びを置き換え（**19 か所**）。`appId` を明示に渡す |
 | `EXPLAIN` の表示 | 同じ口に統一（`safeWhereToKintone` にも `appId` を足して 5 か所から渡す） |
+
+**訂正（2026-11-06。実装レビュー）**: ここを「`whereToKintone` の直呼びを**全廃**」と書いていたが、
+**数えていたのは `src/execute.ts` の中だけ**だった。converter（`dmlToKintone` / `selectToKintone` /
+`korderCursorQuery`）と optimizer（`joinPredicatePushdown`）に**実送信の 9 か所が残っていた**
+（実装レビューの BLOCKER）。§7.3 で塞ぎ、**ソースを検査する試験**で固定した。
+`safeWhereToKintone` も表示専用だったので `appId` を外した。
 
 **検証**: `jest 6749 passed`・失敗は **v3.90.0 のベースラインと同数・同内容**（8 suites / 45 tests＝
 接続設定の無い環境の CLI / MCP）。`tsc` の新規エラー 0。**段階 1 は文字列が今までとまったく同じ**

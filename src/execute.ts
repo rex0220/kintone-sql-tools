@@ -120,6 +120,7 @@ import {
 } from "./converter/selectToKintone";
 import {
   serializeQueryForApp,
+  serializeWhereForDisplay,
   type GeneratedPredicate,
   type OptionQueryTranslatorSource,
 } from "./converter/queryForApp";
@@ -131,7 +132,7 @@ import {
   type AppOptionNameMap,
   type OptionNameSource as KintoneOptionNameSource,
 } from "./core/optionNameMap";
-import { mapRecordsOptionValues } from "./core/recordOptionValues";
+import { mapRecordOptionValues, mapRecordsOptionValues } from "./core/recordOptionValues";
 export type { OptionNameSource as KintoneOptionNameSource } from "./core/optionNameMap";
 import {
   insertToPostBatches,
@@ -1086,6 +1087,23 @@ function attachOptionNameMaps(
   return wrapped;
 }
 
+/**
+ * B205: `loadUpdateModeSnapshots`（公開オプション。クライアントの包みを迂回できる）が返した
+ * レコードを既定名へ直す。`"raw"` では何もしない。
+ */
+function canonicalizeLoadedSnapshots(
+  snapshots: ReadonlyMap<number, KintoneRecord>,
+  client: KintoneClient,
+  appId: number
+): ReadonlyMap<number, KintoneRecord> {
+  const map = optionNameMapsOf(client)?.get(appId);
+  if (map === undefined || map.identity) return snapshots;
+  const translate = toCanonicalTranslate(map);
+  const out = new Map<number, KintoneRecord>();
+  for (const [id, record] of snapshots) out.set(id, mapRecordOptionValues(record, translate));
+  return out;
+}
+
 /** B205: 対応表を使ってレコードの値を変換する包み（読みは表示名→既定名、書きは既定名→表示名）。 */
 function wrapClientWithOptionNames(
   client: KintoneClient,
@@ -1415,7 +1433,7 @@ async function resolveRelativeDateExecutionPlan(
     joinServerFunctionPlan: async (select) => {
       await normalizeSelectChoiceEquality(select, client, cacheContext);
       const metadata = await loadTypedPushdownMeta(select, client, cacheContext);
-      const runtimePlan = buildRuntimeJoinPushdownPlan(select, metadata);
+      const runtimePlan = buildRuntimeJoinPushdownPlan(select, metadata, optionNameQuerySource(client));
       if (runtimePlan === null) return null;
       if (isJoinServerFunctionFetchPlan(runtimePlan.joinPlan)) {
         boundJoinRuntimePlans.set(select, runtimePlan);
@@ -2531,8 +2549,14 @@ export async function previewManagedStatement(
       return emptyManagedPreview(operation, appId);
     }
 
+    // B205: previewStatement も実行と同じ土台に乗せる（対応表は読む前に用意し、包みを通す）。
+    // ここを落とすと、計画の差分だけ表示名のまま残って「一部だけ canonical」になる。
+    await ensureManagedOptionNameMaps(managed);
+
     const searchAbortCollector: SearchAbortCollector = { aborted: false };
-    const statementClient = wrapClientWithSearchAbort(managed.client, searchAbortCollector, true);
+    const statementClient = wrapClientWithSearchAbort(
+      optionNameAwareClient(managed), searchAbortCollector, true
+    );
     const cursorScope = wrapClientWithCursorScope(statementClient);
     managed.cursorCleanups.add(cursorScope.closeActive);
     const previewClient = wrapClientWithPreviewWriteBlock(cursorScope.client);
@@ -3248,7 +3272,7 @@ async function previewDelete(
   if (isConstantFalseWhere(stmt.where)) {
     return previewBase("DELETE", stmt.appId, { insert: 0, update: 0, delete: 0 }, []);
   }
-  const params = deleteToGetQuery(stmt);
+  const params = deleteToGetQuery(stmt, optionNameQuerySource(client));
   const resolved = await resolveDmlTargetIds(client.getRecords, params.app, params.query, {
     maxRecords: options.maxRecords ?? 10_000,
     parallel: options.fetchParallel ?? 1,
@@ -5154,7 +5178,7 @@ async function executeSimpleSelect(
   const restStmt = orderPlan?.kind === "CANONICAL_REST_TOP_N"
     ? withCanonicalRestTie(stmt)
     : stmt;
-  const params = selectToKintoneParams(restStmt);
+  const params = selectToKintoneParams(restStmt, optionNameQuerySource(client));
   const fetchFields = orderPlan?.kind === "CANONICAL_LOCAL"
     ? selectToFetchAllFields(stmt, stmt.from)
     : params.fields;
@@ -5193,7 +5217,7 @@ async function executeSimpleSelect(
       client,
       app: params.app,
       fields: params.fields,
-      query: buildKorderCursorQuery(stmt),
+      query: buildKorderCursorQuery(stmt, optionNameQuerySource(client)),
       offset: stmt.offset ?? 0,
       limit: stmt.limit!,
     });
@@ -5810,7 +5834,8 @@ const boundJoinRuntimePlans = new WeakMap<SelectStatement, RuntimeJoinPushdownPl
 
 function buildRuntimeJoinPushdownPlan(
   stmt: SelectStatement,
-  metadata: TypedPushdownMeta
+  metadata: TypedPushdownMeta,
+  optionNames?: OptionQueryTranslatorSource
 ): RuntimeJoinPushdownPlan | null {
   if (stmt.joins.length === 0
     || stmt.where === null
@@ -5845,7 +5870,10 @@ function buildRuntimeJoinPushdownPlan(
   for (const item of plan.items) {
     // §6.2: alias を捨てる serializer の直前に ownership を fail-loud 再検査する。
     if (!queriesByAlias.has(item.targetAlias)) {
-      queriesByAlias.set(item.targetAlias, serializeJoinPushdownItem(item, sources));
+      queriesByAlias.set(
+        item.targetAlias,
+        serializeJoinPushdownItem(item, sources, optionNames)
+      );
     }
     conditionsByAlias.set(item.targetAlias, item.predicate);
   }
@@ -6832,7 +6860,7 @@ async function executeFullScanSelect(
     throw new Error("InternalError: JOIN server-function fetch binding changed before records API.");
   }
   const pushdownPlan = preboundJoinPlan
-    ?? buildRuntimeJoinPushdownPlan(stmt, pushdownMeta)
+    ?? buildRuntimeJoinPushdownPlan(stmt, pushdownMeta, optionNameQuerySource(client))
     ?? buildKlikePushdownPlan(stmt, pushdownMeta);
   validateKlikePushdownPlan(pushdownPlan);
   const runtimeJoinPlan = "joinPlan" in pushdownPlan
@@ -7906,7 +7934,7 @@ async function executeFullScanWithCte(
     whereNeedsFieldMetadata(stmt.having) || selectCaseConditionsNeedFieldMetadata(stmt)
   );
   const havingFieldSemanticsResolver = buildHavingFieldSemanticsResolver(stmt, fieldSemanticsResolver);
-  const pushdownPlan = buildRuntimeJoinPushdownPlan(stmt, pushdownMeta)
+  const pushdownPlan = buildRuntimeJoinPushdownPlan(stmt, pushdownMeta, optionNameQuerySource(client))
     ?? buildKlikePushdownPlan(stmt, pushdownMeta);
   validateKlikePushdownPlan(pushdownPlan);
   // B76 §16: 検索打ち切りの fail-closed は撤回した。JOIN plan の有無で挙動が
@@ -8094,7 +8122,7 @@ async function fetchTableRecordsForFullScan(
   };
   if (!table.subtableCode) {
     const baseQuery = isMainTable && allowOriginalWherePushdown
-      ? selectToFetchAllParams(stmt, table.appId).query
+      ? selectToFetchAllParams(stmt, table.appId, optionNameQuerySource(client)).query
       : "";
     const pushQueries = [
       serializeQueryForApp({ appId: table.appId, where: pushDownCond }, optionNameQuerySource(client)),
@@ -8865,6 +8893,24 @@ async function loadProcessStatusOrder(
   // B205 段階 3: canonical ではステータスの正本を**キー（既定名）**に切り替える。
   // `getProcessStatuses` は lang: "user" で取るので state.name は表示名＝raw の正本はそちら。
   const status = optionNameMapsOf(client)?.get(appId)?.status;
+  if (status !== undefined) {
+    // 対応表が一部だけなら「ステータスだけ表示名のまま」になる（実装レビューの MAJOR）。
+    // 既定名の正本が無いのに黙って表示名を既定名として扱わない。
+    for (const state of process.states) {
+      if (!status.toCanonical.has(state.name)) {
+        throw new OptionNameMapError(
+          `app ${appId}: process status "${state.name}" is missing from the localized status names; `
+          + "the client must return every status."
+        );
+      }
+    }
+    if (process.states.length !== status.toCanonical.size) {
+      throw new OptionNameMapError(
+        `app ${appId}: the app has ${process.states.length} process statuses but the client returned `
+        + `${status.toCanonical.size} localized names.`
+      );
+    }
+  }
   return new Map(process.states.map((state) => [
     status?.toCanonical.get(state.name) ?? state.name,
     state.index,
@@ -9678,11 +9724,16 @@ async function prepareDmlValidation(
   const preparedPostImages = new Map<number, ReturnType<typeof validatePostImage>>();
   if (usePreparedPostImages) {
     materializeDmlUpdateModeSparseRecords(updateCandidates, targetFields, fieldInfos);
-    const snapshots = await updateSnapshotLoader!({
+    const loadedSnapshots = await updateSnapshotLoader!({
       appId: stmt.appId,
       candidates: updateCandidates,
       fields: snapshotFields,
     });
+    // B205: この口（loadUpdateModeSnapshots）は公開オプションで、クライアントの包みを迂回して
+    // レコードを渡せる。canonical では更新後の像だけ表示名のまま残らないように、ここでも既定名へ直す。
+    // 既定の loader は包みを通った値（既定名）を返すので、そのときは何も変わらない（交差を拒んでいるので
+    // 二重に直しても結果は同じ）。
+    const snapshots = canonicalizeLoadedSnapshots(loadedSnapshots, client, stmt.appId);
     const postImages = new Map<number, KintoneRecord>();
     for (const candidate of updateCandidates) {
       if (candidate.targetId === undefined) {
@@ -10024,7 +10075,7 @@ async function materializeUpdateValidationCandidates(
   let evaluationById = new Map<number, KintoneRecord>();
   let snapshotsById = new Map<number, KintoneRecord>();
   if (hasRowDependentAssignment(stmt)) {
-    const getParams = updateToGetQueryForArith(stmt);
+    const getParams = updateToGetQueryForArith(stmt, optionNameQuerySource(client));
     const fields = [...new Set([...getParams.fields, ...checkTargetFields, ...(snapshotFields ?? [])])];
     const resolved = await fetchRecordsForSharedPlan(client.getRecords, getParams.app, getParams.query, fields, {
       maxRecords: options.maxRecords ?? 10_000, parallel: options.fetchParallel ?? 1, onLimit: "error",
@@ -10035,7 +10086,7 @@ async function materializeUpdateValidationCandidates(
       stmt, resolved.records, fieldTypes, statementEvaluationContext(options)
     ).flatMap((batch) => batch.records);
   } else {
-    const getParams = updateToGetQuery(stmt);
+    const getParams = updateToGetQuery(stmt, optionNameQuerySource(client));
     if (checkTargetFields.length > 0) {
       const fields = [...new Set(["$id", ...checkTargetFields, ...(snapshotFields ?? [])])];
       const resolved = await fetchRecordsForSharedPlan(client.getRecords, getParams.app, getParams.query, fields, {
@@ -10314,12 +10365,16 @@ async function resolveUpdateFromMatchedRecords(
   ])];
   const filterQuery = from.targetFilter === null
     ? ""
-    : updateToGetQuery({ ...stmt, from: null, where: from.targetFilter, checkGroups: undefined }).query;
+    : updateToGetQuery({ ...stmt, from: null, where: from.targetFilter, checkGroups: undefined }, optionNameQuerySource(client)).query;
   const targetRecords: KintoneRecord[] = [];
   const seenTargetIds = new Set<string>();
   let fetchedTargetCount = 0;
   for (const keys of splitChunks([...sourceQueryByKey.values()], UPDATE_FROM_KEY_CHUNK_SIZE)) {
-    const keyQuery = `${from.targetJoinField} in (${keys.map(sqlQuote).join(",")})`;
+    // B205: 生成述語も 1 つの口を通す（今は結合キーに選択肢を使えないが、境目を 1 つも開けない）
+    const keyQuery = serializeQueryForApp(
+      { appId: stmt.appId, generated: [{ field: from.targetJoinField, op: "in", values: keys }] },
+      optionNameQuerySource(client)
+    );
     const query = filterQuery ? `(${keyQuery}) and (${filterQuery})` : keyQuery;
     const resolved = await fetchRecordsForSharedPlan(
       client.getRecords,
@@ -11158,7 +11213,7 @@ async function executeUpdate(
   if (hasRowDependentAssignment(stmt)) {
     // ── 算術式あり: 現在値を取得してから計算 → PUT ──
     // 1. $id + 参照フィールドを取得
-    const getParams = updateToGetQueryForArith(stmt);
+    const getParams = updateToGetQueryForArith(stmt, optionNameQuerySource(client));
     const resolved = await fetchRecordsForSharedPlan(
       client.getRecords,
       getParams.app,
@@ -11189,7 +11244,7 @@ async function executeUpdate(
 
   // ── 通常パス: $id のみ取得 → 同一値で一括 PUT ──
   // 1. 対象レコードの $id を取得
-  const getParams = updateToGetQuery(stmt);
+  const getParams = updateToGetQuery(stmt, optionNameQuerySource(client));
   const resolved = await resolveDmlTargetIds(
     client.getRecords,
     getParams.app,
@@ -11445,7 +11500,7 @@ async function executeMultipleParentApplyPreflight(
     // B47 carve-out 外は従来の exact DML converter と dmlMaxRows+1 早期停止を維持する。
     // APPEND ... SELECT は 2 件目が見つかれば止めるので、検出は 2 件で打ち切る。
     const fields = collectApplySnapshotFields(stmt, fieldInfos);
-    const baseQuery = updateToGetQuery(stmt).query;
+    const baseQuery = updateToGetQuery(stmt, optionNameQuerySource(client)).query;
     const detectionLimit = requiresSingleParent ? 2 : dmlMaxRows + 1;
     snapshots = await fetchAll(client.getRecords, stmt.appId, baseQuery, [...fields], {
       pageSize: Math.min(500, detectionLimit),
@@ -11928,7 +11983,7 @@ async function executeDelete(
     return executeDeleteSubtable(stmt, client, options, cacheContext);
   }
   // 1. 対象レコードの $id を取得
-  const getParams = deleteToGetQuery(stmt);
+  const getParams = deleteToGetQuery(stmt, optionNameQuerySource(client));
   const resolved = await resolveDmlTargetIds(
     client.getRecords,
     getParams.app,
@@ -13810,8 +13865,10 @@ function relativeDateExplainLines(plan: RelativeDatePushdownPlan): string[] {
           `  operator: ${detail?.operator ?? operator}`
         );
       }
-      // B205 段階 2: この表示経路はアプリが文脈から決まらないので、呼び出し元から appId を通す
-      const serverPrefilter = serializeQueryForApp({ where: prefilterPlan.prefilterWhere });
+      // B205: EXPLAIN の表示だけ（kintone へは送らない）。アプリが文脈から決まらないため
+      // 送信用の口（serializeQueryForApp。appId 必須）ではなく表示専用の口を使う。
+      // canonical では EXPLAIN 自体を拒んでいるので、既定名が表示に残ることもない。
+      const serverPrefilter = serializeWhereForDisplay(prefilterPlan.prefilterWhere);
       lines.push(
         "  where capability: SUPERSET_PREFILTER",
         `  server prefilter: ${serverPrefilter}`,
@@ -15765,9 +15822,9 @@ function buildUpdatePlan(
     const source = stmt.from.cteName ?? `APP${stmt.from.appId}`;
     lines.push(`  source:        ${source} AS ${stmt.from.alias}`);
     lines.push(`  join:          APP${stmt.appId}.${stmt.from.targetJoinField} = ${stmt.from.alias}.${stmt.from.joinKeyField}`);
-    lines.push(`  target filter: ${stmt.from.targetFilter ? safeWhereToKintone(stmt.from.targetFilter, stmt.appId) : "(none)"}`);
+    lines.push(`  target filter: ${stmt.from.targetFilter ? safeWhereToKintone(stmt.from.targetFilter) : "(none)"}`);
   } else {
-    lines.push(`  kintone query: ${safeWhereToKintone(stmt.where, stmt.appId)}`);
+    lines.push(`  kintone query: ${safeWhereToKintone(stmt.where)}`);
   }
   if (!stmt.subtableCode) {
     lines.push("  selection: exact native pushdown; JS residual none");
@@ -15850,7 +15907,7 @@ function buildUpdateApplyPlan(
     ...(label ? [label] : []),
     "statement:              UPDATE APPLY",
     `target app:             APP${stmt.appId}`,
-    `parent selector:        ${safeWhereToKintone(stmt.where, stmt.appId)}`,
+    `parent selector:        ${safeWhereToKintone(stmt.where)}`,
     `parent cardinality:     ${isSinglePositiveRecordIdWhere(stmt.where) ? "single" : "multiple"}`,
     ...selectionLines,
     `apply target:           ${branch.targets.map((target) => `${target.field} (${target.targetKind})`).join(" | ")}`,
@@ -15895,7 +15952,7 @@ function buildDeletePlan(stmt: DeleteStatement, label?: string): string[] {
   if (label) lines.push(label);
   lines.push(`  [DELETE]`);
   lines.push(`  target:        APP${stmt.appId} (${stmt.appId})`);
-  lines.push(`  kintone query: ${safeWhereToKintone(stmt.where, stmt.appId)}`);
+  lines.push(`  kintone query: ${safeWhereToKintone(stmt.where)}`);
   if (!stmt.subtableCode) {
     lines.push("  selection: exact native pushdown; JS residual none");
     lines.push("  search abort: DML fail-closed (SearchAbortedError; mutation 0)");
@@ -15991,7 +16048,7 @@ function buildReorderPlan(stmt: ReorderStatement, label?: string): string[] {
       : `  api:    GET /k/v1/records.json（行 ID 取得）→ PUT /k/v1/records.json（id 配列のみ送信）`,
   ];
   if (!stmt.all && stmt.where) {
-    lines.splice(5, 0, `  where:  ${safeWhereToKintone(stmt.where, stmt.appId)}`);
+    lines.splice(5, 0, `  where:  ${safeWhereToKintone(stmt.where)}`);
   }
   return lines;
 }
@@ -16001,11 +16058,16 @@ function formatOrderByItem(item: OrderByItem): string {
   return `${key} ${item.direction}`;
 }
 
-/** クエリ化が例外を投げる場合（JS 関数含む等）は "(JS 評価)" を返す */
-function safeWhereToKintone(where: WhereExpr, appId?: number): string {
+/**
+ * クエリ化が例外を投げる場合（JS 関数含む等）は "(JS 評価)" を返す。
+ *
+ * B205: **表示専用**（EXPLAIN と計画の行）。kintone へは送らないので表示専用の口を使う
+ * （送る経路は `serializeQueryForApp` でアプリが必須）。
+ */
+function safeWhereToKintone(where: WhereExpr): string {
   if (where.type === "BOOLEAN") return where.value ? "TRUE" : "FALSE (constant)";
   try {
-    return serializeQueryForApp({ ...(appId === undefined ? {} : { appId }), where });
+    return serializeWhereForDisplay(where);
   } catch {
     return "(JS 評価が必要なため kintone クエリに変換不可)";
   }

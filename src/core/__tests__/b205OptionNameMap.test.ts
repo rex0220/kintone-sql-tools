@@ -1,6 +1,7 @@
 import {
   assertUsableOptionNamePairs,
   buildAppOptionNameMap,
+  optionNameSourceFrom,
   toCanonicalTranslate,
   toDisplayTranslate,
   type OptionNameSource,
@@ -141,4 +142,83 @@ test("B205: 全部が恒等なら交差の検査は通る（表示名を設定�
     { canonical: "未処理", display: "未処理", index: 0 },
     { canonical: "処理済", display: "処理済", index: 1 },
   ])).not.toThrow();
+});
+
+// ============================================================
+// 実装レビュー（MAJOR）で足した検査
+// ============================================================
+
+test("B205: 表示言語の側に同じ項目コードが 2 つあれば拒む（後勝ちで黙って決めない）", () => {
+  expect(() => buildAppOptionNameMap(4387, canonicalFields, source({
+    fields: [...userFields, { code: "ラジオボタン", label: "", fieldType: "RADIO_BUTTON", optionOrder: { 別: 0, 名: 1 } }],
+  }))).toThrow("describes this field more than once");
+});
+
+test("B205: 同じ項目コードで型が違えば拒む（別のアプリ・嘘のメタデータ）", () => {
+  expect(() => buildAppOptionNameMap(4387, canonicalFields, source({
+    fields: [
+      { code: "ラジオボタン", label: "", fieldType: "DROP_DOWN", optionOrder: { サンプル１: 0, サンプル２: 1 } },
+      ...userFields.slice(1),
+    ],
+  }))).toThrow("reports type DROP_DOWN but getFields reports RADIO_BUTTON");
+});
+
+test.each([
+  ["null", null],
+  ["空", [] as const],
+])("B205: STATUS があるのにステータスの対応が %s なら拒む", (_label, statusStates) => {
+  expect(() => buildAppOptionNameMap(4387, canonicalFields, source({
+    statusStates: statusStates as never,
+  }))).toThrow("the app has process management (getFields returns a STATUS field)");
+});
+
+test("B205: プロセス管理が無いアプリ（STATUS 項目が無い）は statusStates なしで通る", () => {
+  const withoutStatus = canonicalFields.filter((field) => field.fieldType !== "STATUS");
+  const map = buildAppOptionNameMap(4387, withoutStatus, source({
+    fields: userFields.filter((field) => field.fieldType !== "STATUS"),
+    statusStates: null,
+  }));
+  expect(map.status).toBeUndefined();
+  expect(map.fields.get("ラジオボタン")!.toDisplay.get("sample1")).toBe("サンプル１");
+});
+
+test("B205: ステータスの index が重複していたら拒む（並びが決まらない）", () => {
+  expect(() => buildAppOptionNameMap(4387, canonicalFields, source({
+    statusStates: [
+      { canonical: "未処理", display: "みしょり", index: 0 },
+      { canonical: "完了", display: "かんりょう", index: 0 },
+    ],
+  }))).toThrow("duplicate option index 0");
+});
+
+test("B205: ステータスの index は連番でなくてよい（対にするのはキー。並べ替えにだけ使う）", () => {
+  const map = buildAppOptionNameMap(4387, canonicalFields, source({
+    statusStates: [
+      { canonical: "未処理", display: "みしょり", index: 0 },
+      { canonical: "完了", display: "かんりょう", index: 7 },
+    ],
+  }));
+  expect(map.status!.toCanonical.get("かんりょう")).toBe("完了");
+});
+
+test("B205: status.json の name が空・非文字列なら既定名で埋めずに拒む", () => {
+  expect(() => optionNameSourceFrom(4387, userFields, {
+    states: { 未処理: { name: "", index: 0 } },
+  })).toThrow("has no usable localized name");
+  expect(() => optionNameSourceFrom(4387, userFields, {
+    states: { 未処理: { name: undefined, index: 0 } },
+  })).toThrow("has no usable localized name");
+  expect(() => optionNameSourceFrom(4387, userFields, {
+    states: { 未処理: { name: 0, index: 0 } },
+  })).toThrow("has no usable localized name");
+});
+
+test("B205: status.json はキーが既定名・name が表示名（index は文字列でもよい）", () => {
+  const built = optionNameSourceFrom(4387, userFields, {
+    states: { 未処理: { name: "みしょり", index: "0" }, 完了: { name: "かんりょう", index: "1" } },
+  });
+  expect(built.statusStates).toEqual([
+    { canonical: "未処理", display: "みしょり", index: 0 },
+    { canonical: "完了", display: "かんりょう", index: 1 },
+  ]);
 });

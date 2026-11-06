@@ -93,8 +93,16 @@ export function optionNameSourceFrom(
             `process status "${canonical}" has an invalid index (${String(state?.index)}).`
           );
         }
-        const display = typeof state?.name === "string" && state.name !== "" ? state.name : canonical;
-        return { canonical, display, index };
+        // 表示名が無い・文字列でないときに既定名で埋めない（実装レビューの MAJOR）。
+        // `app/status.json` は lang を付ければ必ず name を返す（言語ごとの名称が未設定でも
+        // 設定済みの別の言語名か既定名が入る）。空や非文字列は「嘘のメタデータ」なので、
+        // 既定名で埋めて**空の表示名を拒む検査を迂回させない**。
+        if (typeof state?.name !== "string" || state.name === "") {
+          throw new OptionNameMapError(
+            `process status "${canonical}" has no usable localized name (${String(state?.name)}).`
+          );
+        }
+        return { canonical, display: state.name, index };
       });
   return { appId, fields: userFields, statusStates };
 }
@@ -146,6 +154,22 @@ export function assertUsableOptionNamePairs(
 ): void {
   const canonicals = new Set<string>();
   const displays = new Set<string>();
+  const indexes = new Set<number>();
+  for (const { canonical, index } of pairs) {
+    // `index` の検査（実装レビューの MAJOR）。選択肢は `namesByIndex` で**位置で対にする**ため
+    // 0 から連番であることまで要るが、ステータスは**キーが既定名**なので対にするのに index は要らない
+    // （並べ替えにだけ使う）。そこで共通の契約は「非負の整数で重複しない」までとし、連番性は
+    // 選択肢の側（`namesByIndex`）だけで求める。嘘のメタデータで並びが決まらない形は止める。
+    if (!Number.isSafeInteger(index) || index < 0) {
+      throw new OptionNameMapError(
+        `field ${fieldCode}: option "${canonical}" has an invalid index (${String(index)}).`
+      );
+    }
+    if (indexes.has(index)) {
+      throw new OptionNameMapError(`field ${fieldCode}: duplicate option index ${index}.`);
+    }
+    indexes.add(index);
+  }
   for (const { canonical, display } of pairs) {
     if (canonical === "") throw new OptionNameMapError(`field ${fieldCode}: an option has an empty default name.`);
     if (display === "") {
@@ -226,7 +250,17 @@ export function buildAppOptionNameMap(
       `option names were fetched for app ${source.appId} but app ${appId} was requested.`
     );
   }
-  const displayByCode = new Map(source.fields.map((field) => [field.code, field]));
+  // 項目コードの重複を黙って後勝ちにしない（実装レビューの MAJOR）。
+  const displayByCode = new Map<string, KintoneFieldInfo>();
+  for (const field of source.fields) {
+    if (displayByCode.has(field.code)) {
+      throw new OptionNameMapError(
+        `field ${field.code}: the user-language form describes this field more than once; `
+        + "the mapping would depend on which one wins."
+      );
+    }
+    displayByCode.set(field.code, field);
+  }
   const fields = new Map<string, FieldOptionNames>();
   let status: FieldOptionNames | undefined;
   let identity = true;
@@ -240,19 +274,32 @@ export function buildAppOptionNameMap(
         + "the client must return the same fields as getFields."
       );
     }
+    // 同じコードで型が違う＝別のアプリか嘘のメタデータ。値の意味が変わるので止める。
+    if (display.fieldType !== field.fieldType) {
+      throw new OptionNameMapError(
+        `field ${field.code}: the user-language form reports type ${display.fieldType} but `
+        + `getFields reports ${field.fieldType}; the client must describe the same app.`
+      );
+    }
     const pairs = pairsFromOrders(field.code, field.optionOrder, display.optionOrder);
     if (pairs.some((pair) => pair.canonical !== pair.display)) identity = false;
     fields.set(field.code, fieldOptionNamesFrom(field.code, pairs));
   }
 
-  if (source.statusStates !== null && source.statusStates.length > 0) {
-    const statusField = canonicalFields.find((field) => field.fieldType === STATUS_FIELD_TYPE);
-    if (statusField !== undefined) {
-      const pairs = [...source.statusStates].sort((a, b) => a.index - b.index);
-      if (pairs.some((pair) => pair.canonical !== pair.display)) identity = false;
-      status = fieldOptionNamesFrom(statusField.code, pairs);
-      fields.set(statusField.code, status);
+  // プロセス管理が有効なアプリだけ `form/fields` に STATUS が入る。入っているのに
+  // ステータスの対応が無ければ「ステータスだけ表示名のまま」になるので止める（実装レビューの MAJOR）。
+  const statusField = canonicalFields.find((field) => field.fieldType === STATUS_FIELD_TYPE);
+  if (statusField !== undefined) {
+    if (source.statusStates === null || source.statusStates.length === 0) {
+      throw new OptionNameMapError(
+        `field ${statusField.code}: the app has process management (getFields returns a STATUS field) `
+        + "but the client returned no localized status names."
+      );
     }
+    const pairs = [...source.statusStates].sort((a, b) => a.index - b.index);
+    if (pairs.some((pair) => pair.canonical !== pair.display)) identity = false;
+    status = fieldOptionNamesFrom(statusField.code, pairs);
+    fields.set(statusField.code, status);
   }
 
   return { appId, identity, fields, ...(status === undefined ? {} : { status }) };
