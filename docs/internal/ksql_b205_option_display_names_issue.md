@@ -103,6 +103,35 @@ kintone が受け付ける値がずれる**。
 
 | 段階 | 状態 |
 |---|---|
-| 1 前提整備 | 🔧 **着手（2026-11-06）** |
+| 1 前提整備 | 🔧 **クエリの口は済み（2026-11-06）**。残りはレコードの再帰の変換と対応表の契約・検査 |
 | 2 選択肢 | 📋 未着手 |
 | 3 ステータス | 📋 未着手 |
+
+### 段階 1 でやったこと（2026-11-06）
+
+**`src/converter/queryForApp.ts`（新規）＝クエリの条件部を作る唯一の口。**
+
+```ts
+serializeQueryForApp({ appId, where, generated })   // 段階 2 で変換器を第 2 引数に足す
+```
+
+- **生成述語は文字列になる前に `{ field, op, values }`** で渡す（`GeneratedPredicate`。
+  `in` / `not in` / `=` / `>=` / `<=`）。文字列の置換はしない。
+- 値の引用（`\` と `"` の退避）も `quoteKintoneValue` に 1 つだけ置いた
+  （`sqlQuote`・`whereToKintone` の中・`joinKeyPrefilter` の注入関数に 3 つ散っていた）。
+- **`appId` は必須にしていない**＝アプリが文脈から決まらない表示専用の経路が 1 か所だけ残っている
+  （`relativeDateExplainLines`。`src/execute.ts:13588`）。**段階 2 の変換器は `appId` の無い入力を拒む**
+  （fail-closed）ので、そのときに呼び出し元（3 か所）からアプリを通す。
+
+**通した経路（全部）**
+
+| 経路 | 直した所 |
+|---|---|
+| **JOIN キーの押し下げ**（BLOCKER） | `buildJoinKeyPrefilterQueries`（文字列を返す）→ **`buildJoinKeyPrefilterPredicates`（述語を返す）**。実行（`src/execute.ts:8492`）と **EXPLAIN（`13147`）の両方** |
+| **非ネイティブ `UPSERT` の既存照合**（BLOCKER） | `in` のチャンクと、空文字キーの行ごとの `=` |
+| ふつうの `WHERE`・DML の `WHERE`・集計の `totalCount`・共有プラン・`APPLY` の親の選択 | `whereToKintone` の直呼びを全廃（**19 か所**）。`appId` を明示に渡す |
+| `EXPLAIN` の表示 | 同じ口に統一（`safeWhereToKintone` にも `appId` を足して 5 か所から渡す） |
+
+**検証**: `jest 6749 passed`・失敗は **v3.90.0 のベースラインと同数・同内容**（8 suites / 45 tests＝
+接続設定の無い環境の CLI / MCP）。`tsc` の新規エラー 0。**段階 1 は文字列が今までとまったく同じ**
+（変換器がまだ無いので、出力はバイト一致）。

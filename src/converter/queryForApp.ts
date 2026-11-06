@@ -33,8 +33,14 @@ export interface GeneratedPredicate {
 }
 
 export interface SerializeQueryForAppInput {
-  /** 送り先のアプリ（段階 2 の対応表の引き当てに使う。段階 1 では使わない） */
-  readonly appId: number;
+  /**
+   * 送り先のアプリ（段階 2 の対応表の引き当てに使う。段階 1 では使わない）。
+   *
+   * **省略できるのは、アプリが文脈から決まらない表示専用の経路だけ**（`EXPLAIN` の一部）。
+   * 段階 2 の変換器は、**`appId` が無い入力を拒む**（黙って変換しないのが最悪なので fail-closed）。
+   * 省略した箇所は段階 2 で呼び出し元からアプリを通す。
+   */
+  readonly appId?: number;
   /** WHERE の AST（押し下げる部分）。無い場合は条件なし */
   readonly where?: WhereExpr | null;
   /** AST を持たない生成述語。`and` で結ぶ */

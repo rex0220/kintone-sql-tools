@@ -118,7 +118,6 @@ import {
   whereRequiresJsEval,
   SelectMode,
 } from "./converter/selectToKintone";
-import { whereToKintone } from "./converter/whereToKintone";
 import { serializeQueryForApp, type GeneratedPredicate } from "./converter/queryForApp";
 import {
   insertToPostBatches,
@@ -1460,7 +1459,7 @@ async function executeExistingRecordValidationCore(
           fieldOptions,
           allowKlike: false,
         });
-  const query = prefilter === null ? "" : whereToKintone(prefilter);
+  const query = serializeQueryForApp({ appId: stmt.appId, where: prefilter });
   const records = await fetchAll(client.getRecords, stmt.appId, query, requiredFields, {
     maxRecords: options.maxRecords ?? 10_000,
     parallel: options.fetchParallel ?? 1,
@@ -4276,7 +4275,7 @@ async function executeSelect(
   ) {
     let serializedWholeWhere: string | null = null;
     try {
-      serializedWholeWhere = whereToKintone(stmt.where);
+      serializedWholeWhere = serializeQueryForApp({ appId: stmt.from.appId, where: stmt.where });
     } catch {
       serializedWholeWhere = null;
     }
@@ -4987,7 +4986,7 @@ async function executeSimpleSelect(
     });
     records = res.records;
   } else {
-    const baseQuery = stmt.where ? whereToKintone(stmt.where) : "";
+    const baseQuery = serializeQueryForApp({ appId: stmt.from.appId, where: stmt.where });
     records = await fetchAll(
       client.getRecords,
       params.app,
@@ -6532,7 +6531,7 @@ async function tryCountStarWithTotalCount(
 ): Promise<SelectResult | null> {
   const countColumn = stmt.columns.find((column) => column.type === "AGGREGATE");
   if (countColumn?.type !== "AGGREGATE") return null;
-  const baseQuery = stmt.where === null ? "" : whereToKintone(stmt.where);
+  const baseQuery = serializeQueryForApp({ appId: stmt.from.appId, where: stmt.where });
   const response = await client.getRecords({
     app: stmt.from.appId,
     query: `${baseQuery}${baseQuery ? " " : ""}limit 1`,
@@ -7877,7 +7876,7 @@ async function fetchTableRecordsForFullScan(
       ? selectToFetchAllParams(stmt, table.appId).query
       : "";
     const pushQueries = [
-      pushDownCond !== null ? whereToKintone(pushDownCond) : "",
+      serializeQueryForApp({ appId: table.appId, where: pushDownCond }),
       additionalPushQuery,
     ].filter((query) => query !== "");
     const pushQuery = pushQueries.length > 1
@@ -7911,7 +7910,7 @@ async function fetchTableRecordsForFullScan(
     && stmt.where !== null
     && resolvedWhereCapabilities.get(stmt)?.capability === "EXACT_PUSHDOWN"
     && !whereRequiresJsEval(stmt.where)
-    ? whereToKintone(stmt.where)
+    ? serializeQueryForApp({ appId: table.appId, where: stmt.where })
     : "";
   const parentResolved = await fetchRecordsForSharedPlan(client.getRecords, table.appId, parentQuery, fields, {
     parallel,
@@ -8517,7 +8516,7 @@ async function tryFetchJoinRecordsBySourceKeys(
 
   for (const joinKeyQuery of prefilterQueries) {
     const pushQueries = [
-      pushDownCond !== null ? whereToKintone(pushDownCond) : "",
+      serializeQueryForApp({ appId: join.table.appId, where: pushDownCond }),
       additionalPushQuery,
     ].filter((query) => query !== "");
     const query = pushQueries.reduce(
@@ -11315,9 +11314,7 @@ async function selectApplyParentSnapshots(
   const selectionPlan = buildApplyParentSelectionPlan(stmt.where, { fieldTypes, fieldOptions });
   // native 適用集合の完全性を records API より前に確定する。一部適用での継続は禁止。
   assertApplyParentKlikesFullyApplied(selectionPlan);
-  const prefilterQuery = selectionPlan.prefilter === null
-    ? ""
-    : whereToKintone(selectionPlan.prefilter);
+  const prefilterQuery = serializeQueryForApp({ appId: stmt.appId, where: selectionPlan.prefilter });
 
   // updateToGetQuery は LIKE を拒否する通常 DML 用 converter のため、この route では呼ばない。
   // APPLY/SET 用 snapshot に加え、元 WHERE の残余評価に必要な親フィールドを必ず取得する。
@@ -13587,7 +13584,8 @@ function relativeDateExplainLines(plan: RelativeDatePushdownPlan): string[] {
           `  operator: ${detail?.operator ?? operator}`
         );
       }
-      const serverPrefilter = whereToKintone(prefilterPlan.prefilterWhere);
+      // B205 段階 2: この表示経路はアプリが文脈から決まらないので、呼び出し元から appId を通す
+      const serverPrefilter = serializeQueryForApp({ where: prefilterPlan.prefilterWhere });
       lines.push(
         "  where capability: SUPERSET_PREFILTER",
         `  server prefilter: ${serverPrefilter}`,
@@ -14697,7 +14695,7 @@ function buildValidatePlan(stmt: ValidateStatement, label?: string): string[] {
     return lines;
   }
   lines.push(`  WHERE capability: ${info.capability.capability}`);
-  lines.push(`  kintone query: ${info.prefilter === null ? "(全件取得)" : whereToKintone(info.prefilter)}`);
+  lines.push(`  kintone query: ${info.prefilter === null ? "(全件取得)" : serializeQueryForApp({ appId: stmt.appId, where: info.prefilter })}`);
   lines.push(`  audit fields:  ${info.targetFields.length === 0 ? "(なし)" : info.targetFields.join(", ")}`);
   lines.push(`  fetch fields:  ${info.fetchFields.join(", ")}`);
   lines.push(`  mode:          ${stmt.summary ? "SUMMARY" : "DETAIL"}`);
@@ -14863,7 +14861,7 @@ function buildSelectPlan(
     }
   }
   if (totalCountPlan) {
-    const baseQuery = stmt.where === null ? "" : whereToKintone(stmt.where);
+    const baseQuery = serializeQueryForApp({ appId: stmt.from.appId, where: stmt.where });
     lines.push(`  app:           APP${stmt.from.appId} (${stmt.from.appId})`);
     lines.push(
       `  kintone query: ${baseQuery}${baseQuery ? " " : ""}limit 1`
@@ -15002,14 +15000,14 @@ function buildSelectPlan(
       && whereCapability?.capability === "EXACT_PUSHDOWN"
       && stmt.where !== null
       && !whereRequiresJsEval(stmt.where)
-      ? whereToKintone(stmt.where)
+      ? serializeQueryForApp({ appId: stmt.from.appId, where: stmt.where })
       : "";
     const mainBoundQuery = stmt.from.alias
       ? runtimeJoinPlan?.queriesByAlias.get(stmt.from.alias)
       : undefined;
     const mainQ = mainBoundQuery
       || (mainPushDown !== null
-        ? whereToKintone(mainPushDown)
+        ? serializeQueryForApp({ appId: stmt.from.appId, where: mainPushDown })
         : exactOriginalWhere || "(全件取得)");
     lines.push(`  app:           APP${stmt.from.appId}${mainAliasStr} (${stmt.from.appId})`);
     lines.push(`  kintone query: ${mainQ}`);
@@ -15046,7 +15044,7 @@ function buildSelectPlan(
       lines.push(`  relation: ${pushdownPlan.mainRelation ?? "exact"}`);
     } else if (mainCandidate !== null
       && (!metadataAwarePushdownPlan || hasPushdownPlaceholder(mainCandidate))) {
-      lines.push(`  pushdown candidate: ${whereToKintone(mainCandidate)}（実行時の型・実在確認待ち）`);
+      lines.push(`  pushdown candidate: ${serializeQueryForApp({ appId: stmt.from.appId, where: mainCandidate })}（実行時の型・実在確認待ち）`);
     }
     lines.push(`  fields:        ${mainFields.length === 0 ? "(全フィールド)" : mainFields.join(", ")}`);
     // JOIN テーブル
@@ -15073,7 +15071,7 @@ function buildSelectPlan(
           .some((table) => table.cteName !== null);
       const baseJoinQ = joinBoundQuery
         || (joinPushDown !== null
-            ? whereToKintone(joinPushDown)
+            ? serializeQueryForApp({ appId: join.table.appId, where: joinPushDown })
             : joinKey?.additionalQuery
               ? joinKey.additionalQuery
             : "(全件取得)");
@@ -15146,7 +15144,7 @@ function buildSelectPlan(
         lines.push("  join key prefilter: runtime candidate");
         lines.push("  join key prefilter reason: JOIN_KEY_VALUES_RUNTIME");
         if (joinCandidate !== null) {
-          lines.push(`  pushdown candidate: ${whereToKintone(joinCandidate)}（実行時の型・実在確認待ち）`);
+          lines.push(`  pushdown candidate: ${serializeQueryForApp({ appId: join.table.appId, where: joinCandidate })}（実行時の型・実在確認待ち）`);
         }
       } else if (joinPlanItem || joinFunctionConsumption) {
         lines.push(`  pushdown applied: ${joinBoundQuery}`);
@@ -15156,7 +15154,7 @@ function buildSelectPlan(
         lines.push(`  relation: ${pushdownPlan.joinRelations.get(join.table.alias!) ?? "exact"}`);
       } else if (joinCandidate !== null
         && (!metadataAwarePushdownPlan || hasPushdownPlaceholder(joinCandidate))) {
-        lines.push(`  pushdown candidate: ${whereToKintone(joinCandidate)}（実行時の型・実在確認待ち）`);
+        lines.push(`  pushdown candidate: ${serializeQueryForApp({ appId: join.table.appId, where: joinCandidate })}（実行時の型・実在確認待ち）`);
       }
       lines.push(`  fields:        ${joinFields.length === 0 ? "(全フィールド)" : joinFields.join(", ")}`);
     }
@@ -15536,9 +15534,9 @@ function buildUpdatePlan(
     const source = stmt.from.cteName ?? `APP${stmt.from.appId}`;
     lines.push(`  source:        ${source} AS ${stmt.from.alias}`);
     lines.push(`  join:          APP${stmt.appId}.${stmt.from.targetJoinField} = ${stmt.from.alias}.${stmt.from.joinKeyField}`);
-    lines.push(`  target filter: ${stmt.from.targetFilter ? safeWhereToKintone(stmt.from.targetFilter) : "(none)"}`);
+    lines.push(`  target filter: ${stmt.from.targetFilter ? safeWhereToKintone(stmt.from.targetFilter, stmt.appId) : "(none)"}`);
   } else {
-    lines.push(`  kintone query: ${safeWhereToKintone(stmt.where)}`);
+    lines.push(`  kintone query: ${safeWhereToKintone(stmt.where, stmt.appId)}`);
   }
   if (!stmt.subtableCode) {
     lines.push("  selection: exact native pushdown; JS residual none");
@@ -15608,7 +15606,7 @@ function buildUpdateApplyPlan(
   const selectionPlan = applyParentExplainPlan.get(stmt);
   const selectionLines = selectionPlan ? [
     "parent selection:       safe prefilter + JS residual evaluation",
-    `kintone prefilter:      ${selectionPlan.prefilter === null ? "(none; empty query)" : whereToKintone(selectionPlan.prefilter)}`,
+    `kintone prefilter:      ${selectionPlan.prefilter === null ? "(none; empty query)" : serializeQueryForApp({ appId: stmt.appId, where: selectionPlan.prefilter })}`,
     "JS residual:            original parent WHERE",
     `applied KLIKE:          ${selectionPlan.appliedKlikes.size}`,
     `unapplied KLIKE:        ${selectionPlan.unappliedKlikes.length}${selectionPlan.unappliedKlikes.length > 0
@@ -15621,7 +15619,7 @@ function buildUpdateApplyPlan(
     ...(label ? [label] : []),
     "statement:              UPDATE APPLY",
     `target app:             APP${stmt.appId}`,
-    `parent selector:        ${safeWhereToKintone(stmt.where)}`,
+    `parent selector:        ${safeWhereToKintone(stmt.where, stmt.appId)}`,
     `parent cardinality:     ${isSinglePositiveRecordIdWhere(stmt.where) ? "single" : "multiple"}`,
     ...selectionLines,
     `apply target:           ${branch.targets.map((target) => `${target.field} (${target.targetKind})`).join(" | ")}`,
@@ -15666,7 +15664,7 @@ function buildDeletePlan(stmt: DeleteStatement, label?: string): string[] {
   if (label) lines.push(label);
   lines.push(`  [DELETE]`);
   lines.push(`  target:        APP${stmt.appId} (${stmt.appId})`);
-  lines.push(`  kintone query: ${safeWhereToKintone(stmt.where)}`);
+  lines.push(`  kintone query: ${safeWhereToKintone(stmt.where, stmt.appId)}`);
   if (!stmt.subtableCode) {
     lines.push("  selection: exact native pushdown; JS residual none");
     lines.push("  search abort: DML fail-closed (SearchAbortedError; mutation 0)");
@@ -15762,7 +15760,7 @@ function buildReorderPlan(stmt: ReorderStatement, label?: string): string[] {
       : `  api:    GET /k/v1/records.json（行 ID 取得）→ PUT /k/v1/records.json（id 配列のみ送信）`,
   ];
   if (!stmt.all && stmt.where) {
-    lines.splice(5, 0, `  where:  ${safeWhereToKintone(stmt.where)}`);
+    lines.splice(5, 0, `  where:  ${safeWhereToKintone(stmt.where, stmt.appId)}`);
   }
   return lines;
 }
@@ -15772,11 +15770,11 @@ function formatOrderByItem(item: OrderByItem): string {
   return `${key} ${item.direction}`;
 }
 
-/** whereToKintone が例外を投げる場合（JS 関数含む等）は "(JS 評価)" を返す */
-function safeWhereToKintone(where: WhereExpr): string {
+/** クエリ化が例外を投げる場合（JS 関数含む等）は "(JS 評価)" を返す */
+function safeWhereToKintone(where: WhereExpr, appId?: number): string {
   if (where.type === "BOOLEAN") return where.value ? "TRUE" : "FALSE (constant)";
   try {
-    return whereToKintone(where);
+    return serializeQueryForApp({ ...(appId === undefined ? {} : { appId }), where });
   } catch {
     return "(JS 評価が必要なため kintone クエリに変換不可)";
   }
