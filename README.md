@@ -441,7 +441,10 @@ UPDATE LAPP_受注 SET 選択肢 = 'sample2' WHERE $id = @id;
   `createExecutionContext` が `ArgumentError`。一意に決まらない対応表（表示名の重複・`index` の不一致など）も
   **実行開始前**に `ArgumentError`。
 - **`EXPLAIN` とは併用できません**（計画の文は「実際に送るクエリ」を見せる場所のため）。
-- **ステータスだけ正本の向きが変わります**（`"raw"` は表示名・`"canonical"` は既定名）。
+- **表示名で書いた形は通しません**（`SET` は `ERR_CHOICE_INVALID`・`WHERE` は **0 件**）。
+  `"raw"` で `WHERE 選択肢 = '表示名'` と書いて動いていた文は、`"canonical"` では**エラーにならず 0 件**になります。
+  切り替える前に SQL の選択肢名・ステータス名を既定名へ直してください（ステータスは正本の向きが変わります＝
+  `"raw"` は表示名・`"canonical"` は既定名）。
 - CLI・MCP・`/engine` では公開していません（言語の決まり方が認証方式で変わるため。詳細は言語リファレンス §25）。
 
 ### APPLY の書込（`allowApplyMutation`・B198）
