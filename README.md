@@ -409,7 +409,8 @@ ASSERT (SELECT COUNT(*) FROM LAPP_在庫 WHERE 残数 < 0) = 0, @m_no_stock;
 
 - 受けるのは**変数参照 1 つだけ**（連結・関数・数値リテラルは不可）。空に解決したらメッセージを省いたのと同じです。
 - 不成立のときは `AssertError` の文末に、`ASSERT WARN` では `warning` に、`EXIT` では結果の `message` に入ります。
-- **`explainScript` の計画には変数の名前（`, '@m_no_stock'`）が出ます**（注入した値は計画の文に出しません）。
+- **`explainScript` の計画には変数の名前（`, '@m_no_stock'`）が出ます**（**外部注入した値**は計画の文に出しません。
+  as-of 関数（`@NOW()`）は従来どおり基準時刻の実値が出ます）。
 - AST は `AssertStatement.messageVar` / `ExitStatement.messageVar`（`parseScript` が返すのは
   `{ type: "VARIABLE", name: "m_no_stock" }`。**名前は小文字・`@` なし**）。リテラルで書いた形は従来どおり `message` です。
 

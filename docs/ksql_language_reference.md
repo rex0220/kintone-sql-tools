@@ -4198,6 +4198,7 @@ WHERE 処理ステータス = '未処理';
 | A12 | ASSERT オペランド | 比較・BETWEEN の直接オペランドに使える |
 | A13 | SET のスカラーサブクエリ内 | 先行変数を `(SELECT ... WHERE 列 = @a)` のように参照できる。外側の SET 式とは別扱い |
 | A14 | SELECT 列の算術オペランド | `SELECT (売上 * 100) / @total AS 構成比` のように数値変数を直接使える |
+| A15 | `ASSERT` / `EXIT SUCCESS IF` のメッセージ | v3.90.0〜。**スカラー変数 1 個だけ**（`ASSERT …, @m_x`）。式・連結（`\|\|`）・関数は不可、配列変数と `RELATIVE_DATE` 変数も不可（バッチ解析が実行前に拒否）。空に解決したらメッセージを省いたのと同じ。§27.2 |
 
 | ID | 使えない配置 | 境界 |
 |---|---|---|
@@ -4439,7 +4440,9 @@ ASSERT WARN (SELECT COUNT(*) FROM #summary) BETWEEN 1 AND 500, @m_range;
   `warning` も既定の文）。リテラルの `''` も同じ規則です。
 - **配列を宣言した変数（`DECLARE @ids = [];`）・未宣言の変数・`RELATIVE_DATE` の変数は書けません**。
   いずれもバッチ解析の時点（レコード API を 1 回も呼ぶ前）で拒否します。
-- **`EXPLAIN` の計画には変数の名前（`, '@m_no_stock'`）が出ます**。注入した値は計画の文に出しません。
+- **`EXPLAIN` の計画には変数の名前（`, '@m_no_stock'`）が出ます**＝**外部注入した値は計画の文に出しません**。
+  例外は as-of 関数（`@NOW()` / `@TODAY()`）で、これは従来どおり**基準時刻の実値**が出ます
+  （`WHERE 日付 = @TODAY()` の押し下げと同じ扱い。B204 で変えていません）。
 - AST は `AssertStatement.messageVar`（`parseScript` が返すのは `{ type: "VARIABLE", name: "m_no_stock" }`。
   **名前は小文字・`@` なし**）。リテラルで書いた形は従来どおり `message` に入り、両者は排他です。
 - CLI の `--var`・MCP の `variables` でも同じように注入できます。

@@ -1,5 +1,9 @@
-import { buildBatchExplainPlans, executeBatch, type KintoneClient } from "../execute";
+import {
+  buildBatchExplainPlans, execute, executeBatch,
+  type ExitResult, type KintoneClient,
+} from "../execute";
 import type { KintoneRecord } from "../converter/dmlToKintone";
+import { renderResult } from "../ui/renderResult";
 
 function client(records: KintoneRecord[] = []): KintoneClient {
   return {
@@ -13,6 +17,31 @@ function client(records: KintoneRecord[] = []): KintoneClient {
     async getProcessStatuses() { return { enable: false, states: [] }; },
     async getNumberPrecision() { return { digits: 30, decimalPlaces: 10, roundingMode: "HALF_EVEN" as const }; },
   };
+}
+
+/**
+ * 「API 0 回」を証明するための厳しい代役。
+ * どのメソッドも呼ばれた時点で記録し、読み書きは値を返さず失敗させる
+ * （成功を返すと「呼ばれていない」と「呼ばれて成功した」が区別できない）。
+ */
+function strictClient() {
+  const calls: string[] = [];
+  const fail = (name: string) => async (): Promise<never> => {
+    calls.push(name);
+    throw new Error(`unexpected ${name} call`);
+  };
+  const value = {
+    getRecords: fail("getRecords"),
+    openCursor: fail("openCursor"),
+    postRecords: fail("postRecords"),
+    putRecords: fail("putRecords"),
+    deleteRecords: fail("deleteRecords"),
+    getApps: fail("getApps"),
+    getFields: fail("getFields"),
+    getProcessStatuses: fail("getProcessStatuses"),
+    getNumberPrecision: fail("getNumberPrecision"),
+  } as unknown as KintoneClient;
+  return { value, calls };
 }
 
 const header = "-- @ksql dialect: 1\n";
@@ -178,6 +207,92 @@ test("B204: EXPLAIN は変数の名前を出し、注入した値を出さない
   expect(lines[1]).toBe("ASSERT 1 = 2, '@m_no_stock'");
   expect(lines[2]).toBe("EXIT SUCCESS IF 1 = 1, '@m_no_stock'");
   expect(JSON.stringify(plans)).not.toContain("在庫が足りません");
+});
+
+// --- Codex レビュー（2026-11-06）で足した境界 ---
+
+test("B204: メッセージの変数は単文では書けない（dialect 1 の宣言が要る・API 0 回）", async () => {
+  // 単文実行（execute）は -- @ksql dialect: 1 のヘッダーを読まないので、構文の段階で止まる
+  const strict = strictClient();
+  await expect(execute("ASSERT 1 = 1, @m_x", strict.value))
+    .rejects.toThrow("この構文には -- @ksql dialect: 1 の宣言が必要です");
+  expect(strict.calls).toEqual([]);
+
+  // 1 文だけのバッチも、バッチ解析（純粋な AST の検査）が先に拒否する
+  const batch = strictClient();
+  await expect(executeBatch(`${header}ASSERT 1 = 1, @m_x`, batch.value))
+    .rejects.toThrow("ParseError: variable @m_x is not defined before statement 1.");
+  expect(batch.calls).toEqual([]);
+});
+
+test("B204 付随: 単文の未解決変数は相対日付の計画（フォーム定義の取得）より前に拒否する", async () => {
+  // 条件に TODAY() があると相対日付の計画でフォーム定義を読む。検査の順序を入れ替えたので
+  // 「未解決の変数がある文は API を 1 回も呼ばずに止まる」が全文型で成り立つ。
+  const strict = strictClient();
+  await expect(execute(
+    "SELECT 残数 FROM APP1 WHERE 日付 = TODAY() AND 残数 = @n",
+    strict.value
+  )).rejects.toThrow("ParseError: variable @n is not defined in a batch.");
+  expect(strict.calls).toEqual([]);
+});
+
+test("B204: 配列・未宣言をメッセージに書いた形も API を 1 回も呼ばない", async () => {
+  for (const sql of [
+    `${header}DECLARE @ids = [];\nASSERT 1 = 1, @ids`,
+    `${header}ASSERT 1 = 1, @m_nope`,
+  ]) {
+    const strict = strictClient();
+    await expect(executeBatch(sql, strict.value, { variables: {} })).rejects.toThrow("ParseError:");
+    expect(strict.calls).toEqual([]);
+  }
+});
+
+test("B204: 数値の変数をメッセージに書いたら文字表現が入る", async () => {
+  const records = Array.from({ length: 3 }, (_, index) => ({ $id: { value: String(index + 1) } }));
+  const result = await executeBatch(
+    `${header}SET @n = (SELECT COUNT(*) FROM APP1);\nASSERT 1 = 2, @n`,
+    client(records)
+  );
+  expect(result.statements[1].error?.message).toBe(
+    "AssertError: assertion failed: 1 = 2 (actual: 1). 3"
+  );
+});
+
+test("B204: EXIT 不成立でも解決後のメッセージを返す", async () => {
+  const result = await executeBatch(
+    `${header}DECLARE @m_done = '';\nEXIT SUCCESS IF 1 = 2, @m_done; SELECT 1 AS continued`,
+    client(),
+    { variables: { m_done: "対象がありません" } }
+  );
+  expect(result.ok).toBe(true);
+  expect(result.statements[1].result).toMatchObject({
+    type: "EXIT", exited: false, message: "対象がありません",
+  });
+  expect(result.statements[2].status).toBe("success");
+});
+
+test("B204: ASSERT WARN のリテラル（非空）は従来どおり", async () => {
+  const result = await executeBatch(`${header}ASSERT WARN 1 = 2, '警告の文'`, client());
+  expect(result.statements[0].result).toMatchObject({
+    type: "ASSERT", passed: false, warning: "警告の文",
+  });
+});
+
+test("B204: 空の EXIT は CLI 表示で条件に落ちる（意図した 3 点目の退行）", () => {
+  const empty: ExitResult = { type: "EXIT", condition: "1 = 1", exited: true, message: "" };
+  expect(renderResult(empty)).toContain("終了条件成立: 1 = 1");
+  const filled: ExitResult = { type: "EXIT", condition: "1 = 1", exited: true, message: "対象なし" };
+  expect(renderResult(filled)).toContain("対象なし");
+  const notExited: ExitResult = { type: "EXIT", condition: "1 = 2", exited: false, message: "対象なし" };
+  expect(renderResult(notExited)).toContain("終了条件不成立: 1 = 2");
+});
+
+test("B204: as-of 関数をメッセージに書くと基準時刻が入る（禁じない）", async () => {
+  const asOf = new Date("2030-01-02T03:04:05Z");
+  const result = await executeBatch(`${header}ASSERT 1 = 2, @NOW(); SELECT 1 AS skipped`, client(), { asOf });
+  expect(result.statements[0].error?.message).toBe(
+    "AssertError: assertion failed: 1 = 2 (actual: 1). 2030-01-02T03:04:05.000Z"
+  );
 });
 
 test("B204: リテラルのメッセージは EXPLAIN でも従来どおり書き戻す", async () => {

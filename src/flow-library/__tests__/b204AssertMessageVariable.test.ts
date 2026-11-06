@@ -151,6 +151,20 @@ test("B204: EXPLAIN は変数の名前だけを出す（注入した値を計画
   expect(JSON.stringify(plans)).not.toContain("在庫が足りません");
 });
 
+test("B204: EXPLAIN が伏せるのは外部注入した値だけ（as-of の時刻は従来どおり計画に出る）", async () => {
+  const asOf = new Date("2030-01-02T03:04:05Z");
+  // 既存の動き: as-of 関数は押し下げの実値として計画に出る（B204 で変えていない）。
+  const plans = await explainScript(`${header}ASSERT 1 = 2, @NOW();\nSELECT 残数 FROM APP1;`, {
+    client: mockClient(0), asOf,
+  });
+  expect(plans.statements[0].plan[0]).toBe("ASSERT 1 = 2, '2030-01-02T03:04:05.000Z'");
+  // 伏せるのは `DECLARE` + `variables` で注入した値（＝設定のメッセージ）。
+  const injected = await explainScript(assertSql, {
+    client: mockClient(0), asOf, variables: { m_no_stock: "在庫が足りません" },
+  });
+  expect(JSON.stringify(injected)).not.toContain("在庫が足りません");
+});
+
 test("B204 AC6: リテラルの形は退行なし（文も EXPLAIN も従来どおり）", async () => {
   const literalSql = `${header}ASSERT (SELECT COUNT(*) FROM APP1 WHERE 残数 < 0) = 0, '在庫が足りません';`;
   const { results } = await runScript(literalSql, 3);

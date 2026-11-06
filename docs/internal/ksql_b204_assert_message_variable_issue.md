@@ -1,6 +1,6 @@
 # B204 `ASSERT` / `EXIT SUCCESS IF` のメッセージを変数で受ける
 
-- 状態: 🔧 **実装済み・未リリース（2026-11-06。v3.90.0 見込み）**。テスト 39 件（`src/parser/__tests__/b204AssertMessageVariable.test.ts` 13 件・`src/__tests__/b204AssertMessageVariable.test.ts` 15 件・`src/flow-library/__tests__/b204AssertMessageVariable.test.ts` 11 件）
+- 状態: 🔧 **実装済み・レビュー済み・未リリース（2026-11-06。v3.90.0 見込み）**。テスト 48 件（`src/parser/__tests__/b204AssertMessageVariable.test.ts` 13 件・`src/__tests__/b204AssertMessageVariable.test.ts` 23 件・`src/flow-library/__tests__/b204AssertMessageVariable.test.ts` 12 件）。Codex レビュー（2026-11-06）は BLOCKER 0 / MAJOR 2 / MINOR 3 で、**全件を処置済み**（§5 の「レビューで分かったこと」）
 - 種別: 機能（**構文の受け口だけ**。変数の解決・外部注入・端の守りは B203 までで既にある）
 - 優先: 低〜中（急ぎではない。依頼元の Ver.1 は「1 言語のまま」で出せる）
 - 版: minor（v3.90.0 想定）。**純加法**＝リテラルで書いた既存の SQL と、`message` しか見ない既存の読み手は不変
@@ -47,21 +47,26 @@
    案 (a)（`message?: string | VariableRef`）を採らなかったのは、`EXIT` 側が型の破壊的変更になり、
    公開面（`dist-flow/types/ast.d.ts`）の既存の読み手（`typeof === "string"` で分岐）も壊れるため。
 3. **実行時**: メッセージの文字を 1 か所（`assertMessageText`）で求める。**空文字は「省いた」のと同じに正規化**（リテラルの `''` も同じ規則）。
-   未解決の `VARIABLE` が届いたら（単文実行）条件を読む前に `ParseError: unresolved batch variable @名前.`。
-4. **EXPLAIN**: 計画には**変数の名前**（`, '@m_x'`）を出す。注入値は出さない。
+   未解決の `VARIABLE` が届いたら、条件を読む前に `ParseError: unresolved batch variable @名前.`
+   （**内部の守り**。公開の入口からは到達しない＝§5 の「レビューで分かったこと」1）。
+4. **EXPLAIN**: 計画には**変数の名前**（`, '@m_x'`）を出す＝**外部注入した値は出さない**。
+   as-of 関数（`@NOW()`）だけは従来どおり**基準時刻の実値**が出る（§5 の 2）。
 5. **CLI / MCP も同時に使える**（スカラーの注入は `--var` と MCP の `variables` に既にあるので、公開面の線引きは不要）。
 6. 文書: 言語リファレンス §25（変数が書ける位置・注入の節）と §27.2 / §27.3、README の `/flow`、MCP の文型カタログ。
 
 ### E-1 の決め（空文字）
 
 依頼の希望は「空文字はメッセージを省いたのと同じ（エラーにしない）」。**リテラルにも同じ規則を効かせた**（規則を 1 つにするため）。
-これで変わる既存の動きは 2 つだけ:
+これで変わる既存の動きは **3 つ**（2026-11-06 の Codex レビューで 3 点目を足した。MINOR 1）:
 
 1. `ASSERT …, '';` のエラー文の**末尾の空白が消える**。
 2. `ASSERT WARN …, '';` の `warning` が **`""` から既定の文（`assertion failed: …`）に変わる**。
+3. `EXIT SUCCESS IF …, '';` の CLI / プラグイン UI の表示が、**空の本文から `終了条件成立: <条件>` に変わる**
+   （`src/ui/renderResult.ts`。結果の `message` は `""` のままで、API の形は変えていない）。
 
 `EXIT` は「省いた状態」が構文上存在しないので、結果の `message` は **`""`** のまま返す（呼び出し側が自分の既定の文に落とす）。
-CLI は空のとき `終了条件成立: <条件>` と表示する（従来は空行になっていた。ついで直し）。
+**リテラルの空 `EXIT` と「変数が空に解決した `EXIT`」は結果からは区別できない**（どちらも `message: ""`）。
+区別が要るなら結果に別の情報が必要なので、**区別しない**ことにした（呼び出し側はどちらでも自分の既定の文に落とせばよい）。
 
 ### 受けない / 禁じないもの
 
@@ -91,6 +96,32 @@ CLI は空のとき `終了条件成立: <条件>` と表示する（従来は�
 | `src/mcp/statementSyntaxCatalog.ts` | Flow-ASSERT / Flow-EXIT の文型に `\| @messageVariable` を追記（instructions の語数予算 +4＝`metadataTools.test.ts` の実測値も更新） |
 | `src/core/batch.ts` | **変更なし**（メッセージの位置の `VARIABLE` は `collectVariableRefs` が `scalar` の使い方として拾い、宣言との突き合わせがそのまま効く） |
 | 文書 | 言語リファレンス §25・§27.2・§27.3、README の `/flow`、本ファイル、台帳 |
+
+### レビューで分かったこと（2026-11-06 の Codex レビュー。BLOCKER 0 / MAJOR 2 / MINOR 3）
+
+結果は work-link の `codex-review-ksql-b204-2026-11-06.md`（依頼文は `codex-review-ksql-b204-prompt.md`）。
+
+1. **（MAJOR 1 → 一部採用）** 「未解決の `messageVar` は単文実行で `assertMessageText` が拒否する」という §3 の 3 の書き方は不正確だった。
+   **公開の入口からはそこへ到達しない**＝`execute()`（単文）は `-- @ksql dialect: 1` のヘッダーを読まないのでメッセージの構文自体が
+   parse エラーになり、1 文だけのバッチは `analyzeBatch` が `ParseError: variable @x is not defined before statement 1.` で先に止める。
+   `assertMessageText` の拒否は**内部の守り**として残す（検算済み。試験で両方の経路を固定した）。
+   レビューが指摘した「相対日付の計画（フォーム定義の取得）が未解決変数の検査より前にある」ことは**本当だった**ので、
+   `executeParsedStatement` の検査順を入れ替えた（`findVariableRef` を `resolveRelativeDateExecutionPlan` の前へ）。
+   これは B204 が持ち込んだ不具合ではなく**全文型に元からあった順序**で、直した結果
+   「未解決の変数がある文は API を 1 回も呼ばずに止まる」が全文型で成り立つ（試験あり。全体のテスト結果は変わらず）。
+2. **（MAJOR 2 → 文書の精度の問題として採用）** 「EXPLAIN は変数の名前だけを出す」は言い過ぎだった。
+   **as-of 関数（`@NOW()` / `@TODAY()`）は EXPLAIN に実値が出る**（`variables` マップに最初から実値が入るため）。
+   **ただしこれは B204 と無関係の既存の動き**で、`WHERE 日付 = @TODAY()` の押し下げも EXPLAIN には `日付 = "2030-01-02"` と出る（実測）。
+   計画の文は「押し下げられる実際のクエリ」を見せる場所なので、**メッセージの位置だけ as-of を伏せる特別扱いはしない**。
+   守るべき約束（外部注入した値＝設定のメッセージは計画に出さない）は満たしているので、**文書を正確にした**
+   （言語リファレンス §27.2・README。試験でも as-of の実値が出ることを固定した）。
+3. **（MINOR 1 → 採用）** 既存の動きの変更は 2 点ではなく **3 点**（空リテラルの `EXIT` の表示）。§3 の E-1 を直し、`renderResult` の回帰試験を足した。
+4. **（MINOR 2 → 採用）** 言語リファレンス §25 の「スカラー変数の配置詳細」表に **A15** を足した（概要表だけ直していた）。
+5. **（MINOR 3 → 採用）** 試験を 39 → **48 件**に増やした。足したのは、単文とバッチ 1 文の拒否（**API 0 回を厳しい代役で証明**）・
+   配列と未宣言での API 0 回・数値の変数・`EXIT` 不成立での解決後のメッセージ・`ASSERT WARN` のリテラル・
+   空リテラルの `EXIT` の表示・as-of をメッセージに書いた形（実行時と EXPLAIN）。
+   **代役（モック）を厳しくした**＝「API 0 回」を主張する試験では、どのメソッドも呼ばれたら記録して失敗する client を使う
+   （成功を返す代役だと「呼ばれていない」と「呼ばれて成功した」が区別できない、という指摘はそのとおり）。
 
 **実装して分かったこと**: 端の守り（E-2 配列・E-3 未宣言・`RELATIVE_DATE`）は**新しいコードを書かずに満たせた**。
 変数の解決が AST を丸ごと歩く 1 か所で、使い方の収集（`collectVariableRefs`）も型を見ずにノードの `type` で拾うので、

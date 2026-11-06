@@ -1244,13 +1244,15 @@ async function executeParsedStatement(
   cacheContext: string
 ): Promise<ExecuteResult> {
   options = bindStatementEvaluationContext(options);
-  const relativeDatePlan = await resolveRelativeDateExecutionPlan(stmt, client, cacheContext);
-  // EXPLAIN は拒否計画そのものを副作用なしで表示する。実行文だけ fail-closed にする。
-  if (stmt.type !== "EXPLAIN") assertRelativeDatePushdownPlan(relativeDatePlan);
+  // B204: 未解決の変数は API を 1 回も呼ぶ前に拒否する（相対日付の計画はフォーム定義を読むため、
+  // この検査より後に置くと「変数が無い文」でメタデータの取得が走ってしまう）。
   const unresolved = findVariableRef(stmt);
   if (unresolved !== null && !isApplyParentKlikeStatement(stmt)) {
     throw new Error(undefinedBatchVariableMessage(unresolved, "in a batch"));
   }
+  const relativeDatePlan = await resolveRelativeDateExecutionPlan(stmt, client, cacheContext);
+  // EXPLAIN は拒否計画そのものを副作用なしで表示する。実行文だけ fail-closed にする。
+  if (stmt.type !== "EXPLAIN") assertRelativeDatePushdownPlan(relativeDatePlan);
   assertApplyScope("phase16a", stmt);
   assertApplyExecutionScope("phase16a", stmt);
   validateStatementStatic(stmt);
