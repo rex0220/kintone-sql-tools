@@ -50,6 +50,11 @@ export interface AppOptionNameMap {
   /** 言語ごとの表示名が 1 つも無い（＝変換が恒等）なら true。包み自体を通さない判断に使う。 */
   readonly identity: boolean;
   readonly fields: ReadonlyMap<string, FieldOptionNames>;
+  /**
+   * プロセス管理のステータスの対応（`fields` にも項目コードで入っているが、
+   * **順序表の正本を切り替える**ときは項目コードを知らずに引きたいので別に持つ）。
+   */
+  readonly status?: FieldOptionNames;
 }
 
 /** 表示名の取得で使う生のメタデータ（クライアントが返す形）。 */
@@ -223,6 +228,7 @@ export function buildAppOptionNameMap(
   }
   const displayByCode = new Map(source.fields.map((field) => [field.code, field]));
   const fields = new Map<string, FieldOptionNames>();
+  let status: FieldOptionNames | undefined;
   let identity = true;
 
   for (const field of canonicalFields) {
@@ -244,11 +250,12 @@ export function buildAppOptionNameMap(
     if (statusField !== undefined) {
       const pairs = [...source.statusStates].sort((a, b) => a.index - b.index);
       if (pairs.some((pair) => pair.canonical !== pair.display)) identity = false;
-      fields.set(statusField.code, fieldOptionNamesFrom(statusField.code, pairs));
+      status = fieldOptionNamesFrom(statusField.code, pairs);
+      fields.set(statusField.code, status);
     }
   }
 
-  return { appId, identity, fields };
+  return { appId, identity, fields, ...(status === undefined ? {} : { status }) };
 }
 
 /** 対応表から「既定名 → 表示名」の変換関数を作る（知らない項目・値はそのまま）。 */

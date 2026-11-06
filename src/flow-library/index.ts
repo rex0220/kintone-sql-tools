@@ -174,13 +174,24 @@ export function createExecutionContext(opts: CreateExecutionContextOptions): Exe
     }
     // B205: createExecutionContext は同期なので、ここでできるのは「能力があるか」の確認まで。
     // 対応表そのものは最初の文を実行する前に非同期で作る（レコード API と書き込みより前）。
-    if (executeOptions.optionNames === "canonical"
-      && typeof (client as { getOptionNames?: unknown }).getOptionNames !== "function") {
-      throw new KsqlFlowError(
-        "ArgumentError",
-        "ArgumentError: optionNames: \"canonical\" requires a client with getOptionNames; "
-        + "use createKintoneClient from @rex0220/kintone-sql-tools/flow, or keep optionNames: \"raw\"."
-      );
+    if (executeOptions.optionNames === "canonical") {
+      if (typeof (client as { getOptionNames?: unknown }).getOptionNames !== "function") {
+        throw new KsqlFlowError(
+          "ArgumentError",
+          "ArgumentError: optionNames: \"canonical\" requires a client with getOptionNames; "
+          + "use createKintoneClient from @rex0220/kintone-sql-tools/flow, or keep optionNames: \"raw\"."
+        );
+      }
+      // B205: 計画の文は「実際に送るクエリ」を見せる場所。canonical で表示名を出す配線はまだ無いので、
+      // 既定名の計画を見せないために併用を拒む（実行前に分かることは実行前に弾く。B198 と同じ形）。
+      if (statements.some((statement) => statement.type === "EXPLAIN")) {
+        throw new KsqlFlowError(
+          "ArgumentError",
+          "ArgumentError: EXPLAIN is not available with optionNames: \"canonical\"; "
+          + "the plan would show default option names while execution sends the display names. "
+          + "Run EXPLAIN in a separate execution context without optionNames."
+        );
+      }
     }
     if (confirm && statements.some(statementUsesImport)) {
       throw new KsqlFlowError(

@@ -1059,6 +1059,11 @@ type OptionNameAwareClient = KintoneClient & {
   [OPTION_NAME_MAPS]?: ReadonlyMap<number, AppOptionNameMap>;
 };
 
+/** クライアントが運んでいる対応表（`"raw"` では `undefined`）。 */
+function optionNameMapsOf(client: KintoneClient): ReadonlyMap<number, AppOptionNameMap> | undefined {
+  return (client as OptionNameAwareClient)[OPTION_NAME_MAPS];
+}
+
 /** `serializeQueryForApp` に渡す「既定名 → 表示名」の口（`"raw"` では何もしない）。 */
 export function optionNameQuerySource(client: KintoneClient): OptionQueryTranslatorSource {
   const maps = (client as OptionNameAwareClient)[OPTION_NAME_MAPS];
@@ -1643,7 +1648,7 @@ async function executeExistingRecordValidationCore(
           fieldOptions,
           allowKlike: false,
         });
-  const query = serializeQueryForApp({ appId: stmt.appId, where: prefilter });
+  const query = serializeQueryForApp({ appId: stmt.appId, where: prefilter }, optionNameQuerySource(client));
   const records = await fetchAll(client.getRecords, stmt.appId, query, requiredFields, {
     maxRecords: options.maxRecords ?? 10_000,
     parallel: options.fetchParallel ?? 1,
@@ -3006,6 +3011,15 @@ export async function executeBatchStatement(
 
   // EXPLAIN はプラン表示のみ（kintone アクセスなし）のため一時テーブル参照を含んでも安全
   if (stmt.type === "EXPLAIN") {
+    // B205: canonical では計画の文（＝実際に送るクエリを見せる場所）に表示名を出す配線が
+    // まだ無いので、既定名の計画を「実際に送る文」として見せない。併用を拒む（仕様）。
+    if (options.optionNames === "canonical") {
+      throw new Error(
+        "ArgumentError: EXPLAIN is not available with optionNames: \"canonical\"; "
+        + "the plan would show default option names while execution sends the display names. "
+        + "Run EXPLAIN in a separate execution context without optionNames."
+      );
+    }
     const explainStmt = resolvedStmt as ExplainStatement;
     explainMaterializedTables.set(explainStmt, tempTables);
     try {
@@ -4482,7 +4496,7 @@ async function executeSelect(
   ) {
     let serializedWholeWhere: string | null = null;
     try {
-      serializedWholeWhere = serializeQueryForApp({ appId: stmt.from.appId, where: stmt.where });
+      serializedWholeWhere = serializeQueryForApp({ appId: stmt.from.appId, where: stmt.where }, optionNameQuerySource(client));
     } catch {
       serializedWholeWhere = null;
     }
@@ -8847,9 +8861,14 @@ async function loadProcessStatusOrder(
   cacheContext: string
 ): Promise<ReadonlyMap<string, number> | undefined> {
   const process = await getProcessStatusesCached(appId, client, cacheContext);
-  return process.enable && process.states !== null
-    ? new Map(process.states.map((state) => [state.name, state.index]))
-    : undefined;
+  if (!process.enable || process.states === null) return undefined;
+  // B205 段階 3: canonical ではステータスの正本を**キー（既定名）**に切り替える。
+  // `getProcessStatuses` は lang: "user" で取るので state.name は表示名＝raw の正本はそちら。
+  const status = optionNameMapsOf(client)?.get(appId)?.status;
+  return new Map(process.states.map((state) => [
+    status?.toCanonical.get(state.name) ?? state.name,
+    state.index,
+  ]));
 }
 
 async function getFieldTypeMap(appId: number, client: KintoneClient, cacheContext: string): Promise<FieldTypeMap> {
@@ -14610,6 +14629,11 @@ const explainMaterializedTables = new WeakMap<ExplainStatement, ReadonlyMap<stri
 interface RecursiveExplainContext {
   readonly maxRecords: number;
   readonly recursiveLimits: RecursiveCteLimits;
+  /**
+   * B205: 計画のクエリに使う「既定名 → 表示名」の口（`optionNames: "canonical"` のときだけ）。
+   * **計画の文は「実際に送るクエリ」を見せる場所**なので、実行と同じ口を通す。
+   */
+  readonly optionNames?: OptionQueryTranslatorSource;
 }
 
 function defaultRecursiveExplainContext(): RecursiveExplainContext {

@@ -39,7 +39,7 @@ function mockClient() {
   const optionNameCalls: number[] = [];
   /** kintone に入っている値は**表示名**（レコードの実体） */
   const rows = (): Rec[] => [
-    { $id: { value: "1" }, $revision: { value: "1" }, ラジオボタン: { value: "サンプル１" }, 処理状況: { value: "未処理" }, 担当者: { value: "山田" } },
+    { $id: { value: "1" }, $revision: { value: "1" }, ラジオボタン: { value: "サンプル１" }, 処理状況: { value: "未処理" }, 担当者: { value: "山田" }, ステータス: { value: "みしょり" } },
     { $id: { value: "2" }, $revision: { value: "1" }, ラジオボタン: { value: "サンプル２" }, 処理状況: { value: "処理済" }, 担当者: { value: "佐藤" } },
     { $id: { value: "3" }, $revision: { value: "1" }, ラジオボタン: { value: "sample9" }, 処理状況: { value: "未処理" }, 担当者: { value: "鈴木" } },
   ];
@@ -72,10 +72,20 @@ function mockClient() {
     async getApps() { return []; },
     async getFields() { return fieldsFor("default"); },
     async getNumberPrecision() { return { digits: 16, decimalPlaces: 4, roundingMode: "HALF_EVEN" as const }; },
-    async getProcessStatuses() { return { enable: false, states: null }; },
+    async getProcessStatuses() {
+      // raw の正本は表示名（エンジンは lang: "user" で取る）
+      return { enable: true, states: [{ name: "みしょり", index: 0 }, { name: "かんりょう", index: 1 }] };
+    },
     async getOptionNames(appId: number) {
       optionNameCalls.push(appId);
-      return { appId, fields: fieldsFor("user"), statusStates: null };
+      return {
+        appId,
+        fields: fieldsFor("user"),
+        statusStates: [
+          { canonical: "未処理", display: "みしょり", index: 0 },
+          { canonical: "完了", display: "かんりょう", index: 1 },
+        ],
+      };
     },
   } as unknown as FlowKintoneClient;
   return { value, queries, writes, optionNameCalls };
@@ -211,4 +221,34 @@ test("B205: explainScript は canonical との併用を拒む（計画と実行�
   await expect(explainScript(`${header}SELECT $id FROM APP1 WHERE ラジオボタン = 'sample1';`, {
     client: mock.value, optionNames: "canonical",
   } as never)).rejects.toThrow("does not support optionNames");
+});
+
+test("B205 AC7: ステータスも既定名で書ける（canonical では正本がキー側に変わる）", async () => {
+  const { mock, results } = await run(
+    `${header}SELECT $id, ステータス FROM APP1 WHERE ステータス = '未処理';`, canonical
+  );
+  expect(results[0].status).toBe("success");
+  // kintone へ送るのは表示名
+  expect(mock.queries[0].query).toContain('ステータス in ("みしょり")');
+  // 読み戻す値は既定名
+  const rows = (results[0].result as { rows: Array<Record<string, string>> }).rows;
+  expect(rows[0]).toMatchObject({ $id: "1", ステータス: "未処理" });
+});
+
+test("B205: raw のステータスは今までどおり表示名が正本", async () => {
+  const { mock, results } = await run(
+    `${header}SELECT $id FROM APP1 WHERE ステータス = 'みしょり';`
+  );
+  expect(results[0].status).toBe("success");
+  expect(mock.queries[0].query).toContain('ステータス in ("みしょり")');
+});
+
+test("B205: EXPLAIN 文を含むバッチは createExecutionContext が拒む（実行前に分かるから）", () => {
+  const mock = mockClient();
+  const parsed = parseScript(`${header}EXPLAIN SELECT $id FROM APP1 WHERE ラジオボタン = 'sample1';`);
+  expect(() => createExecutionContext({
+    client: mock.value, statements: parsed.statements, meta: parsed.meta, ...canonical,
+  })).toThrow("EXPLAIN is not available with optionNames");
+  // 弾いた時点でメタデータも取りに行かない
+  expect(mock.optionNameCalls).toEqual([]);
 });
