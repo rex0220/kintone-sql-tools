@@ -1,6 +1,6 @@
 # B205 選択肢とステータスの「言語ごとの表示名」を、既定の名称を正本にして境目で変換する
 
-- 状態: 🔧 **段階 1（前提整備）に着手（2026-11-06）**。仕様は確定・設計レビュー済み（**BLOCKER 1 / MAJOR 5 / MINOR 3 を全件反映**）。**v3.91.0 見込み**
+- 状態: ✅ **v3.91.0 でリリース（2026-11-07）**。段階 1〜3 と `EXPLAIN` の決着まで完了。テスト 73 件（`b205QuerySeamGuard` / `b205OptionNameMap` / `b205RecordOptionValues` / `b205OptionNamesCanonical` / `b205OptionNamesStrict` / `b205OptionNamesStatus` / `b205OptionNamesJoinAndOrder`）。Codex レビュー 4 回（設計 1・実装 3）で BLOCKER 3 / MAJOR 10 / MINOR 8 を処置（§7.3〜§7.5）。**入れないと決めた 2 件**＝branded type（§7.4）と `form/fields` の revision の突き合わせ（§7.5）。**残るのは言語ごとの実機確認**（`kintone-plugin/work-link/ksql-b205-実機確認-20261107.md`）
 - 種別: 機能（**オプトイン**。既定 `"raw"` は今とまったく同じ＝純加法）
 - 優先: 中（依頼元の Ver.1 は「資料 ＋ 保存で止める ＋ 迂回策」で出せる）
 - 版: minor（v3.91.0 想定）。**規模 L**
