@@ -476,6 +476,7 @@ export {
 } from "./exportSinks";
 export { createImportSourceResolver, createKintoneClient, FlowImportProviderError, KsqlFlowError };
 export type {
+  BundledKintoneClient,
   CreateExecutionContextOptions,
   CreateKintoneClientConfig,
   Diagnostic,
@@ -512,6 +513,9 @@ export type {
   KintoneNativeUpsertParams,
   KintoneNativeUpsertRecordResult,
   KintoneNativeUpsertResult,
+  NormalizableRecord,
+  NormalizableRecordValue,
+  RecordNormalizer,
   FlowUpdateResult,
   FlowUpsertResult,
   ImportEncoding,

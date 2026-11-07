@@ -3,6 +3,27 @@
 リリースごとの変更点。**本ファイルは v3.45.0 以降だけを保持する。**
 それ以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) の各タグを参照。
 
+## v3.92.0（未リリース）
+
+### 機能（B206: 外のレコードを既定の名称にそろえる `createRecordNormalizer`）**※ 純加法（同梱のクライアントに口が 1 つ増えるだけ。`FlowKintoneClient` は不変）**
+
+- `optionNames: "canonical"`（B205）が直すのは**エンジンがレコード API から読んだ値**だけで、
+  **ブラウザーが持っているレコード**（`kintone.app.record.get()` / `event.record`）は表示名のままです。
+  プラグインが自分で評価する式には届かないので、**同じ変換を外から掛ける口**を同梱のクライアントに足しました。
+- `createRecordNormalizer(appId)` は**準備だけ非同期**（通信 3 回）で、返る関数は**同期・通信なし**です。
+  同期の `filter` や行ごとのループにそのまま入ります。
+- 向きは**表示名 → 既定の名称**だけ。**入力を書き換えません**（変わらなければ同じ参照）。
+  対象は選択肢 4 種と**プロセス管理のステータス**（サブテーブルの中も・配列は要素ごと）。
+  `STATUS_ASSIGNEE` と `CATEGORY` は対象外です。
+- **ステータスは `type` で見つけます**（項目コードはアプリの言語で `ステータス` / `Status` と変わるため）。
+  `normalize({ s: { type: "STATUS", value: "みしょり" } })` のように**値 1 つ**も直せます。
+- 一意に決まらない対応表のアプリは、**正規化器を作る時点で** `ArgumentError`（`optionNames: "canonical"` と同じ判定）。
+  恒等のアプリでは**素通しの関数**が返ります。キャッシュはしません（寿命は呼び側）。
+- 戻りの型は **`BundledKintoneClient`**（`FlowKintoneClient` は変えていないので、自作のクライアントは型も動きも不変）。
+- 依頼元: kSQL アクション（依頼 KJ-10。計算式に渡すレコードだけ表示名のままで、どの言語の人にも当たる式が書けなかった）。
+  テスト 13 件（`src/flow-library/__tests__/b206RecordNormalizer.test.ts`）。コアは 1 行も変えていません
+  （`buildAppOptionNameMap` と `mapRecordOptionValues` をそのまま使う＝写しを作らないのが依頼の主旨）。
+
 ## v3.91.0（2026-11-07）
 
 ### 機能（B205: 選択肢とステータスの「言語ごとの表示名」を既定の名称で書ける `optionNames`）**※ オプトイン（既定 `"raw"` は今までとまったく同じ。公開面は `/flow` だけ）**

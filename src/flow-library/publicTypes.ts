@@ -547,6 +547,48 @@ export interface PreviewResult {
   estimatedWrites: number;
 }
 
+/**
+ * B206: 外のレコード（ブラウザーが持っているもの）を**既定の名称にそろえる**ための形。
+ *
+ * `kintone.app.record.get()` / `event.record` / レコード API の返りがそのまま通る。
+ * `type` は**ステータスを見つける**ために見る（項目コードはアプリの言語で `ステータス` / `Status` と
+ * 変わるため。選択肢は項目コードで引く）。
+ */
+export interface NormalizableRecordValue {
+  readonly type?: string;
+  readonly value: unknown;
+}
+export type NormalizableRecord = Record<string, NormalizableRecordValue>;
+
+/**
+ * B206: 選択肢とステータスの値を**表示名 → 既定の名称**に直す（同期・通信なし）。
+ *
+ * - **入力は書き換えない**（新しいオブジェクトを返す）。**変わらなければ同じ参照**を返す。
+ * - 知らない項目・知らない値はそのまま通す（言語ごとの表示名を設定する前に入った値で止めない）。
+ * - **渡した型のまま返す**ので、呼び側でキャストは要らない。
+ */
+export type RecordNormalizer = <T extends NormalizableRecord>(record: T) => T;
+
+/**
+ * B206: 同梱のクライアント（`createKintoneClient`）が返す形。
+ *
+ * **`FlowKintoneClient` は変えていない**＝自作のクライアントは型も動きも不変。
+ * `optionNames: "canonical"` を自作のクライアントで使えないという決定（B205）もそのまま。
+ */
+export interface BundledKintoneClient extends FlowKintoneClient {
+  /**
+   * 選択肢とステータスの対応表を**その場で用意**して（通信 3 回。既定の名称の項目定義 1 回 ＋
+   * 表示名の項目定義とプロセス管理 2 回）、**同期の正規化器**を返す。
+   *
+   * - 対応表が一意に決まらないアプリは**ここで `ArgumentError`**（レコードを 1 件も触る前。
+   *   `optionNames: "canonical"` と同じ判定）。
+   * - 言語ごとの表示名が 1 つも無いアプリでは**素通しの関数**を返す。
+   * - **キャッシュしない**（寿命は呼び側。アプリの設定が変わったら作り直す）。
+   * - `appId` は**物理のアプリ番号**（論理アプリの内部番号ではない）。
+   */
+  createRecordNormalizer(appId: number): Promise<RecordNormalizer>;
+}
+
 export interface CreateKintoneClientConfig {
   baseUrl: string;
   guestSpaceId?: number;

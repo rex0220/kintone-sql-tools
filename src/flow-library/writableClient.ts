@@ -11,10 +11,13 @@ import {
   type RawProcessStatusState,
 } from "../core/processStatus";
 import {
+  buildAppOptionNameMap,
   optionNameSourceFrom,
+  STATUS_FIELD_TYPE,
   type OptionNameSource as KintoneOptionNameSource,
   type RawLocalizedStatusStates,
 } from "../core/optionNameMap";
+import { mapRecordOptionValues } from "../core/recordOptionValues";
 import { isSearchAbortedWarning } from "../core/searchAbortWarning";
 import type {
   KintoneAppInfo,
@@ -22,7 +25,12 @@ import type {
   KintoneFieldInfo,
   KintoneProcessStatuses,
 } from "../execute";
-import type { CreateKintoneClientConfig, FlowKintoneClient } from "./publicTypes";
+import type {
+  BundledKintoneClient,
+  CreateKintoneClientConfig,
+  NormalizableRecord,
+  RecordNormalizer,
+} from "./publicTypes";
 
 class KintoneHttpError extends Error {
   constructor(readonly status: number, readonly code: string | undefined, message: string) {
@@ -31,7 +39,7 @@ class KintoneHttpError extends Error {
   }
 }
 
-export function createKintoneClient(config: CreateKintoneClientConfig): FlowKintoneClient {
+export function createKintoneClient(config: CreateKintoneClientConfig): BundledKintoneClient {
   const baseUrl = normalizeBaseUrl(config.baseUrl);
   const apiBase = config.guestSpaceId === undefined
     ? "/k/v1"
@@ -212,7 +220,41 @@ export function createKintoneClient(config: CreateKintoneClientConfig): FlowKint
       );
     },
   };
-  return client;
+
+  /**
+   * B206: 外のレコード（ブラウザーが持っているもの）を**既定の名称にそろえる**正規化器。
+   *
+   * `optionNames: "canonical"` が**読んだレコードに掛けているのと同じ関数**
+   * （`buildAppOptionNameMap` ＋ `mapRecordOptionValues`）を、エンジンを通らないレコードにも使えるようにする。
+   * 依頼元（kSQL アクション）の計算式は **kintone がブラウザーに渡したレコード**を評価するので、
+   * SQL（既定の名称）と計算式（表示名）で規則が 2 つに割れていた。
+   */
+  const createRecordNormalizer = async (appId: number): Promise<RecordNormalizer> => {
+    const [canonicalFields, source] = await Promise.all([
+      client.getFields(appId),
+      client.getOptionNames!(appId),
+    ]);
+    // 一意に決まらない対応表はここで ArgumentError（レコードを 1 件も触る前）
+    const map = buildAppOptionNameMap(appId, canonicalFields, source);
+    if (map.identity) return (<T extends NormalizableRecord>(record: T) => record) as RecordNormalizer;
+    const normalize = <T extends NormalizableRecord>(record: T): T => {
+      // ステータスは **type で見つける**（項目コードはアプリの言語で ステータス / Status と変わる）。
+      // 1 項目だけのレコード（@_status の変換）でも当たる。
+      const statusCode = map.status === undefined
+        ? undefined
+        : Object.keys(record).find((code) => record[code]?.type === STATUS_FIELD_TYPE);
+      const translate = (fieldCode: string, value: string): string => {
+        const names = fieldCode === statusCode && map.status !== undefined
+          ? map.status
+          : map.fields.get(fieldCode);
+        return names?.toCanonical.get(value) ?? value;
+      };
+      return mapRecordOptionValues(record as never, translate) as never as T;
+    };
+    return normalize as RecordNormalizer;
+  };
+
+  return { ...client, createRecordNormalizer } as BundledKintoneClient;
 }
 
 function normalizeBaseUrl(value: string): string {
