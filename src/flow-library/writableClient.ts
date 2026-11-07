@@ -11,10 +11,13 @@ import {
   type RawProcessStatusState,
 } from "../core/processStatus";
 import {
+  buildAppOptionNameMap,
   optionNameSourceFrom,
+  STATUS_FIELD_TYPE,
   type OptionNameSource as KintoneOptionNameSource,
   type RawLocalizedStatusStates,
 } from "../core/optionNameMap";
+import { mapRecordOptionValues } from "../core/recordOptionValues";
 import { isSearchAbortedWarning } from "../core/searchAbortWarning";
 import type {
   KintoneAppInfo,
@@ -22,7 +25,13 @@ import type {
   KintoneFieldInfo,
   KintoneProcessStatuses,
 } from "../execute";
-import type { CreateKintoneClientConfig, FlowKintoneClient } from "./publicTypes";
+import type {
+  BundledKintoneClient,
+  CreateKintoneClientConfig,
+  NormalizableRecord,
+  NormalizableRecordValue,
+  RecordNormalizer,
+} from "./publicTypes";
 
 class KintoneHttpError extends Error {
   constructor(readonly status: number, readonly code: string | undefined, message: string) {
@@ -31,7 +40,7 @@ class KintoneHttpError extends Error {
   }
 }
 
-export function createKintoneClient(config: CreateKintoneClientConfig): FlowKintoneClient {
+export function createKintoneClient(config: CreateKintoneClientConfig): BundledKintoneClient {
   const baseUrl = normalizeBaseUrl(config.baseUrl);
   const apiBase = config.guestSpaceId === undefined
     ? "/k/v1"
@@ -93,6 +102,26 @@ export function createKintoneClient(config: CreateKintoneClientConfig): FlowKint
       throw new KintoneHttpError(response.status, code, message);
     }
     return { body: await response.json() as T, response };
+  }
+
+  /**
+   * B205: 利用者の表示言語で見た選択肢とステータス（`optionNames: "canonical"` と
+   * `createRecordNormalizer` が使う）。
+   *
+   * **名前付きの内部関数**にしてある＝`client` の型（任意のメソッド）越しに呼ぶと
+   * 非 null の断言（`!`）が必要になるため（3 回目のレビューの MINOR）。
+   */
+  async function getOptionNames(appId: number): Promise<KintoneOptionNameSource> {
+    const app = encodeURIComponent(String(appId));
+    const [form, status] = await Promise.all([
+      request<{ properties: Record<string, FormFieldProperty> }>(
+        `/app/form/fields.json?app=${app}&lang=user`, "GET", appId
+      ),
+      request<RawLocalizedStatusStates>(`/app/status.json?app=${app}&lang=user`, "GET", appId),
+    ]);
+    return optionNameSourceFrom(
+      appId, flattenFormFieldProperties(form.body.properties), status.body
+    );
   }
 
   const client: KintoneClient = {
@@ -198,21 +227,62 @@ export function createKintoneClient(config: CreateKintoneClientConfig): FlowKint
         states: normalizeProcessStatusStates(response.body.states),
       };
     },
-    /** B205: 利用者の表示言語で見た選択肢とステータス（`optionNames: "canonical"` のときだけ呼ばれる）。 */
-    async getOptionNames(appId: number): Promise<KintoneOptionNameSource> {
-      const app = encodeURIComponent(String(appId));
-      const [form, status] = await Promise.all([
-        request<{ properties: Record<string, FormFieldProperty> }>(
-          `/app/form/fields.json?app=${app}&lang=user`, "GET", appId
-        ),
-        request<RawLocalizedStatusStates>(`/app/status.json?app=${app}&lang=user`, "GET", appId),
-      ]);
-      return optionNameSourceFrom(
-        appId, flattenFormFieldProperties(form.body.properties), status.body
-      );
-    },
+    getOptionNames,
   };
-  return client;
+
+  /**
+   * B206: 外のレコード（ブラウザーが持っているもの）を**既定の名称にそろえる**正規化器。
+   *
+   * `optionNames: "canonical"` が**読んだレコードに掛けているのと同じ関数**
+   * （`buildAppOptionNameMap` ＋ `mapRecordOptionValues`）を、エンジンを通らないレコードにも使えるようにする。
+   * 依頼元（kSQL アクション）の計算式は **kintone がブラウザーに渡したレコード**を評価するので、
+   * SQL（既定の名称）と計算式（表示名）で規則が 2 つに割れていた。
+   */
+  const createRecordNormalizer = async (appId: number): Promise<RecordNormalizer> => {
+    const [canonicalFields, source] = await Promise.all([
+      client.getFields(appId),
+      getOptionNames(appId),
+    ]);
+    // 一意に決まらない対応表はここで ArgumentError（レコードを 1 件も触る前）
+    const map = buildAppOptionNameMap(appId, canonicalFields, source);
+    if (map.identity) return ((record: NormalizableRecord) => record) as RecordNormalizer;
+    const status = map.status;
+    const statusFieldCode = canonicalFields.find((field) => field.fieldType === STATUS_FIELD_TYPE)?.code;
+    /**
+     * 選択肢は**項目コードで引く**。ステータスは**この表から外す**＝再帰は深さを知らないので、
+     * 残すと「サブテーブルの子がステータスの項目コードと同じ名前」のときに子まで変換してしまう
+     * （実アプリでは起こらない＝ステータスは項目として追加できず、コードも空かない。
+     * ただし公開の口は任意のレコードを受けるので、**起こらない形を実装で閉じる**。1 回目のレビューの MAJOR）。
+     */
+    const choiceFields = new Map(map.fields);
+    if (statusFieldCode !== undefined) choiceFields.delete(statusFieldCode);
+    const byFieldCode = (fieldCode: string, value: string): string =>
+      choiceFields.get(fieldCode)?.toCanonical.get(value) ?? value;
+    /** ステータスの項目か（**トップの項目だけ**で判断する）。 */
+    const isStatusField = (code: string, field: NormalizableRecordValue): boolean =>
+      field.type === STATUS_FIELD_TYPE
+      // `type` を持たないレコードを渡されたときだけ、項目コードで補う
+      || (field.type === undefined && code === statusFieldCode);
+    const normalize = (record: NormalizableRecord): NormalizableRecord => {
+      const mapped = mapRecordOptionValues(record as never, byFieldCode) as never as NormalizableRecord;
+      if (status === undefined) return mapped;
+      // **トップの項目だけ**を見るので、キーの名前も並び順も結果に効かない。
+      // 依頼元は `@_status` / `@_prev_status` を `{ 任意のキー: { type: "STATUS", value } }` で通す（KJ-10 の質問 4）。
+      let patched = mapped;
+      for (const [code, field] of Object.entries(mapped)) {
+        if (field === null || field === undefined || !isStatusField(code, field)) continue;
+        if (typeof field.value !== "string") continue;
+        const canonical = status.toCanonical.get(field.value);
+        if (canonical === undefined) continue;
+        if (patched === mapped) patched = { ...mapped };
+        patched[code] = { ...field, value: canonical };
+      }
+      return patched;
+    };
+    return normalize as RecordNormalizer;
+  };
+
+  return { ...client, createRecordNormalizer } as BundledKintoneClient;
 }
 
 function normalizeBaseUrl(value: string): string {
