@@ -43,6 +43,8 @@ const formProperties = (lang: "default" | "user") => {
     // プロセス管理が有効なアプリは次の 3 つも返る（`CATEGORY` は無効でも返る）
     ステータス: { type: "STATUS", code: "ステータス", label: "ステータス", enabled: true },
     作業者: { type: "STATUS_ASSIGNEE", code: "作業者", label: "作業者", enabled: true },
+    // ルックアップで持ってきた値（レコードでは普通の文字列。素通しを固定する）
+    顧客コード: { type: "SINGLE_LINE_TEXT", code: "顧客コード", label: "顧客コード" },
     カテゴリー: { type: "CATEGORY", code: "カテゴリー", label: "カテゴリー", enabled: false },
   };
 };
@@ -63,7 +65,12 @@ const statusBody = (localized: boolean, duplicateName = false) => ({
 interface FetchLog { readonly url: string }
 
 function clientFor(
-  options: { localized?: boolean; duplicateStatusName?: boolean; collapsedOption?: boolean } = {}
+  options: {
+    localized?: boolean;
+    duplicateStatusName?: boolean;
+    collapsedOption?: boolean;
+    processDisabled?: boolean;
+  } = {}
 ) {
   const localized = options.localized ?? true;
   const calls: FetchLog[] = [];
@@ -89,6 +96,8 @@ function clientFor(
       return json({ properties: formProperties(lang === "user" && localized ? "user" : "default") });
     }
     if (url.includes("/app/status.json")) {
+      // プロセス管理を使っていないアプリの実 API の形（B205 で実際に問題になった組み合わせ）
+      if (options.processDisabled === true) return json({ enable: false, states: null });
       return json(statusBody(localized, options.duplicateStatusName === true));
     }
     throw new Error(`想定していない要求: ${url}`);
@@ -108,6 +117,7 @@ const browserRecord = () => ({
   ラジオボタン: { type: "RADIO_BUTTON", value: "サンプル１" },
   処理状況: { type: "DROP_DOWN", value: "未処理" },
   担当者: { type: "SINGLE_LINE_TEXT", value: "鈴木" },
+  顧客コード: { type: "SINGLE_LINE_TEXT", value: "サンプル１" },
   金額: { type: "NUMBER", value: "150000" },
   ステータス: { type: "STATUS", value: "みしょり" },
   作業者: { type: "STATUS_ASSIGNEE", value: [{ code: "user1", name: "鈴木" }] },
@@ -229,10 +239,127 @@ test("B206: 通信は 3 回（既定名の項目定義 1 ＋ 表示名の項目�
   expect(calls.filter((call) => call.url.includes("/app/form/fields.json") && !call.url.includes("lang="))).toHaveLength(1);
 });
 
-test("B206: 返りは渡した型のまま（キャストが要らない）", async () => {
+test("B206: 返りはキーがそのままでキャストが要らない", async () => {
   const { client } = clientFor();
   const normalize = await client.createRecordNormalizer(4387);
   const record = { ラジオボタン: { type: "RADIO_BUTTON", value: "サンプル２" } };
-  const result: typeof record = normalize(record);
+  const result = normalize(record);
+  const value: string = result.ラジオボタン.value;
+  expect(value).toBe("sample2");
+});
+
+// ============================================================
+// 1 回目のレビュー（Codex。2026-11-07）で足したもの
+// ============================================================
+
+test("B206: 文字列リテラル型は string へ広がる（型が嘘にならない）", async () => {
+  const { client } = clientFor();
+  const normalize = await client.createRecordNormalizer(4387);
+  const record = { ラジオボタン: { type: "RADIO_BUTTON", value: "サンプル１" as const } };
+  const result = normalize(record);
+  // 実行時は "sample1" なので、リテラル型のままにしてはいけない
+  // @ts-expect-error 正規化すると値が変わるので "サンプル１" 型には代入できない
+  const stale: "サンプル１" = result.ラジオボタン.value;
+  const widened: string = result.ラジオボタン.value;
+  expect(stale).toBe("sample1");
+  expect(widened).toBe("sample1");
+});
+
+test("B206: 索引シグネチャの無い名前付きの型も渡せる（型生成したレコード）", async () => {
+  interface GeneratedRecord {
+    ラジオボタン: { type: "RADIO_BUTTON"; value: string };
+    金額: { type: "NUMBER"; value: string };
+  }
+  const { client } = clientFor();
+  const normalize = await client.createRecordNormalizer(4387);
+  const record: GeneratedRecord = {
+    ラジオボタン: { type: "RADIO_BUTTON", value: "サンプル２" },
+    金額: { type: "NUMBER", value: "100" },
+  };
+  const result = normalize(record);
   expect(result.ラジオボタン.value).toBe("sample2");
+  expect(result.金額.value).toBe("100");
+});
+
+test("B206: トップのステータスが 2 つある合成レコードでも、両方が直る", async () => {
+  // 実アプリでは STATUS はアプリに 1 つだけ（2026-11-07 Takashi）。
+  // ここは**合成レコード**の形＝キーの名前も並び順も結果に効かないことを固定する
+  const { client } = clientFor();
+  const normalize = await client.createRecordNormalizer(4387);
+  const result = normalize({
+    before: { type: "STATUS", value: "みしょり" },
+    after: { type: "STATUS", value: "かんりょう" },
+  });
+  expect(result.before.value).toBe("未処理");
+  expect(result.after.value).toBe("完了");
+});
+
+test("B206: サブテーブルの子はステータスの表で変換しない（キーが同じでも）", async () => {
+  // kintone の項目コードはアプリ全体で一意なのでこの形は実アプリに無いが、
+  // 公開の口は任意のレコードを受けるので、**トップの項目だけ**を見ることを固定する
+  const { client } = clientFor();
+  const normalize = await client.createRecordNormalizer(4387);
+  const result = normalize({
+    ステータス: { type: "STATUS", value: "みしょり" },
+    明細: {
+      type: "SUBTABLE",
+      value: [{ id: "1", value: { ステータス: { type: "SINGLE_LINE_TEXT", value: "みしょり" } } }],
+    },
+  });
+  expect(result.ステータス.value).toBe("未処理");
+  const rows = result.明細.value as Array<{ value: Record<string, { value: unknown }> }>;
+  // 子は文字列の項目なので触らない
+  expect(rows[0].value.ステータス.value).toBe("みしょり");
+});
+
+test("B206: 追加画面の形（値が null・行の id が無い）でも落ちない", async () => {
+  const { client } = clientFor();
+  const normalize = await client.createRecordNormalizer(4387);
+  const result = normalize({
+    $id: { type: "__ID__", value: null },
+    $revision: { type: "__REVISION__", value: null },
+    ラジオボタン: { type: "RADIO_BUTTON", value: "サンプル１" },
+    明細: {
+      type: "SUBTABLE",
+      value: [{ value: { 明細区分: { type: "DROP_DOWN", value: "明細２" } } }],
+    },
+  });
+  expect(result.$id.value).toBeNull();
+  expect(result.ラジオボタン.value).toBe("sample1");
+  const rows = result.明細.value as Array<{ id?: string; value: Record<string, { value: unknown }> }>;
+  expect(rows[0].value.明細区分.value).toBe("detail2");
+  expect(rows[0].id).toBeUndefined();
+});
+
+test("B206: カテゴリーの中身（文字列の配列）を誤変換しない", async () => {
+  const { client } = clientFor();
+  const normalize = await client.createRecordNormalizer(4387);
+  // カテゴリーは選択肢ではないので対応表に無い＝値が選択肢の表示名と同じでも触らない
+  const record = { カテゴリー: { type: "CATEGORY", value: ["サンプル１", "みしょり"] } };
+  const result = normalize(record);
+  expect(result.カテゴリー.value).toEqual(["サンプル１", "みしょり"]);
+  expect(result.カテゴリー).toBe(record.カテゴリー);
+});
+
+test("B206: 入力を凍結しても落ちない（1 か所も書き換えていない）", async () => {
+  const { client } = clientFor();
+  const normalize = await client.createRecordNormalizer(4387);
+  const record = browserRecord();
+  const freeze = (value: unknown): void => {
+    if (value === null || typeof value !== "object") return;
+    Object.values(value as Record<string, unknown>).forEach(freeze);
+    Object.freeze(value);
+  };
+  freeze(record);
+  const result = normalize(record);
+  expect(result.ラジオボタン.value).toBe("sample1");
+  expect(Object.isFrozen(record.ラジオボタン)).toBe(true);
+});
+
+test("B206: プロセス管理が無効なアプリ（STATUS enabled:false / states:null）でも作れる", async () => {
+  const { client } = clientFor({ processDisabled: true });
+  const normalize = await client.createRecordNormalizer(4387);
+  // 選択肢は直り、ステータスの対応表は無い（レコードに STATUS も入らない）
+  const result = normalize({ ラジオボタン: { type: "RADIO_BUTTON", value: "サンプル１" } });
+  expect(result.ラジオボタン.value).toBe("sample1");
 });

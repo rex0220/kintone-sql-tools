@@ -550,6 +550,10 @@ export interface PreviewResult {
 /**
  * B206: 外のレコード（ブラウザーが持っているもの）を**既定の名称にそろえる**ための形。
  *
+ * **上の `KintoneRecordValue` とは別物**＝あちらは**書き込み（DML）の DTO**で、
+ * `null`・数値・サブテーブルの行・ブラウザーのレコードを表せない。こちらは
+ * **JS API / REST から読んだレコード**をそのまま受ける形（1 回目のレビューの指摘で明記）。
+ *
  * `kintone.app.record.get()` / `event.record` / レコード API の返りがそのまま通る。
  * `type` は**ステータスを見つける**ために見る（項目コードはアプリの言語で `ステータス` / `Status` と
  * 変わるため。選択肢は項目コードで引く）。
@@ -561,13 +565,45 @@ export interface NormalizableRecordValue {
 export type NormalizableRecord = Record<string, NormalizableRecordValue>;
 
 /**
+ * B206: 正規化した後の値の型。**選択肢の値は別の文字列になる**ので、
+ * 文字列リテラル型（`"サンプル１"` のような `as const`）は `string` へ広げる
+ * （`<T>(record: T) => T` だと「型はリテラルのまま・実行時は別の文字列」になり型が嘘になる。
+ * 1 回目のレビューの MAJOR）。配列は要素ごと、サブテーブルの行は中のセルまで辿る。
+ */
+export type NormalizedOptionValue<V> =
+  V extends string ? string
+    : V extends ReadonlyArray<infer E> ? Array<E extends string ? string : NormalizedSubtableRow<E>>
+      : V;
+
+/** B206: サブテーブルの 1 行（`{ id?, value: { 子: { type, value } } }`）を正規化した後の型。 */
+export type NormalizedSubtableRow<R> = R extends { readonly value: infer C }
+  ? Omit<R, "value"> & {
+      value: { [K in keyof C]: C[K] extends NormalizableRecordValue ? NormalizedRecordValue<C[K]> : C[K] };
+    }
+  : R;
+
+/** B206: 1 項目を正規化した後の型（`type` などのキーは保つ）。 */
+export type NormalizedRecordValue<F extends NormalizableRecordValue> =
+  Omit<F, "value"> & { value: NormalizedOptionValue<F["value"]> };
+
+/** B206: レコードを正規化した後の型（キーはそのまま）。 */
+export type NormalizedRecord<T> = {
+  [K in keyof T]: T[K] extends NormalizableRecordValue ? NormalizedRecordValue<T[K]> : T[K];
+};
+
+/**
  * B206: 選択肢とステータスの値を**表示名 → 既定の名称**に直す（同期・通信なし）。
  *
- * - **入力は書き換えない**（新しいオブジェクトを返す）。**変わらなければ同じ参照**を返す。
+ * - **入力は書き換えない**。**変更があった階層だけ**新しいオブジェクトを返す
+ *   （変わらなければレコードごと同じ参照）。
  * - 知らない項目・知らない値はそのまま通す（言語ごとの表示名を設定する前に入った値で止めない）。
- * - **渡した型のまま返す**ので、呼び側でキャストは要らない。
+ * - **キーはそのまま返る**ので呼び側のキャストは要らない。型の制約を
+ *   `Record<keyof T, …>` にしてあるので、**索引シグネチャの無い名前付きの型**
+ *   （kintone の型生成で作ったレコードの型など）もそのまま渡せる。
  */
-export type RecordNormalizer = <T extends NormalizableRecord>(record: T) => T;
+export type RecordNormalizer = <T extends Record<keyof T, NormalizableRecordValue>>(
+  record: T
+) => NormalizedRecord<T>;
 
 /**
  * B206: 同梱のクライアント（`createKintoneClient`）が返す形。

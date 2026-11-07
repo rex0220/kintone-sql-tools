@@ -450,6 +450,7 @@ UPDATE LAPP_受注 SET 選択肢 = 'sample2' WHERE $id = @id;
   プラグインが自分で評価する式（`kintone.app.record.get()` のレコード）には届きません。
   同梱のクライアントの `createRecordNormalizer(appId)` が、**同じ変換を同期で掛ける関数**を返します
   （準備だけ非同期・入力は書き換えない・ステータスは `type` で見つけるので値 1 つも直せます）。
+  **準備で通信 3 回・キャッシュしない・`appId` は物理のアプリ番号**です（詳細は言語リファレンス §25）。
 
 ### APPLY の書込（`allowApplyMutation`・B198）
 

@@ -20,6 +20,8 @@
 - 一意に決まらない対応表のアプリは、**正規化器を作る時点で** `ArgumentError`（`optionNames: "canonical"` と同じ判定）。
   恒等のアプリでは**素通しの関数**が返ります。キャッシュはしません（寿命は呼び側）。
 - 戻りの型は **`BundledKintoneClient`**（`FlowKintoneClient` は変えていないので、自作のクライアントは型も動きも不変）。
+  正規化器の型は**キーを保ちつつ選択肢の値を `string` へ広げる**（`as const` のリテラル型は残しません＝
+  実行時に別の文字列になるため）。**索引シグネチャの無い名前付きの型**（型生成したレコードの型）も渡せます。
 - 依頼元: kSQL アクション（依頼 KJ-10。計算式に渡すレコードだけ表示名のままで、どの言語の人にも当たる式が書けなかった）。
   テスト 13 件（`src/flow-library/__tests__/b206RecordNormalizer.test.ts`）。コアは 1 行も変えていません
   （`buildAppOptionNameMap` と `mapRecordOptionValues` をそのまま使う＝写しを作らないのが依頼の主旨）。
