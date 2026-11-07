@@ -1,6 +1,6 @@
 # B206 外のレコードを既定の名称にそろえる口（`createRecordNormalizer`）
 
-- 状態: 🔧 **実装済み（2026-11-07）。v3.92.0 で出す**
+- 状態: ✅ **v3.92.0 でリリース（2026-11-07）**。試験 21 件（`src/flow-library/__tests__/b206RecordNormalizer.test.ts`）。Codex レビュー（BLOCKER 0 / MAJOR 2 / MINOR 3）は**全件処置済み**（§4.1）
 - 種別: 機能（**純加法**。同梱のクライアントに口が 1 つ増えるだけ。`FlowKintoneClient` は不変）
 - 優先: 中（依頼元の Ver.1 のリリースがこれを待っている。§1）
 - 版: minor（v3.92.0）。**規模 S**

@@ -3,7 +3,7 @@
 リリースごとの変更点。**本ファイルは v3.45.0 以降だけを保持する。**
 それ以前の詳細は [GitHub Releases](https://github.com/rex0220/kintone-sql-tools/releases) の各タグを参照。
 
-## v3.92.0（未リリース）
+## v3.92.0（2026-11-07）
 
 ### 機能（B206: 外のレコードを既定の名称にそろえる `createRecordNormalizer`）**※ 純加法（同梱のクライアントに口が 1 つ増えるだけ。`FlowKintoneClient` は不変）**
 

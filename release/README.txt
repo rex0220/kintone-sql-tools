@@ -1,29 +1,27 @@
-ksql 配布パッケージ (v3.91.0)
+ksql 配布パッケージ (v3.92.0)
 
 release 成果物:
-- ksql-plugin-v3.91.0.zip
-- ksql-mcp.mcpb (manifest version 3.91.0)
-- ksql-mcp.js (MCP server version 3.91.0)
+- ksql-plugin-v3.92.0.zip
+- ksql-mcp.mcpb (manifest version 3.92.0)
+- ksql-mcp.js (MCP server version 3.92.0)
 
-機能 (B205: 選択肢とステータスの「言語ごとの表示名」・オプトイン・/flow のみ。既定は今までと同じ):
-- kintone の項目に「言語ごとの表示名」を設定すると、API が受け付ける値・返す値が利用者の表示言語の
-  名称に変わります。設定に保存した 1 つの SQL が、実行する人の言語で壊れます。createExecutionContext に
-  optionNames: "canonical" を渡すと、SQL には既定の名称 (項目の設定画面で見える値) を書けます。
-  変換するのは kintone との境目だけです。
-- 対象はラジオボタン / ドロップダウン / チェックボックス / 複数選択とプロセス管理のステータス
-  (サブテーブルの中も)。知らない値はそのまま通します。言語ごとの表示名が無いアプリでは何も変わりません。
-- optionOrder は既定の名称のままなので、選択肢の検査 (定義外の選択肢) を緩めずに SET が通ります。
-  表示名で書く形は通しません (正本は 1 つ)。
-- ステータスだけ正本の向きが変わります。"raw" は表示名 (WHERE ステータス = 'みしょり')、"canonical" は
-  既定名 (WHERE ステータス = '未処理')。移行のときは SQL の書き換えが要ります。
-- 対応表が一意に決まらないアプリは、レコードを 1 件も読む前に ArgumentError で止めます。EXPLAIN とは
-  併用できません。同梱の createKintoneClient が要ります (自作のクライアントでは使えません)。
-  CLI・MCP・/engine では公開していません。
+機能 (B206: 外のレコードを既定の名称にそろえる createRecordNormalizer・純加法。/flow のみ):
+- optionNames: "canonical" (B205) が直すのはエンジンがレコード API から読んだ値だけです。
+  ブラウザーが持っているレコード (kintone.app.record.get() / event.record) は表示名のままなので、
+  プラグインが自分で評価する式には届きません。同じ変換を外から掛ける口を足しました。
+- const normalize = await client.createRecordNormalizer(appId); で準備 (通信 3 回) し、
+  返る関数は同期・通信なしです (同期の filter や行ごとのループにそのまま入ります)。
+- 向きは表示名 → 既定の名称だけ。入力は書き換えません (変更があった階層だけ新しいオブジェクト)。
+  対象は選択肢 4 種とプロセス管理のステータス (サブテーブルの中も)。作業者とカテゴリーは素通しです。
+- ステータスはトップの項目だけ type で見ます (項目コードがアプリの言語で変わるため)。
+  normalize({ s: { type: "STATUS", value: "みしょり" } }) のように値 1 つも直せます。
+- 一意に決まらない対応表は正規化器を作る時点で ArgumentError。恒等のアプリは素通しの関数です。
+  キャッシュしません (寿命は呼び側)。appId は物理のアプリ番号です。
 
-v3.90.0 / v3.89.0 / v3.88.0 の節は畳みました (B204 ASSERT / EXIT のメッセージを変数で受ける =
-  ASSERT ... , @m_x / B203 外部注入で文字列配列 = DECLARE @ids = []; と variables / B198 /flow の
-  APPLY の書込 = confirm 必須 / B200 APPEND ... SELECT と APPEND ... VALUES の as-of / B201 ORDER BY に
-  集計式を書いた形を構文エラーに)。
+v3.91.0 〜 v3.88.0 の節は畳みました (B205 選択肢とステータスの「言語ごとの表示名」= optionNames に
+  "raw" か "canonical"・既定は "raw" / B204 ASSERT / EXIT のメッセージを変数で受ける / B203 外部注入で
+  文字列配列 / B198 /flow の APPLY の書込 = confirm 必須 / B200 APPEND ... SELECT と APPEND ... VALUES の
+  as-of / B201 ORDER BY に集計式を書いた形を構文エラーに)。
 
 v3.87.0 〜 v3.79.0 の節は畳みました (B196 /flow の一時テーブルの合計の上限 tempTablesMaxTotalRows /
   B195 書込前の確認フック confirm / B193 HAVING のウィンドウ別名参照を拒否 / B191 ウィンドウの
@@ -108,17 +106,17 @@ B124 集計算術式 / B125 集計のウィンドウ関数 / B123 GROUP BY だ�
 - CHANGELOG.md と GitHub Releases に版ごとの内容と移行案内があります。
   https://github.com/rex0220/kintone-sql-tools/releases
 
-1. ksql-plugin-v3.91.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.92.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.91.0): B205 選択肢とステータスの「言語ごとの表示名」を既定の名称で書ける optionNames
-(オプトイン・/flow のみ。既定の "raw" は今までと同じ)。
+本リリース (v3.92.0): B206 外のレコードを既定の名称にそろえる createRecordNormalizer
+(純加法・/flow のみ。計算式などエンジンを通らないレコード向け)。
 
-前リリース (v3.90.0 / v3.89.0 / v3.88.0): B204 ASSERT / EXIT のメッセージを変数で受ける (純加法) /
-B203 外部注入で文字列配列 (純加法) / B198 /flow の APPLY の書込 (confirm 必須) / B200 APPEND ... SELECT と
-APPEND ... VALUES の as-of 関数 / B201 ORDER BY に集計式を書いた形を構文エラーに。
+前リリース (v3.91.0 / v3.90.0 / v3.89.0): B205 選択肢とステータスの「言語ごとの表示名」=
+optionNames に "raw" か "canonical" (既定は "raw") / B204 ASSERT / EXIT のメッセージを変数で受ける /
+B203 外部注入で文字列配列。いずれも純加法かオプトインです。
 
 前リリース (v3.87.0〜v3.81.0): B196 /flow の一時テーブルの合計の上限 tempTablesMaxTotalRows (純加法) /
 B195 /flow の書込前の確認フック confirm (純加法) / B193 HAVING のウィンドウ別名参照を実行前に拒否 (結果が変わります) /
