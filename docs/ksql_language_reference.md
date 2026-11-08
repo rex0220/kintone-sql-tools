@@ -2277,7 +2277,27 @@ SELECT * FROM APP100 ORDER BY 作成日時 DESC LIMIT 20 OFFSET 40
 | プラグイン | 3,000件 | 実行画面の「最大取得件数」 |
 | 公式 API `/flow` | 10,000件 | `createExecutionContext`／`explainScript` の options `maxRecords`（`executeStatement`・`previewStatement` は実行コンテキストの値を共有・v3.69.0〜。→ §27.9） |
 
-値を引き上げるとAPI呼出し回数、メモリ使用量、タイムアウトリスクも増えます。`CREATE TEMP TABLE`の実体化には別の`tempTableMaxRows`（既定10,000件）が適用され、`maxRecords`とは独立です。**`maxRecords`だけ引き上げても、一時テーブルへ10,000行超を実体化する文は`tempTableMaxRows`で停止します**。実体化を伴うバッチでは両方を併せて指定してください（実測・v3.72.0）。
+値を引き上げるとAPI呼出し回数、メモリ使用量、タイムアウトリスクも増えます。
+
+> **`maxRecords`は「1 回の読み取りごと」の上限です**（実行やバッチの合計ではありません。v3.93.0 で明記）。
+> 1 つの文で 2 つのアプリを読む JOIN は、アプリごとに別々に数えます。
+> 8,000 件のアプリを読む文が 2 つあるバッチは、`maxRecords = 10,000` でも両方成功します。
+> **合計で止めたいときは `tempTablesMaxTotalRows`**（一時テーブルの行数の合計・B196）を使ってください。
+
+**`CREATE TEMP TABLE` の 2 つの上限（v3.93.0〜。B197 / 依頼 KJ-11）**
+
+| 何を数えるか | 設定 | 超えたとき |
+|---|---|---|
+| **元の SELECT が読む件数** | `maxRecords`（`tempTableMaxRows` のほうが大きいときはその値まで読みます） | `FetchAllLimitError`（効いている上限の名前で案内します） |
+| **出来た表の行数** | `tempTableMaxRows`（既定 10,000 行） | `TempTableRowLimitError`（表は**登録しません**） |
+| 残っている一時テーブルの行数の**合計** | `tempTablesMaxTotalRows`（既定なし） | `TempTableTotalLimitError` |
+
+**集計して 1 行しか残さない文は、読む量が `maxRecords` に収まれば通ります**
+（v3.92.0 までは `tempTableMaxRows` が読み取りの上限を兼ねていたため、
+`COUNT(*)` や `GROUP BY` でも**読んだ件数**で止まりました）。
+`tempTableMaxRows` を `maxRecords` より大きくすると、その値まで読みます
+（大きい表を作るために上げた、という意思表示として扱います）。
+JOIN・UNION・CTE・`GENERATE_SERIES` で**増えた行**も `tempTableMaxRows` の対象です（v3.92.0 までは通っていました）。
 
 > **`LIMIT`と`maxRecords`は別の値です:** `LIMIT`は返却行数、`maxRecords`は候補取得数を制御します。`LIMIT`を省略しても無制限にはならず、上表の入口別`maxRecords`が適用されます。
 
@@ -2286,6 +2306,9 @@ SELECT * FROM APP100 ORDER BY 作成日時 DESC LIMIT 20 OFFSET 40
 > **ORDER BYと取得上限（v3.0.0）:** ローカル`ORDER BY`は正しいtop-Nのため完全な候補集合を必要とします。上限到達時に`onLimit=truncate`で部分候補を並べ替えて返さず、エラーにします。`CANONICAL_REST_TOP_N`（初期allowlistは`$id`のみ）と`KORDER_NATIVE`は単発REST窓なので、この完全入力エラーの対象外です。
 
 > **集計・重複排除と取得上限:** 通常集計（`COUNT` / `SUM` / `AVG` / `MIN` / `MAX` など）、plain `GROUP BY`、`SELECT DISTINCT`、`UNION`（`ALL` なし）は完全な候補集合を必要とします。上限到達時は`onLimit=truncate`でも部分集合を畳んだ値を返さず、エラーにします。従来成功して見えた場合も結果は正しくありません（実測では、真の件数が3のlocal `LIKE` + `COUNT(*)`が`maxRecords=3`で`0`を返しました）。素の明細と`UNION ALL`は従来どおり取得行と警告を返します。完全押し下げ可能な`COUNT(*)`の単発`totalCount`取得はレコード本体を打ち切らないため、この制限の対象外です。
+この近道は**文としての`SELECT`・`UNION`の枝・`ASSERT` / `EXIT SUCCESS IF` / `SET`のスカラーサブクエリ・`CREATE TEMP TABLE … AS SELECT`の元**で効きます（v3.93.0〜。B207）。
+いずれも**終端**＝呼び側が必要とするのは件数（1 行）だけで、元レコードを使わない位置です。
+`ASSERT (SELECT COUNT(*) FROM APPn) <= N`で**読む前に件数で止める**書き方が、全件取得なしで使えます。
 
 > **SIMPLE モード（JOIN なし）:** `ORDER BY`のREST押し下げはLIMIT値だけで決めず、schema-aware plannerがWHERE・型・query形状・窓全体を検査します。それ以外は全候補取得後にcanonical順を適用します。
 > **FULL_SCAN モード（JOIN あり等）:** JS 側でスライス処理します。

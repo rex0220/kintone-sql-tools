@@ -511,7 +511,10 @@ Shift_JIS は `encoding: "sjis"` と `encoder: { encoding: "sjis", encode(text) 
 throw する義務を負います（encoding-japanese / iconv-lite は黙って `?` 置換するため、encode → decode → 完全一致検査を
 wrapper で行ってください）。
 
-読取上限は既定 10,000 件（`maxRecords`）です。一時テーブルの実体化には**独立の** `tempTableMaxRows`（既定 10,000 行・超過は常にエラー）が適用されるため、大きなバッチでは両方を併せて指定してください:
+読取上限は既定 10,000 件（`maxRecords`）で、**1 回の読み取りごと**に掛かります（実行やバッチの合計ではありません）。
+一時テーブルは**出来た表の行数**に `tempTableMaxRows`（既定 10,000 行・超過は常にエラー）が掛かります
+（v3.93.0〜。読む件数の上限は `maxRecords`。集計して 1 行に畳む文は読む量が収まれば通ります）。
+大きなバッチでは両方を併せて指定してください:
 
 ```ts
 const ctx = createExecutionContext({ client, script: source, maxRecords: 25000, tempTableMaxRows: 25000 });

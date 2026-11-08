@@ -378,12 +378,15 @@ test.each([
     }
 
     expect(failure).toBeInstanceOf(KsqlEngineError);
+    // B197（v3.93.0〜）: tempTableMaxRows は**出来た表の行数**の上限になったので、
+    // 読取の上限（FetchAllLimitError / FETCH_LIMIT_EXCEEDED）ではなく TempTableRowLimitError で止まる。
+    // /engine の公開コードは増やしていない（B196 の TempTableTotalLimitError と同じ EXECUTION_ERROR）。
     expect(failure).toMatchObject({
-      code: "FETCH_LIMIT_EXCEEDED",
-      cause: expect.any(FetchAllLimitError),
+      code: "EXECUTION_ERROR",
       statementIndex: _label === "先頭" ? 0 : _label === "中間" ? 1 : 2,
       statementType: "CREATE_TEMP_TABLE",
     });
+    expect((failure as { cause?: { name?: string } }).cause?.name).toBe("TempTableRowLimitError");
     expect(failure).not.toHaveProperty("rows");
     expect(failure).not.toHaveProperty("results");
     expect(failure).not.toHaveProperty("statements");

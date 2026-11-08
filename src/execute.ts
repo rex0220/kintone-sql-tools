@@ -1875,6 +1875,22 @@ export interface BatchStatementError {
   partialSuccess?: ApplyWriteFailureDetail;
 }
 
+/**
+ * B197 / 依頼 KJ-11 の ②: **出来た一時テーブルの行数**が 1 表の上限（`tempTableMaxRows`）を超えたことを表す。
+ *
+ * これまでは `tempTableMaxRows` を**読み取りの上限として** `maxRecords` に差し替えていたため、
+ * ①集計して 1 行しか残さない文でも**読んだ件数**で止まり、
+ * ②止めた上限の名前（`tempTableMaxRows`）ではなく「`maxRecords` を引き上げてください」と案内し、
+ * ③JOIN・UNION で**出来た表が上限を超えても通る**（資料の約束が効いていない）という 3 つのずれがあった。
+ * 役割を分けた＝**読む量は `maxRecords`・出来た表の行数は `tempTableMaxRows`**。
+ */
+export class TempTableRowLimitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TempTableRowLimitError";
+  }
+}
+
 /** B196: 一時テーブルの合計の上限を超える登録・追加・読取を止めたことを表す。 */
 export class TempTableTotalLimitError extends Error {
   constructor(message: string) {
@@ -3016,11 +3032,28 @@ export async function executeBatchStatement(
     //（truncate による暗黙の欠損が後続文の結果を静かに歪めるため。仕様 §5.6）
     const tableMaxRows = options.tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS;
     const totalMaxRows = options.tempTablesMaxTotalRows;
-    // B196: 合計の残りが 1 表の上限より小さければ、読取をその残りで止める（読む行数で数える）。
+    // B197 / 依頼 KJ-11 の ②: **読む量と出来た表の行数を分ける**。
+    //
+    // v3.92.0 までは `tempTableMaxRows` を**読み取りの上限として** `maxRecords` に差し替えていた。
+    // そのため ①集計して 1 行しか残さない文でも**読んだ件数**で止まり、
+    // ②効いていない上限（`maxRecords`）の名前で案内し、
+    // ③JOIN・UNION で**出来た表が上限を超えても通る**（資料の約束が効かない）という 3 つのずれがあった。
+    //
+    // **読む量の上限は `maxRecords`**。ただし **`tempTableMaxRows` のほうが大きいときはその値まで読む**＝
+    // 「大きい表を作りたい」という意思表示として扱う（MCP は `maxRecords` の既定が 500 で、
+    // `tempTableMaxRows` だけ上げて 10,000 行超を実体化する使い方が公開の契約になっている）。
+    // **出来た表の行数**は読み終わった後に `tempTableMaxRows` で確かめる（下の TempTableRowLimitError）。
+    const callerMaxRecords = options.maxRecords ?? 10_000;
+    const baseReadLimit = Math.max(callerMaxRecords, tableMaxRows);
+    /** 読む量の上限がどちらの設定から来たか（エラー文で効いている上限の名前を言うため）。 */
+    const readLimitSource = tableMaxRows > callerMaxRecords ? "tempTableMaxRows" : "maxRecords";
+    // B196: 合計の残りが読む量の上限より小さければ、読取をその残りで止める（読む行数で数える）。
     const remainingRows = totalMaxRows === undefined
       ? undefined
       : totalMaxRows - tempTableRowTotal(tempTables, resolvedStmt.name);
-    const readLimit = remainingRows === undefined ? tableMaxRows : Math.min(tableMaxRows, Math.max(remainingRows, 1));
+    const totalRemainingLimit = remainingRows === undefined ? undefined : Math.max(remainingRows, 1);
+    const limitedByTotal = totalRemainingLimit !== undefined && totalRemainingLimit < baseReadLimit;
+    const readLimit = limitedByTotal ? totalRemainingLimit! : baseReadLimit;
     const materializeOptions: ExecuteOptions = {
       ...options,
       maxRecords: readLimit,
@@ -3028,15 +3061,38 @@ export async function executeBatchStatement(
     };
     let result: SelectResult;
     try {
-      result = await runSelectLike(resolvedStmt.query, client, materializeOptions, cacheContext, tempTables);
+      // B207: 一時テーブルに入るのは**集計後の行**で、下流が読むのはその表（元レコードではない）。
+      // `COUNT(*)` だけの元 SELECT は近道（totalCount・limit 1 の 1 回）に乗せる。
+      // UNION の枝は `executeUnion` が印を付けるので、ここで見るのは素の SELECT だけ。
+      const source = resolvedStmt.query.type === "SELECT"
+        ? markCountTotalCountRoot(resolvedStmt.query)
+        : resolvedStmt.query;
+      result = await runSelectLike(source, client, materializeOptions, cacheContext, tempTables);
     } catch (error) {
-      if (readLimit < tableMaxRows && error instanceof Error && error.name === "FetchAllLimitError") {
+      if (limitedByTotal && error instanceof Error && error.name === "FetchAllLimitError") {
         throw new TempTableTotalLimitError(
           `TempTableTotalLimitError: 一時テーブルの合計の残り（${remainingRows} 行・上限 ${totalMaxRows} 行）を超える読取のため、`
           + `${resolvedStmt.name} の実体化を止めました。集計なども読む行数で数えます。DROP TEMP TABLE で使い終わった表を外すか、上限を引き上げてください。`
         );
       }
+      // 依頼 KJ-11 の ②: 効いている上限の名前を言う。`tempTableMaxRows` のほうが大きくて
+      // そこで止まったときに「maxRecords を引き上げてください」と案内していた。
+      if (readLimitSource === "tempTableMaxRows" && error instanceof Error && error.name === "FetchAllLimitError") {
+        throw new TempTableRowLimitError(
+          `TempTableRowLimitError: ${resolvedStmt.name} の実体化のための読取が、一時テーブル 1 つの上限`
+          + `（${tableMaxRows} 行・tempTableMaxRows）に達しました（maxRecords は ${callerMaxRecords} 行）。`
+          + "WHERE 句で絞り込むか、tempTableMaxRows を引き上げてください。"
+        );
+      }
       throw error;
+    }
+    // B197: **出来た表の行数**を 1 表の上限で確かめる（JOIN・UNION・CTE・GENERATE_SERIES で増えた行も対象）。
+    if (result.rows.length > tableMaxRows) {
+      throw new TempTableRowLimitError(
+        `TempTableRowLimitError: ${resolvedStmt.name} の行数（${result.rows.length} 行）が`
+        + `一時テーブル 1 つの上限（${tableMaxRows} 行）を超えるため、登録しませんでした。`
+        + "WHERE 句や GROUP BY で行数を減らすか、tempTableMaxRows を引き上げてください。"
+      );
     }
     assertTempTableTotalRows(tempTables, resolvedStmt.name, result.rows.length, totalMaxRows);
     tempTables.set(resolvedStmt.name, {
@@ -3951,10 +4007,15 @@ async function scalarSubqueryHasNumericResult(
       && (first.func === "COUNT" || first.func === "SUM" || first.func === "AVG"
         || first.func === "STDDEV_POP" || first.func === "STDDEV_SAMP"
         || first.func === "VAR_POP" || first.func === "VAR_SAMP" || first.func === "MEDIAN"));
-  if ((first?.type === "AGGREGATE" && first.func === "MODE")
-    || (first?.type === "WINDOW_COL" && first.windowKind === "VALUE")
-    || (first?.type === "WINDOW_COL" && first.windowKind === "AGGREGATE"
-      && (first.aggFunc === "MIN" || first.aggFunc === "MAX"))) {
+  if (!numeric) {
+    // B208: 列の種類だけでは数値と分からない形（**ふつうの項目**・`MODE`・ウィンドウの一部・
+    // 一時テーブルの列など）は、**項目の型のメタデータ**で判定する。
+    //
+    // B171 は「実値推測禁止」で辞書順の fail-open を直したが、**列の種類が集計・算術・
+    // ウィンドウのときだけ**数値に昇格していたため、`(SELECT 数値項目 FROM APP…) <= 100` や
+    // `(SELECT 件数 FROM #cnt) <= 10000`（一時テーブルに入れた集計）が**文字列比較**になり、
+    // `12 <= 2` が通る（fail-open）形が残っていた（依頼 KJ-11 の ④）。
+    // **メタデータは値ではなく型**なので、「実値推測禁止」とは両立する（`MODE` の分岐が元からそうしている）。
     const meta = (await inferSelectColumnMeta(
       query, ["__scalar__"], client, cacheContext, tempTables
     )).get("__scalar__");
@@ -3972,7 +4033,13 @@ async function evaluateScalarSubquery(
   tempTables?: Map<string, MaterializedTable>
 ): Promise<string> {
   const { query, probed } = withScalarProbeLimit(sourceQuery);
-  const result = await runSubquery(query, client, options, cacheContext, tempTables);
+  // B207: スカラーサブクエリは**終端**＝呼び側が要るのは値 1 つだけで、元レコードは要らない。
+  // B105（UNION の枝）と同じ理由で `COUNT(*)` の近道（totalCount・limit 1 の 1 回）を許す。
+  // 適用の判定は変えない（`isCountStarTotalCountEligible` ＋ WHERE が完全に押し下がること）。
+  // 依頼 KJ-11 の ①＝ここに印が無いせいで、計画は近道と表示するのに実行は全件読んでいた。
+  const result = await runSubquery(
+    markCountTotalCountRoot(query), client, options, cacheContext, tempTables
+  );
   if (result.columns.length !== 1) {
     throw new ScalarSubqueryError(
       `scalar subquery returned ${result.columns.length} columns (expected 1 column).`

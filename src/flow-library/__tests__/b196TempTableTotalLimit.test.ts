@@ -103,7 +103,9 @@ async function run(
 test("AC1 合計の残りを超える CREATE TEMP TABLE は読取の途中で止まり、表を登録せず TempTableTotalLimitError", async () => {
   const { results, mock } = await run(
     "CREATE TEMP TABLE #a AS SELECT k, v FROM APP1; CREATE TEMP TABLE #b AS SELECT k, v FROM APP2; SELECT COUNT(*) AS c FROM #a",
-    { tempTablesMaxTotalRows: 30_000, tempTableMaxRows: 20_000 }
+    // B197（v3.93.0〜）: 読む量の上限は maxRecords。tempTableMaxRows は**出来た表の行数**の上限なので、
+    // 19,999 行を読むにはここで maxRecords も上げる（以前は tempTableMaxRows が読取の上限を兼ねていた）
+    { tempTablesMaxTotalRows: 30_000, tempTableMaxRows: 20_000, maxRecords: 20_000 }
   );
   expect(results[0]).toMatchObject({ status: "success", rowCount: 19_999, metrics: { tempTableRows: 19_999 } });
   expect(results[1]).toMatchObject({
@@ -120,7 +122,7 @@ test("AC1 合計の残りを超える CREATE TEMP TABLE は読取の途中で止
 test("AC2 1 つ目の表を DROP TEMP TABLE で外すと、同じ 2 つ目の文は成功する", async () => {
   const { results } = await run(
     "CREATE TEMP TABLE #a AS SELECT k, v FROM APP1; DROP TEMP TABLE #a; CREATE TEMP TABLE #b AS SELECT k, v FROM APP2; SELECT COUNT(*) AS c FROM #b",
-    { tempTablesMaxTotalRows: 30_000, tempTableMaxRows: 20_000 }
+    { tempTablesMaxTotalRows: 30_000, tempTableMaxRows: 20_000, maxRecords: 20_000 }
   );
   expect(results.map((result) => result.status)).toEqual(["success", "success", "success", "success"]);
   expect(results[1].metrics.tempTableRows).toBe(0);
@@ -190,12 +192,17 @@ test("集計も読む行数で数える: 10 件を読む GROUP BY（出来るの
   expect(results[0]).toMatchObject({ status: "error", error: { code: "TempTableTotalLimitError" } });
 });
 
-test("1 表の上限のほうが厳しいときは、今と同じ FetchAllLimitError（読み替えない）", async () => {
-  const { results } = await run(
+test("B197: 1 表の上限は読取を止めず、出来た表の行数で止める（TempTableRowLimitError）", async () => {
+  // v3.92.0 までは tempTableMaxRows が読取の上限を兼ねていたので FetchAllLimitError で、
+  // しかも「maxRecords を引き上げてください」と効いていない上限を案内していた（依頼 KJ-11 の ②）
+  const { results, mock } = await run(
     "CREATE TEMP TABLE #t AS SELECT k FROM APP3; SELECT 1 AS x",
     { tempTablesMaxTotalRows: 1_000, tempTableMaxRows: 5 }
   );
-  expect(results[0]).toMatchObject({ status: "error", error: { code: "FetchAllLimitError" } });
+  expect(results[0]).toMatchObject({ status: "error", error: { code: "TempTableRowLimitError" } });
+  expect(results[0].error?.message).toContain("tempTableMaxRows");
+  // 読取は maxRecords（既定 10,000）まで通るので、10 件は読み切っている
+  expect(mock.readRows.get(3) ?? 0).toBe(10);
 });
 
 test("AC5 省略すれば合計の上限なし（今と同じ）。tempTableRows は常に出る", async () => {

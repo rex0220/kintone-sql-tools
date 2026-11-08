@@ -2374,7 +2374,8 @@ SELECT n FROM flow_rows`;
 
     expect(result.ok).toBe(false);
     expect(result.statements[0].status).toBe("error");
-    expect(result.statements[0].error?.message).toMatch(/取得件数が上限（1 件）を超えました/);
+    // B197（v3.93.0〜）: tempTableMaxRows は読取ではなく**出来た表の行数**の上限
+    expect(result.statements[0].error?.message).toMatch(/一時テーブル 1 つの上限（1 行）を超えるため/);
     expect(result.statements[1].status).toBe("skipped");
   });
 
@@ -2430,7 +2431,11 @@ SELECT n FROM flow_rows`;
       statements: Array<{ status: string; error?: { message: string } }>;
     };
     expect(defaultResult.ok).toBe(false);
-    expect(defaultResult.statements[0].error?.message).toMatch(/取得件数が上限（10000 件）を超えました/);
+    // B197（v3.93.0〜）: 読む量の上限は maxRecords（ここでは MCP の既定 500）と
+    // tempTableMaxRows（既定 10,000）の大きいほう＝10,000 行で止まり、
+    // **効いている上限の名前**（tempTableMaxRows）で案内する
+    expect(defaultResult.statements[0].error?.message)
+      .toMatch(/一時テーブル 1 つの上限（10000 行・tempTableMaxRows）に達しました/);
 
     // 指定: 10,001 行の実体化が成功する
     const toolsRaised = createKsqlMcpTools({ profile: "prod" }, makePagingDeps());
@@ -2461,7 +2466,8 @@ SELECT n FROM flow_rows`;
     // truncate で 1 行に切り詰められることはなく、実体化は常に error
     expect(result.ok).toBe(false);
     expect(result.statements[0].status).toBe("error");
-    expect(result.statements[0].error?.message).toMatch(/取得件数が上限（1 件）を超えました/);
+    // B197（v3.93.0〜）: tempTableMaxRows は読取ではなく**出来た表の行数**の上限
+    expect(result.statements[0].error?.message).toMatch(/一時テーブル 1 つの上限（1 行）を超えるため/);
   });
 
   test("query: DML 混在バッチは ksql_mutate へ誘導", async () => {
@@ -2820,7 +2826,7 @@ SELECT n FROM flow_rows`;
     expect(result.ok).toBe(false);
     expect(result.statements[0]).toMatchObject({ status: "error" });
     expect((result.statements[0].error as { message: string }).message)
-      .toMatch(/取得件数が上限（2 件）を超えました/);
+      .toMatch(/一時テーブル 1 つの上限（2 行）を超えるため/);
     expect(result.statements[1]).toMatchObject({ status: "skipped" });
     expect(calls.post).toBe(0);
   });
