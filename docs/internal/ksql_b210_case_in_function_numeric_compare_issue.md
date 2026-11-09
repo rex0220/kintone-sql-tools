@@ -1,9 +1,9 @@
 # B210 関数・集計の引数や UPDATE の SET に置いた `CASE` が、数値の項目の大小を辞書順で比べる（黙って誤る）
 
-- 状態: 🚧 **実装済み・Codex レビュー 1 回目の対応済み・リリース待ち（2026-11-10・枝 `b210/dev`）**
+- 状態: 🚧 **v3.94.0 に同梱（PR #423 でマージ）・タグと公開待ち（2026-11-10）**
 - 種別: 正しさ（**黙って誤る**。エラーにならず値が違う。**UPDATE / DELETE では誤った行・誤った値を書く**）。**結果が変わる**
 - 優先: 高（言語リファレンス §8 が勧める `SUM(CASE WHEN 売上 > 0 THEN 1 ELSE 0 END)` がこの形。`> 0` は正の数ならたまたま合うが、`> 5` のような比較で誤る）
-- 版: minor（v3.94.0 の想定）。**規模 M**
+- 版: minor（v3.94.0）。**規模 M**
 - 見つけ方: kSQL アクションの次の事例（在庫・発注ロット）を試していて、`CAST(CASE … AS NUMBER)` を 2 列並べた再帰の結果が手計算と合わず、切り分けた（`work-link/ksql-case-in-function-probe.cjs`。エンジンのライブラリ 3.93.0 ＋ 型を持つ代役のアプリ）
 - 関連: [B171](https://github.com/rex0220/kintone-sql-tools/releases/tag/v3.72.0)（型 provenance 方式・実値推測禁止）、[B208](ksql_b208_assert_scalar_field_numeric_issue.md) / [B209](ksql_b209_variable_numeric_provenance_issue.md)（同じ種類の残りを `ASSERT` で直した）、[B141](ksql_b141_doc_sql_unverified_issue.md)（文書の例）
 

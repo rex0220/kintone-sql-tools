@@ -1,24 +1,22 @@
-ksql 配布パッケージ (v3.93.0)
+ksql 配布パッケージ (v3.94.0)
 
 release 成果物:
-- ksql-plugin-v3.93.0.zip
-- ksql-mcp.mcpb (manifest version 3.93.0)
-- ksql-mcp.js (MCP server version 3.93.0)
+- ksql-plugin-v3.94.0.zip
+- ksql-mcp.mcpb (manifest version 3.94.0)
+- ksql-mcp.js (MCP server version 3.94.0)
 
-機能 (B206: 外のレコードを既定の名称にそろえる createRecordNormalizer・純加法。/flow のみ):
-- optionNames: "canonical" (B205) が直すのはエンジンがレコード API から読んだ値だけです。
-  ブラウザーが持っているレコード (kintone.app.record.get() / event.record) は表示名のままなので、
-  プラグインが自分で評価する式には届きません。同じ変換を外から掛ける口を足しました。
-- const normalize = await client.createRecordNormalizer(appId); で準備 (通信 3 回) し、
-  返る関数は同期・通信なしです (同期の filter や行ごとのループにそのまま入ります)。
-- 向きは表示名 → 既定の名称だけ。入力は書き換えません (変更があった階層だけ新しいオブジェクト)。
-  対象は選択肢 4 種とプロセス管理のステータス (サブテーブルの中も)。作業者とカテゴリーは素通しです。
-- ステータスはトップの項目だけ type で見ます (項目コードがアプリの言語で変わるため)。
-  normalize({ s: { type: "STATUS", value: "みしょり" } }) のように値 1 つも直せます。
-- 一意に決まらない対応表は正規化器を作る時点で ArgumentError。恒等のアプリは素通しの関数です。
-  キャッシュしません (寿命は呼び側)。appId は物理のアプリ番号です。
+修正 (B210: CASE の条件が数値の項目を辞書順で比べていた・結果が変わります):
+- SELECT の列そのものではない CASE は、数値の項目でも辞書順で比べていました (エラーにならず黙って誤る)。
+  SUM(CASE WHEN 残数 > 5 THEN 1 ELSE 0 END) が残数 10 を数えない ("10" > "5" が偽) など。
+- 集計・ウィンドウの引数、CAST / COALESCE / CONCAT などの関数の中、GROUP BY / ORDER BY の式、
+  WHERE の関数、UPDATE の SET (関数の外でも。誤った値を書いていました) が対象です。
+- サブテーブルの UPDATE / DELETE は _rid IN (...) を書いたときだけ正しく、
+  WHERE _rid = '...' AND 数量 > 7 は当たる行を取り違えていました。
+- どこに置いた CASE も、外に置いた CASE と同じく項目の型で比べます (値から型は推測しません)。
+  文字列の項目・日付・LIKE・リテラルどうしの比較は変わりません。
 
-v3.91.0 〜 v3.88.0 の節は畳みました (B205 選択肢とステータスの「言語ごとの表示名」= optionNames に
+v3.93.0 〜 v3.88.0 の節は畳みました (B208 / B209 ASSERT の件数ゲートの辞書順 / B207 COUNT(*) の近道 /
+  B197 一時テーブルの上限の分離 / B206 createRecordNormalizer / B205 選択肢とステータスの「言語ごとの表示名」= optionNames に
   "raw" か "canonical"・既定は "raw" / B204 ASSERT / EXIT のメッセージを変数で受ける / B203 外部注入で
   文字列配列 / B198 /flow の APPLY の書込 = confirm 必須 / B200 APPEND ... SELECT と APPEND ... VALUES の
   as-of / B201 ORDER BY に集計式を書いた形を構文エラーに)。
@@ -106,20 +104,19 @@ B124 集計算術式 / B125 集計のウィンドウ関数 / B123 GROUP BY だ�
 - CHANGELOG.md と GitHub Releases に版ごとの内容と移行案内があります。
   https://github.com/rex0220/kintone-sql-tools/releases
 
-1. ksql-plugin-v3.93.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.94.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.93.0): ASSERT / EXIT の件数ゲートが辞書順で素通りする穴をふさぎ (B208 / B209)、
-COUNT(*) の近道を ASSERT・CREATE TEMP TABLE の元にも効かせ (B207)、一時テーブルの上限を
-「読む件数」と「出来た表の行数」に分けました (B197)。数値と文字列が混ざった大小比較はエラーで
-止まります。B208 / B209 / B197 は結果が変わります。
+本リリース (v3.94.0): B210 CASE の条件を、置き場所によらず項目の型で比べるようにしました
+(関数・集計の引数、UPDATE の SET、サブテーブルの DML の WHERE など)。結果が変わります。
 
-前リリース (v3.92.0 / v3.91.0 / v3.90.0 / v3.89.0): B206 外のレコードを既定の名称にそろえる
-createRecordNormalizer / B205 選択肢とステータスの「言語ごとの表示名」= optionNames に "raw" か
-"canonical" (既定は "raw") / B204 ASSERT / EXIT のメッセージを変数で受ける / B203 外部注入で
-文字列配列。いずれも純加法かオプトインです。
+前リリース (v3.93.0): B208 / B209 ASSERT / EXIT の件数ゲートの辞書順をふさぐ / B207 COUNT(*) の近道 /
+B197 一時テーブルの上限を「読む件数」と「出来た表の行数」に分離 (B208 / B209 / B197 は結果が変わります)。
+
+前リリース (v3.92.0〜v3.89.0): B206 createRecordNormalizer / B205 optionNames に "raw" か "canonical" /
+B204 ASSERT / EXIT のメッセージを変数で受ける / B203 外部注入で文字列配列 (純加法かオプトイン)。
 
 前リリース (v3.87.0〜v3.81.0): B196 一時テーブルの合計の上限 tempTablesMaxTotalRows / B195 書込前の確認フック confirm /
 B193 HAVING のウィンドウ別名参照を実行前に拒否 (結果が変わります) / B191 式の中のウィンドウの PARTITION BY GROUPING() 修正 /

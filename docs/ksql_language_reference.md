@@ -443,6 +443,23 @@ FROM APP100
 - CASE / IF は**常に JavaScript で評価**され（kintone へは押し下げません）、条件は FULL_SCAN と同じ規則で判定します。
 - したがって、選択系フィールドに**定義に無い選択肢値**を `WHEN … IN (…)` へ渡しても、`WHERE` が REST に押し下げられて `GAIA_IQ10` になり得るのと違い、CASE の条件は常にローカル評価なので**エラーにならず単に不一致**になります（§6 の「定義に無い選択肢値」の注意を参照）。
 
+### 条件の比べ方（置き場所によらず項目の型で比べる）
+
+CASE の条件は、**どこに置いても項目の型で比べます**（数値の項目と `$id` は数値、選択肢は選択肢の順、ステータスはプロセスの順、文字列の項目は辞書順）。値から型は推測しません。
+
+| 置き場所 | 例 |
+|---|---|
+| SELECT の列そのもの | `CASE WHEN 残数 > 5 THEN 1 ELSE 0 END AS y` |
+| 関数・算術の中 | `COALESCE(CASE WHEN 残数 > 5 …, 0)`・`CONCAT('x', CASE …)` |
+| 集計・ウィンドウの引数 | `SUM(CASE WHEN 残数 > 5 THEN 1 ELSE 0 END)`・`LAG(CASE …) OVER (…)` |
+| GROUP BY / ORDER BY の式、WHERE の関数 | `ORDER BY COALESCE(CASE WHEN 残数 > 5 THEN 0 ELSE 1 END, 9)` |
+| UPDATE の SET（サブテーブルも） | `SET 顧客ランク = CASE WHEN 金額 >= 100000 THEN 'S' … END` |
+
+> **v3.93.0 まで（実測）**: 型で比べていたのは **SELECT の列そのもの**に置いた CASE だけで、ほかの置き場所は**数値の項目も辞書順**で比べていました（B210）。
+> `SUM(CASE WHEN 残数 > 5 …)` が残数 10 を数えない（"10" > "5" が偽）、`SET 顧客ランク = CASE WHEN 金額 >= 100000 THEN 'S' …` が金額 50000 に `'S'` を書く（"5" > "1" が真）、
+> サブテーブルの `UPDATE` / `DELETE` の `WHERE _rid = '…' AND 数量 > 7` が当たる行を取り違える（`_rid IN (…)` のときだけ正しい）、など。エラーにならないので気づけません。
+> v3.93.0 以前のエンジンでは、一時テーブルに**外に置いた CASE** で 0 / 1 の列を作ってから集計してください（`CREATE TEMP TABLE #f AS SELECT CASE WHEN 残数 > 5 THEN 1 ELSE 0 END AS f FROM APP100; SELECT SUM(f) FROM #f`）。
+
 ---
 
 ## 5. 文字列・数値関数
