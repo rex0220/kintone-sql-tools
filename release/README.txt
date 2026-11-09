@@ -1,9 +1,9 @@
-ksql 配布パッケージ (v3.92.0)
+ksql 配布パッケージ (v3.93.0)
 
 release 成果物:
-- ksql-plugin-v3.92.0.zip
-- ksql-mcp.mcpb (manifest version 3.92.0)
-- ksql-mcp.js (MCP server version 3.92.0)
+- ksql-plugin-v3.93.0.zip
+- ksql-mcp.mcpb (manifest version 3.93.0)
+- ksql-mcp.js (MCP server version 3.93.0)
 
 機能 (B206: 外のレコードを既定の名称にそろえる createRecordNormalizer・純加法。/flow のみ):
 - optionNames: "canonical" (B205) が直すのはエンジンがレコード API から読んだ値だけです。
@@ -106,22 +106,24 @@ B124 集計算術式 / B125 集計のウィンドウ関数 / B123 GROUP BY だ�
 - CHANGELOG.md と GitHub Releases に版ごとの内容と移行案内があります。
   https://github.com/rex0220/kintone-sql-tools/releases
 
-1. ksql-plugin-v3.92.0.zip を kintone のプラグイン画面で読み込む
+1. ksql-plugin-v3.93.0.zip を kintone のプラグイン画面で読み込む
 2. ksql-app-template-v1.11.0.zip をアプリ作成時にテンプレートとして読み込む
    (アプリテンプレートは v1.11.0 から変更ありません)
 3. アプリにプラグインを適用して利用開始する
 
-本リリース (v3.92.0): B206 外のレコードを既定の名称にそろえる createRecordNormalizer
-(純加法・/flow のみ。計算式などエンジンを通らないレコード向け)。
+本リリース (v3.93.0): ASSERT / EXIT の件数ゲートが辞書順で素通りする穴をふさぎ (B208 / B209)、
+COUNT(*) の近道を ASSERT・CREATE TEMP TABLE の元にも効かせ (B207)、一時テーブルの上限を
+「読む件数」と「出来た表の行数」に分けました (B197)。数値と文字列が混ざった大小比較はエラーで
+止まります。B208 / B209 / B197 は結果が変わります。
 
-前リリース (v3.91.0 / v3.90.0 / v3.89.0): B205 選択肢とステータスの「言語ごとの表示名」=
-optionNames に "raw" か "canonical" (既定は "raw") / B204 ASSERT / EXIT のメッセージを変数で受ける /
-B203 外部注入で文字列配列。いずれも純加法かオプトインです。
+前リリース (v3.92.0 / v3.91.0 / v3.90.0 / v3.89.0): B206 外のレコードを既定の名称にそろえる
+createRecordNormalizer / B205 選択肢とステータスの「言語ごとの表示名」= optionNames に "raw" か
+"canonical" (既定は "raw") / B204 ASSERT / EXIT のメッセージを変数で受ける / B203 外部注入で
+文字列配列。いずれも純加法かオプトインです。
 
-前リリース (v3.87.0〜v3.81.0): B196 /flow の一時テーブルの合計の上限 tempTablesMaxTotalRows (純加法) /
-B195 /flow の書込前の確認フック confirm (純加法) / B193 HAVING のウィンドウ別名参照を実行前に拒否 (結果が変わります) /
-B191 式の中のウィンドウの PARTITION BY GROUPING() 修正 / B190 CASE 条件のウィンドウ修正 / B188 残務 = 先行文の警告を表示 /
-B184 ウィンドウ関数を集計と同じ SELECT に・ウィンドウ結果を式の中で (純加法)。
+前リリース (v3.87.0〜v3.81.0): B196 一時テーブルの合計の上限 tempTablesMaxTotalRows / B195 書込前の確認フック confirm /
+B193 HAVING のウィンドウ別名参照を実行前に拒否 (結果が変わります) / B191 式の中のウィンドウの PARTITION BY GROUPING() 修正 /
+B190 CASE 条件のウィンドウ修正 / B188 先行文の警告を表示 / B184 ウィンドウ関数を集計と同じ SELECT に (ほかは純加法)。
 
 前リリース (v3.80.0〜v3.78.0): B187 HAVING に直接書いた集計を SELECT 列に無くても評価 (結果が変わります) /
 診断と警告の穴 4 件 = B185 / B186 / B188 / B189 (実行結果は不変) / B182 COALESCE で包んだ集計値の修正
