@@ -1780,17 +1780,18 @@ export function project(
 
   const defaultFieldKeys = buildDefaultFieldOutputKeys(columns);
   const defaultCaseKeys = buildDefaultCaseOutputKeys(columns);
+  const defaultExpressionKeys = buildDefaultExpressionOutputKeys(columns);
   const hasWildcard = columns.some(
     (col) => col.type === "WILDCARD" || col.type === "PARENT_WILDCARD"
   );
-  const outputKeys = hasWildcard ? null : computeOutputKeys(columns, defaultFieldKeys, defaultCaseKeys);
+  const outputKeys = hasWildcard ? null : computeOutputKeys(columns, defaultFieldKeys, defaultCaseKeys, defaultExpressionKeys);
   const orderedKeys: string[] = outputKeys ?? [];
 
   // 複数列の投影にワイルドカードが混在する場合、実データがあれば従来どおり
   // 行から列を決める。0 行では行ループが回らないため、非ワイルドカード列だけを
   // AST から復元する。* / _p.* は列リストに寄与させない。
   if (hasWildcard && rows.length === 0) {
-    return { rows: [], columns: computeExplicitOutputKeys(columns, defaultFieldKeys, defaultCaseKeys) };
+    return { rows: [], columns: computeExplicitOutputKeys(columns, defaultFieldKeys, defaultCaseKeys, defaultExpressionKeys) };
   }
 
   const projected = rows.map((row, rowIdx) => {
@@ -1854,7 +1855,7 @@ export function project(
           break;
         }
         case "ARITH_COL": {
-          const key = outputKeys?.[colIdx] ?? col.alias ?? arithColDefaultKey(col.expr);
+          const key = outputKeys?.[colIdx] ?? col.alias ?? defaultExpressionKeys.get(colIdx) ?? arithColDefaultKey(col.expr);
           out[key] = value as string;
           if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
           break;
@@ -1874,13 +1875,13 @@ export function project(
           break;
         }
         case "STRFUNC_COL": {
-          const key = outputKeys?.[colIdx] ?? col.alias ?? stringFuncDefaultKey(col.expr);
+          const key = outputKeys?.[colIdx] ?? col.alias ?? defaultExpressionKeys.get(colIdx) ?? stringFuncDefaultKey(col.expr);
           out[key] = value as string;
           if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
           break;
         }
         case "SCALAR_VALUE_COL": {
-          const key = outputKeys?.[colIdx] ?? col.alias ?? scalarValueDefaultKey(col.expr);
+          const key = outputKeys?.[colIdx] ?? col.alias ?? defaultExpressionKeys.get(colIdx) ?? scalarValueDefaultKey(col.expr);
           out[key] = value as string;
           if (outputKeys === null && rowIdx === 0) orderedKeys.push(key);
           break;
@@ -1909,22 +1910,24 @@ export function project(
 function computeOutputKeys(
   columns: SelectColumn[],
   defaultFieldKeys: Map<number, string>,
-  defaultCaseKeys: Map<number, string>
+  defaultCaseKeys: Map<number, string>,
+  defaultExpressionKeys: Map<number, string>
 ): string[] {
-  return columns.map((col, colIdx) => computeOutputKey(col, colIdx, defaultFieldKeys, defaultCaseKeys));
+  return columns.map((col, colIdx) => computeOutputKey(col, colIdx, defaultFieldKeys, defaultCaseKeys, defaultExpressionKeys));
 }
 
 /** ワイルドカード混在の 0 行投影で、明示列の出力キーだけを復元する。 */
 function computeExplicitOutputKeys(
   columns: SelectColumn[],
   defaultFieldKeys: Map<number, string>,
-  defaultCaseKeys: Map<number, string>
+  defaultCaseKeys: Map<number, string>,
+  defaultExpressionKeys: Map<number, string>
 ): string[] {
   const keys: string[] = [];
   const seen = new Set<string>();
   for (const [colIdx, col] of columns.entries()) {
     if (col.type === "WILDCARD" || col.type === "PARENT_WILDCARD") continue;
-    const key = computeOutputKey(col, colIdx, defaultFieldKeys, defaultCaseKeys);
+    const key = computeOutputKey(col, colIdx, defaultFieldKeys, defaultCaseKeys, defaultExpressionKeys);
     if (!seen.has(key)) {
       seen.add(key);
       keys.push(key);
@@ -1937,7 +1940,8 @@ function computeOutputKey(
   col: SelectColumn,
   colIdx: number,
   defaultFieldKeys: Map<number, string>,
-  defaultCaseKeys: Map<number, string>
+  defaultCaseKeys: Map<number, string>,
+  defaultExpressionKeys: Map<number, string>
 ): string {
   switch (col.type) {
     case "VARIABLE_COL":
@@ -1951,13 +1955,13 @@ function computeOutputKey(
     case "ARITH_AGG_COL":
       return col.alias ?? aggArithDefaultKey(col.expr);
     case "ARITH_COL":
-      return col.alias ?? arithColDefaultKey(col.expr);
+      return col.alias ?? defaultExpressionKeys.get(colIdx) ?? arithColDefaultKey(col.expr);
     case "CASE_COL":
       return col.alias ?? defaultCaseKeys.get(colIdx) ?? "case";
     case "STRFUNC_COL":
-      return col.alias ?? stringFuncDefaultKey(col.expr);
+      return col.alias ?? defaultExpressionKeys.get(colIdx) ?? stringFuncDefaultKey(col.expr);
     case "SCALAR_VALUE_COL":
-      return col.alias ?? scalarValueDefaultKey(col.expr);
+      return col.alias ?? defaultExpressionKeys.get(colIdx) ?? scalarValueDefaultKey(col.expr);
     case "GROUPING_COL":
       return col.alias ?? `GROUPING(${col.ref.field.tableAlias ? `${col.ref.field.tableAlias}.` : ""}${col.ref.field.field})`;
     case "SCALAR_SUBQUERY_COL":
@@ -1985,6 +1989,77 @@ function buildDefaultCaseOutputKeys(columns: SelectColumn[]): Map<number, string
     } while (used.has(key));
     used.add(key);
     keys.set(columnIndex, key);
+  }
+  return keys;
+}
+
+/**
+ * B211: 別名の無い式の列（関数・式・算術）の既定の名前を決める。中身の違う式と名前が重なったら、
+ * 2 つ目から番号を付ける（`CAST(case,'NUMBER')` → `CAST(case,'NUMBER')_2`）。
+ *
+ * 既定の名前は中の CASE を "case" と略す（`scalarValueDefaultKey`）ので、中身の違う 2 列が同じ名前になり、
+ * 行のオブジェクトで後の列が前の列を上書きして黙って消えていた（再帰 CTE では 2 列とも同じ値）。
+ * - 重なっていない列の名前は変えない（今の名前を使っている SQL・設定を壊さない）
+ * - 中身が同じ式どうし（`ROUND(x), ROUND(x)`）は値も同じなので、今までどおり同じ名前
+ *   （UNION で後の枝の値を受けるときは、UNION の側で番号を付ける＝`withUniqueColumnNames`）
+ * - 番号は、別名とほかの列の既定の名前に使われていないものを選ぶ（列そのものの CASE の case_2 と同じ形）
+ */
+/**
+ * B211: 式が同じかを比べるための文字列。数値の書き方（`raw`。`2` と `2e0`）は名前に出ないので比べない。
+ */
+export function expressionSignature(value: unknown): string {
+  return JSON.stringify(value, (key, entry: unknown) => (key === "raw" ? undefined : entry));
+}
+
+/**
+ * B211: SELECT の各列の出力の名前（射影と同じ規則。ワイルドカードの列は undefined）。
+ * EXPLAIN の列名の推定や、一時テーブルの列の型を、実行と同じ名前で作るために使う。
+ */
+export function selectColumnOutputKeys(columns: SelectColumn[]): Array<string | undefined> {
+  const defaultFieldKeys = buildDefaultFieldOutputKeys(columns);
+  const defaultCaseKeys = buildDefaultCaseOutputKeys(columns);
+  const defaultExpressionKeys = buildDefaultExpressionOutputKeys(columns);
+  return columns.map((column, index) => (
+    column.type === "WILDCARD" || column.type === "PARENT_WILDCARD"
+      ? undefined
+      : computeOutputKey(column, index, defaultFieldKeys, defaultCaseKeys, defaultExpressionKeys)
+  ));
+}
+
+function buildDefaultExpressionOutputKeys(columns: SelectColumn[]): Map<number, string> {
+  const baseOf = (column: SelectColumn): string | undefined => {
+    if (!("alias" in column) || column.alias !== null) return undefined;
+    switch (column.type) {
+      case "STRFUNC_COL": return stringFuncDefaultKey(column.expr);
+      case "SCALAR_VALUE_COL": return scalarValueDefaultKey(column.expr);
+      case "ARITH_COL": return arithColDefaultKey(column.expr);
+      default: return undefined;
+    }
+  };
+  const bases = columns.map(baseOf);
+  const used = new Set<string>(bases.filter((base): base is string => base !== undefined));
+  for (const column of columns) {
+    if ("alias" in column && typeof column.alias === "string") used.add(column.alias);
+  }
+  const owners = new Map<string, string>();
+  const keys = new Map<number, string>();
+  for (const [index, column] of columns.entries()) {
+    const base = bases[index];
+    if (base === undefined) continue;
+    const signature = expressionSignature((column as { expr: unknown }).expr);
+    for (let suffix = 1; ; suffix++) {
+      const name = suffix === 1 ? base : `${base}_${suffix}`;
+      const owner = owners.get(name);
+      if (owner === signature) {
+        keys.set(index, name);
+        break;
+      }
+      if (owner === undefined && (suffix === 1 || !used.has(name))) {
+        owners.set(name, signature);
+        keys.set(index, name);
+        break;
+      }
+    }
   }
   return keys;
 }
