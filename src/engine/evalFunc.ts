@@ -22,6 +22,15 @@ import { evalCaseWhen, evalCaseWhenNullable } from "./evalWhere";
 /** 1 文の全評価位置で共有する実行時コンテキスト。 */
 export interface EvaluationContext {
   readonly statementInstant?: Date;
+  /**
+   * B210: その文の行の型の情報。CASE の条件は、呼び出しが渡した型で分からない項目をこれで補う。
+   * 型を渡さずに CASE を評価する呼び出し（集計・ウィンドウの引数、GROUP BY / ORDER BY の式、
+   * UPDATE の SET など）でも、数値の項目を数値で比べるため。実行ごとに持つ（文の AST には付けない）。
+   */
+  readonly caseFieldResolvers?: {
+    readonly resolveFieldType?: FieldTypeResolver;
+    readonly resolveFieldSemantics?: FieldSemanticsResolver;
+  };
 }
 
 // ============================================================

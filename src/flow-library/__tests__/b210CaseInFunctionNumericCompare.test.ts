@@ -35,7 +35,7 @@ const rows = Array.from({ length: 12 }, (_, index) => ({
 
 interface Written { op: string; records: unknown[] }
 
-function mockClient(written: Written[] = []) {
+function mockClient(written: Written[] = [], fields: unknown[] = FIELDS) {
   return {
     async getRecords(params: { query: string; totalCount?: boolean }) {
       const query = params.query ?? "";
@@ -66,7 +66,7 @@ function mockClient(written: Written[] = []) {
     },
     async deleteRecords() {},
     async getApps() { return []; },
-    async getFields() { return FIELDS; },
+    async getFields() { return fields; },
     async getNumberPrecision() { return { digits: 16, decimalPlaces: 4, roundingMode: "HALF_EVEN" as const }; },
     async getProcessStatuses() { return { enable: false, states: null }; },
   } as unknown as FlowKintoneClient;
@@ -221,6 +221,53 @@ describe("B210: 集計の結果・UPDATE … FROM", () => {
     );
     const record = (written[0]?.records[0] as { record: { 文字: { value: string } } } | undefined)?.record;
     expect(record?.文字.value).toBe("大");
+  });
+});
+
+describe("B210: Codex レビューで足した形", () => {
+  test("集計を含む CASE の条件で GROUP BY の項目を比べる（10・11 だけ 1）", async () => {
+    const result = await run(
+      "SELECT 残数, CASE WHEN 残数 > 9 THEN COUNT(*) ELSE 0 END AS c FROM APP200 GROUP BY 残数 ORDER BY 残数"
+    );
+    expect(result.filter((row) => row.c === "1").map((row) => row.残数)).toEqual(["10", "11"]);
+  });
+
+  test("同（関数の中）", async () => {
+    const result = await run(
+      "SELECT 残数, CONCAT('', CASE WHEN 残数 > 9 THEN COUNT(*) ELSE 0 END) AS c FROM APP200 GROUP BY 残数 ORDER BY 残数"
+    );
+    expect(result.filter((row) => row.c === "1").map((row) => row.残数)).toEqual(["10", "11"]);
+  });
+
+  test("$id の大小（> 9 は 10・11・12 の 3 件）", async () => {
+    const result = await run("SELECT SUM(CASE WHEN $id > 9 THEN 1 ELSE 0 END) AS n FROM APP200");
+    expect(Number(result[0].n)).toBe(3);
+  });
+
+  test("同じ文を、型の違う 2 つの実行で同時に動かしても混ざらない", async () => {
+    const parsed = parseScript(`${header}SELECT SUM(CASE WHEN 残数 > 5 THEN 1 ELSE 0 END) AS n FROM APP200`);
+    const textFields = FIELDS.map((field) => (field.code === "残数" ? { ...field, fieldType: "SINGLE_LINE_TEXT" } : field));
+    const runWith = async (fields: unknown[]) => {
+      const context = createExecutionContext({
+        client: mockClient([], fields), statements: parsed.statements, meta: parsed.meta, maxRecords: 1000,
+      });
+      try {
+        const result = await executeStatement(parsed.statements[0], context) as { result?: { rows?: Array<Record<string, string>> } };
+        return Number(result.result?.rows?.[0].n);
+      } finally {
+        await disposeExecutionContext(context);
+      }
+    };
+    const [asNumber, asText, asNumberAgain] = await Promise.all([runWith(FIELDS), runWith(textFields), runWith(FIELDS)]);
+    expect([asNumber, asText, asNumberAgain]).toEqual([6, 4, 6]);
+  });
+
+  test("UPDATE … FROM の SET の CASE は元（FROM）の列を参照できない（構文で止まる）", () => {
+    const parsed = parseScript(
+      `${header}CREATE TEMP TABLE #s AS SELECT $id AS id, 残数 AS n FROM APP200;\n`
+      + "UPDATE APP200 SET 文字 = CASE WHEN s.n > 5 THEN '大' ELSE '小' END FROM #s AS s WHERE APP200.$id = s.id"
+    );
+    expect(parsed.diagnostics.some((item) => item.severity === "error" && /ソース列/.test(item.message))).toBe(true);
   });
 });
 

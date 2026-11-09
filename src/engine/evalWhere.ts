@@ -399,48 +399,56 @@ export interface CaseFieldResolvers {
   readonly resolveFieldSemantics?: FieldSemanticsResolver;
 }
 
-const boundCaseFieldResolvers = new WeakMap<object, CaseFieldResolvers>();
+type FieldResolver<T> = (field: FieldRef) => T | undefined;
 
-/**
- * B210: 文を実行する前に、文の中のすべての CASE へ型の情報を結び付ける。
- *
- * CASE の条件は、項目の型（semantics）が分かって初めて数値で比べられる。
- * 型を渡さずに評価する呼び出し（集計の引数・GROUP BY / ORDER BY の式・ウィンドウの引数・
- * UPDATE の SET など）が十数か所あり、そこに置いた CASE は辞書順で比べていた（`30 > 5` が偽）。
- * 呼び出しを 1 つずつ直すと次に足す呼び出しでまた漏れるので、CASE の側に結び付ける。
- *
- * - 呼び出しが型を渡したとき（どちらか一方でも）は、そちらを優先する（今までどおり）
- * - 入れ子の SELECT（サブクエリ）の中は、その SELECT が自分の型で結ぶので降りない
- * - 型が分からない項目は、今までどおり文字列で比べる（値は見ない。B171 の「実値推測禁止」）
- */
-export function bindCaseFieldResolvers(root: unknown, resolvers: CaseFieldResolvers): void {
-  if (resolvers.resolveFieldType === undefined && resolvers.resolveFieldSemantics === undefined) return;
-  const seen = new Set<object>();
-  const visit = (node: unknown): void => {
-    if (node === null || typeof node !== "object" || seen.has(node)) return;
-    seen.add(node);
-    if (Array.isArray(node)) {
-      node.forEach(visit);
-      return;
-    }
-    const value = node as Record<string, unknown>;
-    if (value["type"] === "SELECT") return;
-    if (value["type"] === "CASE_WHEN") boundCaseFieldResolvers.set(value, resolvers);
-    Object.values(value).forEach(visit);
-  };
-  visit(root);
+const composedResolvers = new WeakMap<object, WeakMap<object, unknown>>();
+
+/** first で分からない項目を second で補う（同じ組み合わせは作り直さない）。 */
+function composeFieldResolver<T>(
+  first: FieldResolver<T> | undefined,
+  second: FieldResolver<T> | undefined
+): FieldResolver<T> | undefined {
+  if (first === undefined) return second;
+  if (second === undefined || first === second) return first;
+  let bySecond = composedResolvers.get(first);
+  if (!bySecond) {
+    bySecond = new WeakMap();
+    composedResolvers.set(first, bySecond);
+  }
+  const cached = bySecond.get(second) as FieldResolver<T> | undefined;
+  if (cached) return cached;
+  const composed: FieldResolver<T> = (field) => first(field) ?? second(field);
+  bySecond.set(second, composed);
+  return composed;
 }
 
-/** 呼び出しが渡した型の情報。どちらも無ければ、CASE に結び付けたもの。 */
+/**
+ * B210: CASE の条件を評価するときの型の情報。
+ *
+ * CASE の条件は、項目の型（semantics）が分かって初めて数値で比べられる。
+ * 型を渡さずに評価する呼び出し（集計・ウィンドウの引数、GROUP BY / ORDER BY の式、
+ * UPDATE の SET など）が十数か所あり、そこに置いた CASE は辞書順で比べていた（`30 > 5` が偽）。
+ * 呼び出しを 1 つずつ直すと次に足す呼び出しでまた漏れるので、文の行の型を評価の文脈
+ * （`EvaluationContext.caseFieldResolvers`）に持たせ、ここで補う。
+ *
+ * - 呼び出しが渡した型を先に使い、それで分からない項目だけ文脈の型で補う
+ *   （集計の後の CASE は、集計の結果は集計の型・GROUP BY の項目は行の型で比べる）
+ * - 文脈は実行ごとに作るので、同じ AST を別の実行で同時に使っても混ざらない
+ * - 型が分からない項目は、今までどおり文字列で比べる（値は見ない。B171 の「実値推測禁止」）
+ */
 export function caseFieldResolvers(
-  expr: CaseWhenExpr,
-  resolveFieldType?: FieldTypeResolver,
-  resolveFieldSemantics?: FieldSemanticsResolver
+  explicitFieldType: FieldTypeResolver | undefined,
+  explicitFieldSemantics: FieldSemanticsResolver | undefined,
+  context: EvaluationContext
 ): CaseFieldResolvers {
-  if (resolveFieldType !== undefined || resolveFieldSemantics !== undefined) {
-    return { resolveFieldType, resolveFieldSemantics };
+  const statement = context.caseFieldResolvers;
+  if (statement === undefined) {
+    return { resolveFieldType: explicitFieldType, resolveFieldSemantics: explicitFieldSemantics };
   }
-  return boundCaseFieldResolvers.get(expr) ?? {};
+  return {
+    resolveFieldType: composeFieldResolver(explicitFieldType, statement.resolveFieldType),
+    resolveFieldSemantics: composeFieldResolver(explicitFieldSemantics, statement.resolveFieldSemantics),
+  };
 }
 
 export function evalCaseWhen(
@@ -451,7 +459,7 @@ export function evalCaseWhen(
   context: EvaluationContext = {}
 ): string {
   const { resolveFieldType, resolveFieldSemantics } = caseFieldResolvers(
-    expr, explicitFieldType, explicitFieldSemantics
+    explicitFieldType, explicitFieldSemantics, context
   );
   for (const branch of expr.branches) {
     if (evalWhere(branch.condition, row, resolveFieldType, undefined, resolveFieldSemantics, context)) {
@@ -473,7 +481,7 @@ export function evalCaseWhenNullable(
   context: EvaluationContext = {}
 ): string | number | null {
   const { resolveFieldType, resolveFieldSemantics } = caseFieldResolvers(
-    expr, explicitFieldType, explicitFieldSemantics
+    explicitFieldType, explicitFieldSemantics, context
   );
   for (const branch of expr.branches) {
     if (evalWhere(branch.condition, row, resolveFieldType, undefined, resolveFieldSemantics, context)) {

@@ -216,7 +216,7 @@ import {
 } from "./engine/process";
 import { expandSubtableRecords } from "./converter/subtableAdapter";
 import type { ResolvedSubqueryInList, ResolvedExistsExpr, ResolvedScalarSubquery, FieldTypeResolver, FieldSemanticsResolver } from "./engine/evalWhere";
-import { evalWhere, evalCaseWhen, resolveKintoneFunc, bindCaseFieldResolvers } from "./engine/evalWhere";
+import { evalWhere, evalCaseWhen, resolveKintoneFunc } from "./engine/evalWhere";
 import { evalArithExpr, evalStringFunc, type EvaluationContext } from "./engine/evalFunc";
 import { parseSqlStatementsForScript } from "./core/sql";
 import { asOfFunctionNameFromVariable, asOfVariableName, createAsOfClock } from "./core/asOfClock";
@@ -4271,6 +4271,7 @@ async function buildWhereFieldSemanticsResolver(
   // B210: 関数・集計・GROUP BY / ORDER BY の式の中の CASE も、ステータスの順を引けるようにする
   collectOrderedFields(groupingItemsOf(stmt));
   collectOrderedFields(stmt.orderBy);
+  collectOrderedFields(stmt.hiddenWindows ?? []);
   for (const column of stmt.columns) {
     if (column.type !== "CASE_COL") collectOrderedFields(column);
     if (column.type === "CASE_COL") collectOrderedFields(column.expr);
@@ -4566,16 +4567,18 @@ function selectContainsCaseExpr(stmt: SelectStatement): boolean {
 }
 
 /**
- * B210: SELECT の中のすべての CASE（関数・集計・ウィンドウの引数、GROUP BY / ORDER BY の式、
- * WHERE / HAVING の関数の中）に、行の型の情報を結び付ける。
- * 型を渡さずに評価する呼び出しでも、数値の項目を数値で比べるため。入れ子の SELECT は除く。
+ * B210: 評価の文脈に、その文の行の型の情報を載せる。
+ * CASE は、呼び出しが渡した型で分からない項目をこれで補う（`caseFieldResolvers`）。
+ * 型を渡さずに評価する呼び出し（集計・ウィンドウの引数、GROUP BY / ORDER BY の式、
+ * UPDATE の SET など）でも、数値の項目を数値で比べるため。実行ごとに作る（AST には付けない）。
  */
-function bindSelectCaseFieldResolvers(
-  stmt: SelectStatement,
+function withCaseFieldResolvers(
+  base: EvaluationContext,
   resolveFieldType: FieldTypeResolver | undefined,
   resolveFieldSemantics: FieldSemanticsResolver | undefined
-): void {
-  bindCaseFieldResolvers(Object.values(stmt), { resolveFieldType, resolveFieldSemantics });
+): EvaluationContext {
+  if (resolveFieldType === undefined && resolveFieldSemantics === undefined) return base;
+  return { ...base, caseFieldResolvers: { resolveFieldType, resolveFieldSemantics } };
 }
 
 function buildHavingFieldSemanticsResolver(
@@ -5454,7 +5457,9 @@ async function executeSimpleSelect(
         stmt, client, cacheContext, undefined, selectCaseConditionsNeedFieldMetadata(stmt)
       )
     : undefined;
-  bindSelectCaseFieldResolvers(stmt, fieldTypeResolvers.row, projectionSemanticsResolver);
+  const evaluationContext = withCaseFieldResolvers(
+    statementEvaluationContext(options), fieldTypeResolvers.row, projectionSemanticsResolver
+  );
   const maxRecords = options.maxRecords ?? 10_000;
   const warnings = new Set<string>();
   const onLimit = options.onLimitReached ?? "error";
@@ -5527,9 +5532,9 @@ async function executeSimpleSelect(
         undefined,
         fieldTypeResolvers.row,
         projectionSemanticsResolver,
-        statementEvaluationContext(options)
+        evaluationContext
       ),
-      statementEvaluationContext(options)
+      evaluationContext
     );
     rows = applyLimit(rows, stmt.limit, stmt.offset);
   }
@@ -5541,7 +5546,7 @@ async function executeSimpleSelect(
     undefined,
     projectionSemanticsResolver,
     undefined,
-    statementEvaluationContext(options)
+    evaluationContext
   );
   const columns = await restoreEmptyWildcardColumns(
     stmt,
@@ -7131,7 +7136,6 @@ async function executeFullScanSelect(
     whereNeedsFieldMetadata(stmt.having) || selectCaseConditionsNeedFieldMetadata(stmt)
   );
   const havingFieldSemanticsResolver = buildHavingFieldSemanticsResolver(stmt, fieldSemanticsResolver);
-  bindSelectCaseFieldResolvers(stmt, fieldTypeResolvers.row, fieldSemanticsResolver);
 
   // 同じ計画を検証・fetch・JS 評価で共有する。
   const preboundJoinPlan = boundJoinRuntimePlans.get(stmt);
@@ -7313,7 +7317,9 @@ async function executeFullScanSelect(
     resolvedGroupingSpec: resolvedGroupingSpecs.get(stmt),
     plainGroupByPlan,
     warnings,
-    evaluationContext: statementEvaluationContext(options),
+    evaluationContext: withCaseFieldResolvers(
+      statementEvaluationContext(options), fieldTypeResolvers.row, fieldSemanticsResolver
+    ),
   });
   const columns = await restoreEmptyWildcardColumns(
     stmt,
@@ -8216,7 +8222,6 @@ async function executeFullScanWithCte(
     whereNeedsFieldMetadata(stmt.having) || selectCaseConditionsNeedFieldMetadata(stmt)
   );
   const havingFieldSemanticsResolver = buildHavingFieldSemanticsResolver(stmt, fieldSemanticsResolver);
-  bindSelectCaseFieldResolvers(stmt, fieldTypeResolvers.row, fieldSemanticsResolver);
   const pushdownPlan = buildRuntimeJoinPushdownPlan(stmt, pushdownMeta, optionNameQuerySource(client))
     ?? buildKlikePushdownPlan(stmt, pushdownMeta);
   validateKlikePushdownPlan(pushdownPlan);
@@ -8327,7 +8332,9 @@ async function executeFullScanWithCte(
     hiddenQualifiedAliases,
     resolvedGroupingSpec,
     plainGroupByPlan,
-    evaluationContext: statementEvaluationContext(options),
+    evaluationContext: withCaseFieldResolvers(
+      statementEvaluationContext(options), fieldTypeResolvers.row, fieldSemanticsResolver
+    ),
   });
   const columns = await restoreEmptyWildcardColumns(
     stmt,
@@ -10333,7 +10340,6 @@ async function materializeUpdateValidationCandidates(
     );
   }
   await resolveSetSubqueries(stmt.assignments, client, options, cacheContext);
-  await bindUpdateCaseFieldResolvers(stmt, client, cacheContext);
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
   const checkTargetFields = assertUpdateCheckRefs(stmt, fieldTypes);
   assertCheckComparisonTypes(stmt, updateEvaluationTypes(fieldTypes, stmt.appId));
@@ -10349,7 +10355,7 @@ async function materializeUpdateValidationCandidates(
     snapshotsById = indexDmlUpdateSnapshots(resolved.records);
     evaluationById = snapshotsById;
     records = updateToPutBatchesArith(
-      stmt, resolved.records, fieldTypes, statementEvaluationContext(options)
+      stmt, resolved.records, fieldTypes, await updateCaseEvaluationContext(stmt, client, cacheContext, options)
     ).flatMap((batch) => batch.records);
   } else {
     const getParams = updateToGetQuery(stmt, optionNameQuerySource(client));
@@ -10524,10 +10530,9 @@ async function materializeUpdateFromValidationCandidates(
   const matched = await resolveUpdateFromMatchedRecords(
     stmt, from, client, options, cacheContext, tempTables, snapshotFields
   );
-  await bindUpdateCaseFieldResolvers(stmt, client, cacheContext);
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
   const records = updateFromToPutBatches(
-    stmt, matched, fieldTypes, statementEvaluationContext(options)
+    stmt, matched, fieldTypes, await updateCaseEvaluationContext(stmt, client, cacheContext, options)
   ).flatMap((batch) => batch.records);
   const matchedById = new Map(matched.map((pair) => [Number(pair.target["$id"]?.value), pair]));
   const snapshotsById = snapshotFields
@@ -11441,7 +11446,6 @@ async function executeUpdate(
     return executeApplyPatchUpdate(stmt, client, options, cacheContext) as Promise<UpdateResult>;
   }
   // B210: SET の CASE が数値の項目を数値で比べるよう、対象アプリの型を結び付ける（サブテーブルは対象外）
-  if (!stmt.subtableCode) await bindUpdateCaseFieldResolvers(stmt, client, cacheContext);
   if (stmt.checkGroups?.length && isConstantFalseWhere(stmt.where)) {
     const fieldInfos = await loadWritableTopLevelDmlFields(
       stmt.appId, stmt.assignments.map((assignment) => assignment.field), client, cacheContext
@@ -11493,7 +11497,7 @@ async function executeUpdate(
     const records = resolved.records;
 
     const batches = updateToPutBatchesArith(
-      stmt, records, fieldTypes, statementEvaluationContext(options)
+      stmt, records, fieldTypes, await updateCaseEvaluationContext(stmt, client, cacheContext, options)
     );
     assertValidDmlRecords(batches.flatMap((batch) => batch.records.map((entry) => entry.record)), targetFields, fieldInfos, numberPrecision);
 
@@ -11638,7 +11642,7 @@ async function executeApplyPatchUpdate(
     fieldInfos,
     metadata,
     ...(appendSelectRows ? { appendSelectRows } : {}),
-    evaluationContext: statementEvaluationContext(options),
+    evaluationContext: await updateCaseEvaluationContext(stmt, client, cacheContext, options),
   });
   const fieldIndex = buildPostImageFieldIndex(
     fieldInfos,
@@ -11872,16 +11876,11 @@ async function selectApplyParentSnapshots(
   for (const field of collectApplyParentWhereFields(stmt.where)) fields.add(field);
   const resolvers = await buildApplyParentFieldResolvers(
     stmt.appId,
-    [stmt.where, stmt.assignments],
+    stmt.where,
     infoByCode,
     client,
     cacheContext
   );
-  // B210: 親の SET の CASE も、同じ型で比べる
-  bindCaseFieldResolvers(stmt.assignments, {
-    resolveFieldType: resolvers.fieldTypeResolver,
-    resolveFieldSemantics: resolvers.fieldSemanticsResolver,
-  });
   const candidates = await fetchAll(
     client.getRecords,
     stmt.appId,
@@ -11918,15 +11917,19 @@ interface ApplyParentFieldResolvers {
 }
 
 /**
- * B210: UPDATE の SET の CASE（関数の中も）に、対象アプリの項目の型を結び付ける。
+ * B210: UPDATE（親レコード）の SET の CASE を評価する文脈。対象アプリの項目の型を載せる。
  * SET の CASE は型を渡さずに評価していたので、数値の項目の大小を辞書順で比べていた。
+ * SET に CASE が無ければフォーム定義を取らず、元の文脈をそのまま返す。
+ * `UPDATE … FROM` の SET の CASE は元（FROM）の列を参照できない（構文の検査で止まる）ので、対象アプリの型だけでよい。
  */
-async function bindUpdateCaseFieldResolvers(
+async function updateCaseEvaluationContext(
   stmt: UpdateStatement,
   client: KintoneClient,
-  cacheContext: string
-): Promise<void> {
-  if (!containsCaseExpr(stmt.assignments)) return;
+  cacheContext: string,
+  options: ExecuteOptions
+): Promise<EvaluationContext> {
+  const base = statementEvaluationContext(options);
+  if (!containsCaseExpr(stmt.assignments)) return base;
   const infos = await getFieldsCached(stmt.appId, client, cacheContext);
   const resolvers = await buildApplyParentFieldResolvers(
     stmt.appId,
@@ -11935,10 +11938,7 @@ async function bindUpdateCaseFieldResolvers(
     client,
     cacheContext
   );
-  bindCaseFieldResolvers(stmt.assignments, {
-    resolveFieldType: resolvers.fieldTypeResolver,
-    resolveFieldSemantics: resolvers.fieldSemanticsResolver,
-  });
+  return withCaseFieldResolvers(base, resolvers.fieldTypeResolver, resolvers.fieldSemanticsResolver);
 }
 
 /** SELECT と同じ field type / field semantics primitive を単一の親物理 app に結ぶ。 */
@@ -12233,7 +12233,7 @@ async function executeUpdateFrom(
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
   // 全件を先に構築・検証し、ローカル変換エラーによる部分書き込みを防止する。
   const batches = updateFromToPutBatches(
-    stmt, matched, fieldTypes, statementEvaluationContext(options)
+    stmt, matched, fieldTypes, await updateCaseEvaluationContext(stmt, client, cacheContext, options)
   );
   const targetFields = stmt.assignments.map((assignment) => assignment.field);
   const fieldInfos = await getFieldsCached(stmt.appId, client, cacheContext);
@@ -12452,11 +12452,13 @@ interface ExpandedSubtableRow {
 
 async function buildSubtableFieldTypeResolver(
   appId: number,
-  typedInRefs: readonly FieldRef[],
+  _typedInRefs: readonly FieldRef[],
   client: KintoneClient,
   cacheContext: string
 ): Promise<FieldTypeResolver | undefined> {
-  if (typedInRefs.length === 0) return undefined;
+  // B210: 以前は IN の候補があるときだけ型を引いていたため、`_rid = '1' AND 数量 > 7` の WHERE や
+  // SET の CASE の大小が辞書順になっていた（`_rid IN (…)` を書いたときだけ数値で比べていた）。
+  // 大小・CASE も項目の型で比べるよう、いつも引く（フォーム定義はキャッシュされる）。
   const fieldTypes = await getFieldTypeMap(appId, client, cacheContext);
   return (field) => {
     if (field.tableAlias !== null && field.tableAlias !== "_p") return undefined;

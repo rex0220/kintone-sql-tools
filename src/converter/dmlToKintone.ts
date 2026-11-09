@@ -658,8 +658,8 @@ export function evalCaseWhenValue(
   fieldType: string | undefined,
   evaluationContext: EvaluationContext = {}
 ): KintoneValue {
-  // B210: 実行の前に結び付けた型の情報で比べる（無ければ今までどおり文字列）
-  const { resolveFieldType, resolveFieldSemantics } = caseFieldResolvers(expr);
+  // B210: 評価の文脈が持つ文の行の型で比べる（無ければ今までどおり文字列）
+  const { resolveFieldType, resolveFieldSemantics } = caseFieldResolvers(undefined, undefined, evaluationContext);
   for (const branch of expr.branches) {
     if (evalWhere(branch.condition, row, resolveFieldType, undefined, resolveFieldSemantics, evaluationContext)) {
       return evalCaseResultValue(branch.result, row, fieldType, evaluationContext);
