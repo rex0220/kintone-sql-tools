@@ -2575,6 +2575,11 @@ ORDER BY s.日付
 
 深さがデータ次第で変わる階層は、read-only の `WITH RECURSIVE` で展開できます。再帰 CTE 本体は `seed SELECT UNION ALL recursive SELECT` の2枝とし、再帰項は自己参照を1回だけ `INNER JOIN` の片側に置きます。再帰 CTE は1つの `WITH` に1個までです。CTE 列名リストは再帰 CTE にだけ指定でき、seed と再帰項の列数・位置ごとの型が一致する必要があります。後方参照、相互・多重再帰、再帰項の OUTER JOIN、2つ目の JOIN、集計、window、`DISTINCT`、subquery、`GROUP BY`、`ORDER BY`、`LIMIT` / `OFFSET`、DML source、入れ子の再帰 CTE は非対応です（将来拡張の候補）。
 
+CTE 列名リストの名前は、seed と再帰項の列を**位置どおり**に受けます（別名の無い式の列でも、列名リストの名前で受けます）。seed・再帰項の中で**書いた別名が重なり、式が違う**ときは、どちらの値を受けるか決められないので実行の前に止まります（`PlanningError`）。
+
+> **v3.94.0 まで（実測）**: 別名の無い関数の列は、中の CASE を「case」と略した既定の名前になり（`CAST(case,'NUMBER')`）、中身の違う 2 列が同じ名前になって片方が消えていました（B211）。
+> 再帰 CTE の列名リストで受けると、2 列とも 2 列目の値になりました。v3.94.0 以前のエンジンでは、関数の列に別名を付けてください。
+
 ```sql
 WITH RECURSIVE 部品展開
   (親品目, 子品目, 深さ, 累計員数) AS (

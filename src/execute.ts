@@ -7495,6 +7495,45 @@ function recursiveOutputColumns(cte: CteDefinition): string[] {
   return columns;
 }
 
+/**
+ * B211: 再帰 CTE の seed と再帰項を、列名リスト（または seed の出力名）の名前で**位置どおり**受ける。
+ * 別名の無い式の列に、その位置の名前を別名として付けてから実行する（項目の列と、書いた別名はそのまま）。
+ * 以前は SELECT の結果の行を名前で写していたので、既定の名前が重なる列（`CAST(case,'NUMBER')` を 2 つ）は
+ * 写す前に値が上書きされ、2 列とも同じ値になっていた。
+ */
+function withRecursivePositionalAliases(stmt: SelectStatement, outputColumns: readonly string[]): SelectStatement {
+  if (stmt.columns.length !== outputColumns.length) return stmt;
+  if (stmt.columns.some((column) => column.type === "WILDCARD" || column.type === "PARENT_WILDCARD")) return stmt;
+  let changed = false;
+  const columns = stmt.columns.map((column, index) => {
+    if (column.type === "FIELD" || !("alias" in column) || column.alias !== null) return column;
+    changed = true;
+    return { ...column, alias: outputColumns[index] } as SelectColumn;
+  });
+  return changed ? { ...stmt, columns } : stmt;
+}
+
+/** B211: 書いた別名が重なり、式が違う列があれば止める（どちらの値を受けるか決められない）。 */
+function assertRecursiveAliasesDistinct(cteName: string, part: string, stmt: SelectStatement): void {
+  const seen = new Map<string, { index: number; signature: string }>();
+  stmt.columns.forEach((column, index) => {
+    if (!("alias" in column) || typeof column.alias !== "string") return;
+    const { alias: _alias, aliasDisplay: _display, ...rest } = column as { alias: string; aliasDisplay?: unknown };
+    const signature = JSON.stringify(rest);
+    const first = seen.get(column.alias);
+    if (!first) {
+      seen.set(column.alias, { index, signature });
+      return;
+    }
+    if (first.signature !== signature) {
+      throw new Error(
+        `PlanningError: 再帰 CTE「${cteName}」の${part}の第 ${first.index + 1} 列と第 ${index + 1} 列の別名が同じ（${column.alias}）で、式が違います。`
+        + "列名リストで名前を付けるときも、SELECT の中の別名は分けてください"
+      );
+    }
+  });
+}
+
 function recursivePlanningColumnNames(stmt: SelectStatement): string[] {
   return stmt.columns.map((column, index) => recursiveSelectOutputName(column) ?? `__b53_column_${index}`);
 }
@@ -7840,6 +7879,8 @@ async function executeRecursiveCte(
 ): Promise<SelectResult> {
   const spec = cte.recursiveSpec!;
   const outputColumns = recursiveOutputColumns(cte);
+  assertRecursiveAliasesDistinct(cte.name, "seed", spec.seed);
+  assertRecursiveAliasesDistinct(cte.name, "再帰項", spec.recursiveTerm);
   const seedMeta = await inferRecursiveProjectionMeta(
     spec.seed, outputColumns, client, cacheContext, cteCache
   );
@@ -7878,8 +7919,10 @@ async function executeRecursiveCte(
   );
   const runtimeCache = new Map(cteCache);
   for (const source of sources.values()) runtimeCache.set(source.name, source.table);
-  const seedQuery = rewriteRecursivePhysicalSources(spec.seed, sources);
-  const termQuery = rewriteRecursivePhysicalSources(spec.recursiveTerm, sources);
+  const seedQuery = withRecursivePositionalAliases(rewriteRecursivePhysicalSources(spec.seed, sources), outputColumns);
+  const termQuery = withRecursivePositionalAliases(
+    rewriteRecursivePhysicalSources(spec.recursiveTerm, sources), outputColumns
+  );
   const rawSeed = await executeQueryWithCte(seedQuery, client, options, runtimeCache, cacheContext, true, true);
   const seed = alignSelectResultByPosition(rawSeed, outputColumns, seedMeta);
   const cycle = spec.cycle;
