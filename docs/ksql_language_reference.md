@@ -2277,7 +2277,31 @@ SELECT * FROM APP100 ORDER BY 作成日時 DESC LIMIT 20 OFFSET 40
 | プラグイン | 3,000件 | 実行画面の「最大取得件数」 |
 | 公式 API `/flow` | 10,000件 | `createExecutionContext`／`explainScript` の options `maxRecords`（`executeStatement`・`previewStatement` は実行コンテキストの値を共有・v3.69.0〜。→ §27.9） |
 
-値を引き上げるとAPI呼出し回数、メモリ使用量、タイムアウトリスクも増えます。`CREATE TEMP TABLE`の実体化には別の`tempTableMaxRows`（既定10,000件）が適用され、`maxRecords`とは独立です。**`maxRecords`だけ引き上げても、一時テーブルへ10,000行超を実体化する文は`tempTableMaxRows`で停止します**。実体化を伴うバッチでは両方を併せて指定してください（実測・v3.72.0）。
+値を引き上げるとAPI呼出し回数、メモリ使用量、タイムアウトリスクも増えます。
+
+> **`maxRecords`は「1 回の読み取りごと」の上限です**（実行やバッチの合計ではありません。v3.93.0 で明記）。
+> 1 つの文で 2 つのアプリを読む JOIN は、アプリごとに別々に数えます。
+> 8,000 件のアプリを読む文が 2 つあるバッチは、`maxRecords = 10,000` でも両方成功します。
+> **合計で止めたいときは `tempTablesMaxTotalRows`**（一時テーブルの行数の合計・B196）を使ってください。
+
+**`CREATE TEMP TABLE` の 3 つの上限（v3.93.0〜。B197 / 依頼 KJ-11）**
+
+| 何を数えるか | 設定 | 超えたとき |
+|---|---|---|
+| **元の SELECT が読む件数** | `tempTableReadMaxRecords`（省略時は `maxRecords`。どちらも省略したときだけ `max(10,000, tempTableMaxRows)`） | `FetchAllLimitError`（効いている上限の名前で案内します） |
+| **出来た表の行数** | `tempTableMaxRows`（既定 10,000 行） | `TempTableRowLimitError`（表は**登録しません**） |
+| 残っている一時テーブルの行数の**合計** | `tempTablesMaxTotalRows`（既定なし） | `TempTableTotalLimitError` |
+
+**集計して 1 行しか残さない文は、読む量が上限に収まれば通ります**
+（v3.92.0 までは `tempTableMaxRows` が読み取りの上限を兼ねていたため、
+`COUNT(*)` や `GROUP BY` でも**読んだ件数**で止まりました）。
+JOIN・UNION・CTE・`GENERATE_SERIES` で**増えた行**も `tempTableMaxRows` の対象です（v3.92.0 までは通っていました）。
+**上限ちょうどの行数**（500 の倍数を含む）の表も作れます
+（上限で止まったときだけ 1 件の軽い取得で「ちょうど」と「超過」を区別します。上限は 1 件も超えません）。
+`maxRecords` を低く固定している呼び側（MCP・CLI は既定 500）で大きい表を作るときは、
+**`tempTableReadMaxRecords`** を使うと明細の SELECT の上限を上げずに実体化だけ通せます。
+**MCP と CLI は `max(maxRecords, tempTableMaxRows ?? 10,000)` を内部で常に渡します**
+（＝v3.92.0 と同じ読む量。利用者は `maxRecords` か `tempTableMaxRows` を動かします）。
 
 > **`LIMIT`と`maxRecords`は別の値です:** `LIMIT`は返却行数、`maxRecords`は候補取得数を制御します。`LIMIT`を省略しても無制限にはならず、上表の入口別`maxRecords`が適用されます。
 
@@ -2286,6 +2310,9 @@ SELECT * FROM APP100 ORDER BY 作成日時 DESC LIMIT 20 OFFSET 40
 > **ORDER BYと取得上限（v3.0.0）:** ローカル`ORDER BY`は正しいtop-Nのため完全な候補集合を必要とします。上限到達時に`onLimit=truncate`で部分候補を並べ替えて返さず、エラーにします。`CANONICAL_REST_TOP_N`（初期allowlistは`$id`のみ）と`KORDER_NATIVE`は単発REST窓なので、この完全入力エラーの対象外です。
 
 > **集計・重複排除と取得上限:** 通常集計（`COUNT` / `SUM` / `AVG` / `MIN` / `MAX` など）、plain `GROUP BY`、`SELECT DISTINCT`、`UNION`（`ALL` なし）は完全な候補集合を必要とします。上限到達時は`onLimit=truncate`でも部分集合を畳んだ値を返さず、エラーにします。従来成功して見えた場合も結果は正しくありません（実測では、真の件数が3のlocal `LIKE` + `COUNT(*)`が`maxRecords=3`で`0`を返しました）。素の明細と`UNION ALL`は従来どおり取得行と警告を返します。完全押し下げ可能な`COUNT(*)`の単発`totalCount`取得はレコード本体を打ち切らないため、この制限の対象外です。
+この近道は**文としての`SELECT`・`UNION`の枝・`ASSERT` / `EXIT SUCCESS IF` / `SET`のスカラーサブクエリ・`CREATE TEMP TABLE … AS SELECT`の元**で効きます（v3.93.0〜。B207）。
+いずれも**終端**＝呼び側が必要とするのは件数（1 行）だけで、元レコードを使わない位置です。
+`ASSERT (SELECT COUNT(*) FROM APPn) <= N`で**読む前に件数で止める**書き方が、全件取得なしで使えます。
 
 > **SIMPLE モード（JOIN なし）:** `ORDER BY`のREST押し下げはLIMIT値だけで決めず、schema-aware plannerがWHERE・型・query形状・窓全体を検査します。それ以外は全候補取得後にcanonical順を適用します。
 > **FULL_SCAN モード（JOIN あり等）:** JS 側でスライス処理します。
@@ -4261,6 +4288,9 @@ SELECT * FROM APP100 WHERE $id IN @ids;
 - 要素は**文字列**だけです（`DECLARE @ids = [1];` は構文エラー）。`$id` や数値フィールドとの比較は `SET` の配列と同じ規則で、`in ("311")` の形で押し下げます。
 - 注入は **`/flow` の `variables`** だけが配列を受けます（CLI の `--var` と MCP の `variables` は従来どおり文字列）。
 - 保存時の検査などで「この `DECLARE` は配列か」を見分けるときは、AST の `default.type === "ARRAY"` を見てください。
+- **数値で宣言した変数**（既定値が数値リテラル・数値算術・数値を返す関数）は、`ASSERT` / `EXIT SUCCESS IF` の
+  大小比較で**数値として**比べます。注入する値も**十進として読めるか**を実行開始前に確かめます
+  （`"1e3"` は可・`"0x10"` や `"たくさん"` は `ArgumentError`。v3.93.0〜。→ [§26 ASSERT](#26-assert) の「大小比較の型」）。
 
 スカラーの変数は **`ASSERT` / `EXIT SUCCESS IF` のメッセージ**にも書けます（v3.90.0〜。§27.2）。
 利用者の言語で解決した文を注入すれば、同じ SQL のままメッセージだけ差し替えられます。
@@ -4443,7 +4473,30 @@ ASSERT <式> BETWEEN <式> AND <式>;
 
 - 比較演算子: `=` `<>` `!=` `<` `<=` `>` `>=` および `BETWEEN`（境界を含む）
 - 式に使えるもの: **リテラル**（数値・文字列）、**算術式**（数値リテラルのみ）、**スカラーサブクエリ**（`(SELECT ...)`。APP・一時テーブルとも参照可）、**バッチ変数**（`@名前`。→ [§25 バッチ変数](#25-バッチ実行と一時テーブル)）
-- 比較の型規則は WHERE 句と同一（`=` / `<>` は文字列比較、大小比較は双方が数値なら数値比較）。**数値かどうかは値の出どころで決まります**: 数値リテラル・算術式・数値の `@変数`・`COUNT` / `SUM` / `AVG` 等の数値集計サブクエリ＝数値。文字列リテラル・文字列の `@変数`（外部注入含む）＝文字列（辞書順。ISO 日付文字列の比較はこちら）。片方でも文字列なら辞書順です（v3.72.0 で大小比較がこの規則どおりに修正されました。それ以前は数値集計サブクエリの大小比較が辞書順になる不具合があります）
+- 比較の型規則は WHERE 句と同一（`=` / `<>` は文字列比較、大小比較は双方が数値なら数値比較）。**数値かどうかは値の出どころで決まります**（値は見ません）。下の「大小比較の型」が正本です
+
+### 大小比較の型（`ASSERT` / `EXIT SUCCESS IF`。v3.93.0〜）
+
+`<` `<=` `>` `>=` `BETWEEN` は、**両辺が数値のときだけ数値**で比べます。文字列どうしは辞書順です
+（ISO の日付を比べる形はそのまま）。
+
+| 書き方 | 判定 |
+|---|---|
+| `(SELECT COUNT(*) FROM APPn) <= 10000` | 数値（集計は数値） |
+| `(SELECT 数値項目 FROM APPn WHERE $id = 1) <= 100` | **数値**（項目の型で判定。v3.92.0 までは辞書順でした） |
+| `(SELECT 件数 FROM #cnt) <= 10000`（一時テーブルに入れた集計） | **数値**（元の列の型を引き継ぎます） |
+| `(SELECT $id …) <= 100` / `(SELECT $revision …)` | 数値（システム項目の型どおり） |
+| `DECLARE @limit = 10000;` … `<= @limit` | **数値**（**数値で宣言**した変数。`10 + 5`・`ABS(15)` も数値。注入した値も数値として検証します） |
+| `DECLARE @limit = '10000';` … `<= @limit` | **エラー**（数値と文字列の混在。辞書順に落としません） |
+| `(SELECT 文字列項目 …) <= '2026-01-01'` | 文字列（辞書順） |
+| `(SELECT 日付項目 …)` / 選択肢の項目 | 文字列（数値に昇格しません） |
+
+**数値と文字列が混ざった大小比較はエラーで止まります**（fail-closed）。
+v3.92.0 までは辞書順に落ちていたため、`件数 12` と上限 `'2'` の比較が**成立してしまう**（件数ゲートが素通りする）
+一方、上限 `'10000'` との比較は**成立しない**（止まるべきでないのに止まる）という誤判定がありました。
+数値として比べたいときは**数値リテラル**（`<= 10000`）か、**数値で宣言した変数**を使ってください。
+等値（`=` / `!=`）と空文字の比較（`WHERE` と同じ −∞ 扱い）は**今までどおり**です
+（v3.72.0 で数値集計サブクエリの大小比較を直し、v3.93.0 で項目の型と変数の型まで広げました）。
 
 ```sql
 -- 典型例1: UPDATE 前の件数ガード
@@ -4681,8 +4734,9 @@ KEY (顧客コード);
 ### 27.9 公式 API `/flow` の実行上限オプション
 
 - **読取上限 `maxRecords`（既定 10,000）**: 文単位の読取候補行数上限。`createExecutionContext` の options で指定し、`executeStatement`／`previewStatement` は同じ実行コンテキストの値を共有します。`explainScript` は自身の options の `maxRecords` を使います（実行・preview・EXPLAIN の 3 面で同値・実測 v3.72.0）
-- **一時テーブル実体化上限 `tempTableMaxRows`（既定 10,000・独立）**: 超過は `onLimitReached` にかかわらず常にエラーです。`maxRecords` だけ引き上げても 10,000 行超の実体化は停止するため、実体化を伴うバッチでは両方を併せて指定してください（例: `{ maxRecords: 25000, tempTableMaxRows: 25000 }`）。注意: 実際に止めているのは実体化の**読取**（1 回の読取ごと）で、出来た表の行数は確かめません。JOIN・UNION・CTE・`GENERATE_SERIES`・FROM の無い SELECT・別の一時テーブルからの SELECT は、この値を超える行数の表を作れます（B197）。集計は、出来る行数が少なくても読む行数で止まります
-- **一時テーブルの合計の上限 `tempTablesMaxTotalRows`（省略時は上限なし・v3.87.0〜）**: いま残っている一時テーブル（`CREATE TEMP TABLE` と、`VALIDATE` / `ON ERROR SKIP` の `INTO` のエラー表）の行数の合計の上限です。`DROP TEMP TABLE` で外した表は数えません。どの形の SELECT でも**出来た行数**で数え、表の登録・エラー表への追加の前に止めます（超える文は `error.code = "TempTableTotalLimitError"`・表は登録・追加しない・書込 0 回・後続は fail-fast）。あわせて `CREATE TEMP TABLE` の読取を `min(tempTableMaxRows, 合計の残り)` で途中で止めます（集計なども読む行数で数えます）。文の結果の `metrics.tempTableRows` に、文が終わった時点の合計が入ります
+- **一時テーブル実体化上限 `tempTableMaxRows`（既定 10,000・独立）**: **出来た表の行数**の上限です（v3.93.0〜。B197）。超過は `onLimitReached` にかかわらず常にエラー（`error.code = "TempTableRowLimitError"`）で、表は**登録しません**。JOIN・UNION・CTE・`GENERATE_SERIES`・FROM の無い SELECT・別の一時テーブルからの SELECT で**増えた行**も対象です（v3.92.0 までは読取の上限を兼ねていたため、これらは通っていました）。**集計して 1 行しか残さない文は、読む量が収まれば通ります**
+- **実体化の読取上限 `tempTableReadMaxRecords`（省略時は `maxRecords`。どちらも省略したときだけ `max(10,000, tempTableMaxRows)`。v3.93.0〜）**: `CREATE TEMP TABLE` の元の SELECT が**読む件数**の上限です。超過は `FetchAllLimitError`（効いている上限の名前で案内します）。**明細の SELECT の上限は上がりません**（実体化だけに効きます）。MCP・CLI は `max(maxRecords, tempTableMaxRows ?? 10,000)` を内部で常に渡すので、どちらの面でも v3.92.0 と同じ量を読みます。**上限ちょうどの行数**（500 の倍数を含む）は、上限で止まったときだけ 1 件の軽い取得で「ちょうど」と「超過」を区別して通します（上限は 1 件も超えません）。3 つの上限の表は [§11 LIMIT / OFFSET](#11-limit--offset) にあります
+- **一時テーブルの合計の上限 `tempTablesMaxTotalRows`（省略時は上限なし・v3.87.0〜）**: いま残っている一時テーブル（`CREATE TEMP TABLE` と、`VALIDATE` / `ON ERROR SKIP` の `INTO` のエラー表）の行数の合計の上限です。`DROP TEMP TABLE` で外した表は数えません。どの形の SELECT でも**出来た行数**で数え、表の登録・エラー表への追加の前に止めます（超える文は `error.code = "TempTableTotalLimitError"`・表は登録・追加しない・書込 0 回・後続は fail-fast）。あわせて `CREATE TEMP TABLE` の読取を `min(読取上限, 合計の残り)` で途中で止めます（集計なども読む行数で数えます）。文の結果の `metrics.tempTableRows` に、文が終わった時点の合計が入ります
 - **値の上限は設けていません**（正の整数を受理）。ただし読取は fetch-all 方式で候補行が全件メモリに載るため、「受理される」ことと「その規模で動作が実測済みである」ことは別です。大きな値を常用する場合は、呼び出し側（ランナー等）で運用上の上限を検証することを推奨します
 
 ---

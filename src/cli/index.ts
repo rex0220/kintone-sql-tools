@@ -34,6 +34,7 @@ import {
 } from "../core";
 import {
   getSelectColumnMeta,
+  materializeReadMaxRecords,
   withBatchCompletionObserver,
   withNativeUpsertExecutionOption,
   type BatchCompletionObserver,
@@ -2735,6 +2736,10 @@ async function run(): Promise<number> {
         cacheContext,
         continueOnError: args.continueOnError,
         tempTableMaxRows,
+        // B197 / 依頼 KJ-11 の ②: CLI も `maxRecords` を常に渡す（既定 500）ので、
+        // 実体化の読取だけ v3.92.0 と同じ量（`max(maxRecords, tempTableMaxRows)`）を保つ。
+        // 明細の SELECT の上限は `maxRecords` のまま。
+        tempTableReadMaxRecords: materializeReadMaxRecords(maxRecords, tempTableMaxRows),
         timeoutMs: timeout,
         captureColumnMeta: exportPlan !== null,
         cursorMaxActive,

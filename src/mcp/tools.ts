@@ -17,6 +17,7 @@ import {
   type KintoneClient,
   type SelectResult,
   statementHasApplyBlocks,
+  materializeReadMaxRecords,
 } from "../core";
 import { buildBatchEnvelope } from "../output/batchEnvelope";
 import type { AppBinding } from "../node/appProfiles";
@@ -785,6 +786,8 @@ export function createKsqlMcpTools(
       });
       let batchResult = await executeBatchSql(runtime.sql, runtime.client, {
         maxRecords: runtime.maxRecords,
+        // B197: 実体化の読取だけ v3.92.0 と同じ上限に保つ（この面の公開の契約）
+        tempTableReadMaxRecords: materializeReadMaxRecords(runtime.maxRecords, runtime.tempTableMaxRows),
         fetchParallel: runtime.fetchParallel,
         onLimitReached: runtime.onLimit,
         cacheContext: runtime.cacheContext,
@@ -943,6 +946,7 @@ export function createKsqlMcpTools(
     let totalAffected = staticInsertTotal;
     const batchResult = await executeBatchSql(runtime.sql, runtime.client, {
       maxRecords: runtime.maxRecords,
+      tempTableReadMaxRecords: materializeReadMaxRecords(runtime.maxRecords, runtime.tempTableMaxRows),
       fetchParallel: runtime.fetchParallel,
       onLimitReached: runtime.onLimit,
       cacheContext: runtime.cacheContext,

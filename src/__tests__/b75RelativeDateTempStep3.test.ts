@@ -237,8 +237,9 @@ describe("B75 Step 3 temporary-table relative dates", () => {
       const literal = await executeBatch(literalSql, makeClient().client, options);
       expect(relative.ok).toBe(false);
       expect(literal.ok).toBe(false);
+      // B197（v3.93.0〜）: tempTableMaxRows は読取ではなく**出来た表の行数**の上限になった
       expect(relative.statements[0].error?.message)
-        .toMatch(/取得件数が上限（2 件）を超えました/);
+        .toMatch(/一時テーブル 1 つの上限（2 行）を超えるため/);
       expect(literal.statements[0].error?.message)
         .toBe(relative.statements[0].error?.message);
     }

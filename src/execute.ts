@@ -68,6 +68,8 @@ import type { ProcessStatusState } from "./core/processStatus";
 import type { NumberPrecision } from "./core/numberPrecision";
 import {
   DEFAULT_VARIABLE_ARRAY_MAX_ELEMENTS,
+  isNumericVariableDeclaration,
+  isNumericVariableText,
   validateDeclaredBatchVariables,
   type BatchVariableInput,
 } from "./core/batchVariables";
@@ -1831,6 +1833,25 @@ async function executeExistingRecordValidationCore(
 /** 一時テーブル1個の実体化行数上限（仕様 §5.6）。onLimitReached は適用せず常に error */
 export const TEMP_TABLE_MAX_ROWS = 10_000;
 
+/**
+ * B197 / 依頼 KJ-11 の ②: **`maxRecords` を常に解決して渡す面**（MCP・CLI）が
+ * `tempTableReadMaxRecords` に渡す値。
+ *
+ * エンジンは v3.93.0 から「`CREATE TEMP TABLE` の読む件数の上限は（明示した）`maxRecords`」になった。
+ * MCP と CLI は `maxRecords` を**常に**渡す（どちらも既定 500）ので、そのままだと
+ * 「`tempTableMaxRows` だけ上げて 10,000 行超を実体化する」という**両方の面の公開の契約**が
+ * 500 件で止まる。そこで**実体化のための読取だけ**、`tempTableMaxRows` が大きいときは
+ * そこまで読めるようにする（v3.92.0 までとまったく同じ読む量）。
+ * 明細の SELECT の上限は `maxRecords` のまま上がらない。
+ */
+export function materializeReadMaxRecords(
+  maxRecords: number,
+  tempTableMaxRows: number | undefined
+): number {
+  // 未指定のときもエンジン既定（10,000）で数える＝**v3.92.0 とまったく同じ読む量**にする
+  return Math.max(maxRecords, tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS);
+}
+
 export interface BatchExecuteOptions extends ExecuteOptions {
   /**
    * DECLARE されたバッチ変数の外部注入値（キーは @ なし、大文字小文字を区別しない）。
@@ -1853,7 +1874,15 @@ export interface BatchExecuteOptions extends ExecuteOptions {
   continueOnError?: boolean;
   /** バッチ合計のタイムアウト（ミリ秒）。到達時: 実行中の文 = error(TimeoutError)、未実行の文 = skipped("timeout") */
   timeoutMs?: number;
-  /** 一時テーブル実体化の行数上限（既定 TEMP_TABLE_MAX_ROWS） */
+  /**
+   * B197: `CREATE TEMP TABLE … AS SELECT` の**元の読み取り**だけに効く上限（省略時は `maxRecords`）。
+   *
+   * `maxRecords` を低く固定している面（MCP・CLI は既定 500）で、
+   * 「`tempTableMaxRows` だけ上げて大きい表を作る」という既存の契約を保つために足した。
+   * 明細の SELECT や DML のソースの上限は `maxRecords` のまま。
+   */
+  tempTableReadMaxRecords?: number;
+  /** 一時テーブル実体化の**出来た表の行数**の上限（既定 TEMP_TABLE_MAX_ROWS） */
   tempTableMaxRows?: number;
   /**
    * B196: いま残っている一時テーブル（CREATE TEMP TABLE とエラー表）の行数の合計の上限。
@@ -1873,6 +1902,22 @@ export interface BatchStatementError {
   readonly cause?: unknown;
   /** Already committed prefix of a non-transactional APPLY statement. */
   partialSuccess?: ApplyWriteFailureDetail;
+}
+
+/**
+ * B197 / 依頼 KJ-11 の ②: **出来た一時テーブルの行数**が 1 表の上限（`tempTableMaxRows`）を超えたことを表す。
+ *
+ * これまでは `tempTableMaxRows` を**読み取りの上限として** `maxRecords` に差し替えていたため、
+ * ①集計して 1 行しか残さない文でも**読んだ件数**で止まり、
+ * ②止めた上限の名前（`tempTableMaxRows`）ではなく「`maxRecords` を引き上げてください」と案内し、
+ * ③JOIN・UNION で**出来た表が上限を超えても通る**（資料の約束が効いていない）という 3 つのずれがあった。
+ * 役割を分けた＝**読む量は `maxRecords`・出来た表の行数は `tempTableMaxRows`**。
+ */
+export class TempTableRowLimitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TempTableRowLimitError";
+  }
 }
 
 /** B196: 一時テーブルの合計の上限を超える登録・追加・読取を止めたことを表す。 */
@@ -1933,7 +1978,13 @@ function appendValidationErrors(
   }
   const existingRows = current?.rows ?? [];
   if (existingRows.length + rows.length > maxRows) {
-    throw new Error(`ArgumentError: temp table ${name} exceeds max rows (${maxRows}).`);
+    // B197 / 3 回目のレビューの MINOR: CTAS と**同じ型・同じ言い方**にする
+    // （同じ `tempTableMaxRows` の超過なのにエラーの名前が 2 系統あると、呼び側の文の出し分けが二重になる）
+    throw new TempTableRowLimitError(
+      `TempTableRowLimitError: ${name} の行数（${existingRows.length + rows.length} 行）が`
+      + `一時テーブル 1 つの上限（${maxRows} 行）を超えるため、追加しませんでした。`
+      + "WHERE 句や GROUP BY で行数を減らすか、tempTableMaxRows を引き上げてください。"
+    );
   }
   assertTempTableTotalRows(tempTables, name, existingRows.length + rows.length, maxTotalRows);
   // schema・件数を先に検査し、既存値を変更せず単一setで反映する。
@@ -1989,7 +2040,12 @@ export interface BatchExecuteResult {
 }
 
 type VarValue =
-  | { type: "string"; value: string; placeholder?: true }
+  /**
+   * B209: `numericProvenance` は「**数値リテラルで宣言した**変数（または宣言に合わせて検証した注入値）」の印。
+   * 値は文字列のまま持ち、**置換後の AST も STRING のまま**にする＝`WHERE` の押し下げ・クエリの組み立て・
+   * 書き込みの形を 1 つも変えないため。大小比較の数値・文字列の判定（`ASSERT` / `EXIT`）だけで使う。
+   */
+  | { type: "string"; value: string; placeholder?: true; numericProvenance?: true }
   | { type: "number"; value: number; raw?: string }
   | { type: "relative-date"; value: KintoneFunction }
   | { type: "array"; elements: Array<{ type: "string"; value: string }> };
@@ -2903,12 +2959,16 @@ export async function executeBatchStatement(
       return {};
     }
     const injected = options.variables ?? {};
+    // B209: **数値になる式で宣言した**変数は、**数値として比べる**印を付ける（値は文字列のまま）。
+    // 判定は注入の検証（validateDeclaredBatchVariables）と同じ 1 つの関数に委ねる。
+    const numericDeclaration = isNumericVariableDeclaration(stmt);
     if (Object.prototype.hasOwnProperty.call(injected, stmt.name)) {
       const value = injected[stmt.name];
-      // B203: 宣言と注入の種類の一致は validateDeclaredBatchVariables が実行開始前に確かめている。
+      // B203 / B209: 宣言と注入の種類の一致（配列・数値）は
+      // validateDeclaredBatchVariables が実行開始前に確かめている。
       variables.set(stmt.name, Array.isArray(value)
         ? { type: "array", elements: value.map((element) => ({ type: "string" as const, value: element })) }
-        : { type: "string", value: value as string });
+        : { type: "string", value: value as string, ...(numericDeclaration ? { numericProvenance: true } : {}) });
     } else if (stmt.default.type === "ARRAY") {
       variables.set(stmt.name, {
         type: "array",
@@ -2919,9 +2979,13 @@ export async function executeBatchStatement(
         stmt.default as Exclude<ScalarExpr, ScalarSubquery>,
         clock
       );
+      const text = value.type === "number" ? (value.raw ?? String(value.value)) : value.value;
       variables.set(stmt.name, {
         type: "string",
-        value: value.type === "number" ? (value.raw ?? String(value.value)) : value.value,
+        value: text,
+        // 「印がある値は十進として読める」を保つ（注入は検証済み、既定値はここで確かめる）。
+        // 読めない値（CAST('abc' AS NUMBER) など）は印を付けず、混在の比較としてエラーにする。
+        ...(numericDeclaration && isNumericVariableText(text) ? { numericProvenance: true as const } : {}),
       });
     }
     return {};
@@ -3016,27 +3080,89 @@ export async function executeBatchStatement(
     //（truncate による暗黙の欠損が後続文の結果を静かに歪めるため。仕様 §5.6）
     const tableMaxRows = options.tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS;
     const totalMaxRows = options.tempTablesMaxTotalRows;
-    // B196: 合計の残りが 1 表の上限より小さければ、読取をその残りで止める（読む行数で数える）。
+    // B197 / 依頼 KJ-11 の ②: **読む量と出来た表の行数を分ける**。
+    //
+    // v3.92.0 までは `tempTableMaxRows` を**読み取りの上限として** `maxRecords` に差し替えていた。
+    // そのため ①集計して 1 行しか残さない文でも**読んだ件数**で止まり、
+    // ②効いていない上限（`maxRecords`）の名前で案内し、
+    // ③JOIN・UNION で**出来た表が上限を超えても通る**（資料の約束が効かない）という 3 つのずれがあった。
+    //
+    // **読む量の上限は `maxRecords`**。**明示した値は必ず効く**。
+    // 省略したときだけ `max(既定 10,000, tempTableMaxRows)` に委ねる＝
+    // `tempTableMaxRows` だけ上げて大きい表を作る使い方（README の例・ksql-flow・ジョブ実行）を保つため。
+    // **出来た表の行数**は読み終わった後に `tempTableMaxRows` で確かめる（下の TempTableRowLimitError）。
+    const explicitMaxRecords = options.maxRecords;
+    const materializeReadLimit = (options as BatchExecuteOptions).tempTableReadMaxRecords;
+    const baseReadLimit = materializeReadLimit
+      ?? explicitMaxRecords
+      ?? Math.max(10_000, tableMaxRows);
+    /** 読む量の上限がどの設定から来たか（エラー文で効いている上限の名前を言うため）。 */
+    const readLimitSource = materializeReadLimit !== undefined
+      ? "tempTableReadMaxRecords"
+      : explicitMaxRecords === undefined && tableMaxRows > 10_000
+      ? "tempTableMaxRows"
+      : "maxRecords";
+    const callerMaxRecords = baseReadLimit;
+    // B196: 合計の残りが読む量の上限より小さければ、読取をその残りで止める（読む行数で数える）。
     const remainingRows = totalMaxRows === undefined
       ? undefined
       : totalMaxRows - tempTableRowTotal(tempTables, resolvedStmt.name);
-    const readLimit = remainingRows === undefined ? tableMaxRows : Math.min(tableMaxRows, Math.max(remainingRows, 1));
+    const totalRemainingLimit = remainingRows === undefined ? undefined : Math.max(remainingRows, 1);
+    const limitedByTotal = totalRemainingLimit !== undefined && totalRemainingLimit < baseReadLimit;
+    const readLimit = limitedByTotal ? totalRemainingLimit! : baseReadLimit;
     const materializeOptions: ExecuteOptions = {
       ...options,
+      // 読む量の上限は**そのまま**渡す（1 件多く読んで区別する形は、上限 + 1 件ちょうどの
+      // 元データで上限を 1 件破るため撤回した。上限ちょうどの区別は `fetchAll` が
+      // 1 件の probe で行う）。
       maxRecords: readLimit,
       onLimitReached: "error",
     };
     let result: SelectResult;
     try {
-      result = await runSelectLike(resolvedStmt.query, client, materializeOptions, cacheContext, tempTables);
+      // B207: 一時テーブルに入るのは**集計後の行**で、下流が読むのはその表（元レコードではない）。
+      // `COUNT(*)` だけの元 SELECT は近道（totalCount・limit 1 の 1 回）に乗せる。
+      // UNION の枝は `executeUnion` が印を付けるので、ここで見るのは素の SELECT だけ。
+      const source = resolvedStmt.query.type === "SELECT"
+        ? markCountTotalCountRoot(resolvedStmt.query)
+        : resolvedStmt.query;
+      result = await runSelectLike(source, client, materializeOptions, cacheContext, tempTables);
     } catch (error) {
-      if (readLimit < tableMaxRows && error instanceof Error && error.name === "FetchAllLimitError") {
+      if (limitedByTotal && error instanceof Error && error.name === "FetchAllLimitError") {
         throw new TempTableTotalLimitError(
           `TempTableTotalLimitError: 一時テーブルの合計の残り（${remainingRows} 行・上限 ${totalMaxRows} 行）を超える読取のため、`
           + `${resolvedStmt.name} の実体化を止めました。集計なども読む行数で数えます。DROP TEMP TABLE で使い終わった表を外すか、上限を引き上げてください。`
         );
       }
+      // 依頼 KJ-11 の ②: 効いている上限の名前を言う。`tempTableMaxRows` のほうが大きくて
+      // そこで止まったときに「maxRecords を引き上げてください」と案内していた。
+      if (error instanceof Error && error.name === "FetchAllLimitError") {
+        // 効いている上限の名前を言う（依頼 KJ-11 の ②）。
+        throw readLimitSource === "tempTableMaxRows"
+          ? new TempTableRowLimitError(
+              `TempTableRowLimitError: ${resolvedStmt.name} の実体化のための読取が、一時テーブル 1 つの上限`
+              + `（${tableMaxRows} 行・tempTableMaxRows）を超えました。`
+              + "WHERE 句で絞り込むか、tempTableMaxRows を引き上げてください。"
+            )
+          : new FetchAllLimitError(
+              `取得件数が上限（${callerMaxRecords} 件）を超えました。`
+              // `tempTableReadMaxRecords` は MCP・CLI が内部で渡す口なので、
+              // 名前だけ言っても利用者は動かせない。**利用者が動かせる設定**も添える。
+              + (readLimitSource === "tempTableReadMaxRecords"
+                ? "WHERE 句で絞り込むか、実体化の読み取りの上限（tempTableReadMaxRecords。"
+                  + "MCP・CLI では maxRecords と tempTableMaxRows の大きいほうが入ります）を引き上げてください。"
+                : `WHERE 句で絞り込むか、${readLimitSource} を引き上げてください。`)
+            );
+      }
       throw error;
+    }
+    // B197: **出来た表の行数**を 1 表の上限で確かめる（JOIN・UNION・CTE・GENERATE_SERIES で増えた行も対象）。
+    if (result.rows.length > tableMaxRows) {
+      throw new TempTableRowLimitError(
+        `TempTableRowLimitError: ${resolvedStmt.name} の行数（${result.rows.length} 行）が`
+        + `一時テーブル 1 つの上限（${tableMaxRows} 行）を超えるため、登録しませんでした。`
+        + "WHERE 句や GROUP BY で行数を減らすか、tempTableMaxRows を引き上げてください。"
+      );
     }
     assertTempTableTotalRows(tempTables, resolvedStmt.name, result.rows.length, totalMaxRows);
     tempTables.set(resolvedStmt.name, {
@@ -3592,6 +3718,26 @@ function undefinedBatchVariableMessage(name: string, location: string): string {
     : `ParseError: @NOW() などの as-of 関数は基準時刻が初期化されていません。`;
 }
 
+/**
+ * B209: 数値リテラルで宣言した変数から作った STRING ノードを覚える。
+ *
+ * 公開の AST（`StringLiteral`）にキーを足さず、**ノードの同一性**で持つ
+ * （`countTotalCountRootSelects` と同じ仕組み）。置換で毎回新しいノードを作るので衝突しない。
+ * 使うのは `ASSERT` / `EXIT` の大小比較の数値・文字列の判定だけで、
+ * クエリの組み立て・押し下げ・書き込みは 1 つも変わらない。
+ */
+const numericVariableLiterals = new WeakSet<object>();
+
+function markNumericVariableLiteral<T extends object>(node: T, numeric: boolean): T {
+  if (numeric) numericVariableLiterals.add(node);
+  return node;
+}
+
+/** B209: その STRING ノードが数値リテラルで宣言した変数由来か。 */
+function isNumericVariableLiteral(node: unknown): boolean {
+  return typeof node === "object" && node !== null && numericVariableLiterals.has(node);
+}
+
 function resolveBatchVariableReferencesInternal<T>(
   node: T,
   variables: Map<string, VarValue>,
@@ -3634,7 +3780,10 @@ function resolveBatchVariableReferencesInternal<T>(
               ? `@${obj["name"]}`
               : value.raw ?? String(value.value),
           }
-        : { type: "STRING", value: value.value, fromVariable: true }) as T;
+        : markNumericVariableLiteral(
+            { type: "STRING", value: value.value, fromVariable: true },
+            value.numericProvenance === true
+          )) as T;
     }
     if (obj["type"] === "VARIABLE_COL" && typeof obj["name"] === "string"
         && (typeof obj["alias"] === "string" || obj["alias"] === null)) {
@@ -3865,9 +4014,15 @@ async function evaluateAssertCondition(
     const low  = await evalAssertOperand(stmt.low,  client, options, cacheContext, tempTables);
     const high = await evalAssertOperand(stmt.high, client, options, cacheContext, tempTables);
     // WHERE の BETWEEN と同じ >= AND <= 展開
+    const lowSemantics = assertComparisonSemantics(left, low, {
+      op: "BETWEEN", leftText: left.value, rightText: low.value,
+    });
+    const highSemantics = assertComparisonSemantics(left, high, {
+      op: "BETWEEN", leftText: left.value, rightText: high.value,
+    });
     return {
-      passed: compareScalarValues(">=", left.value, low.value, assertComparisonSemantics(left, low))
-        && compareScalarValues("<=", left.value, high.value, assertComparisonSemantics(left, high)),
+      passed: compareScalarValues(">=", left.value, low.value, lowSemantics)
+        && compareScalarValues("<=", left.value, high.value, highSemantics),
       actual: left.value,
     };
   }
@@ -3880,7 +4035,9 @@ async function evaluateAssertCondition(
     ? (stmt.left.type === "NUMBER" || stmt.left.type === "ARITH"
       ? syntheticSemantics("number")
       : syntheticSemantics("string"))
-    : assertComparisonSemantics(left, right);
+    : assertComparisonSemantics(left, right, {
+      op: stmt.op, leftText: left.value, rightText: right.value,
+    });
   return {
     passed: compareScalarValues(stmt.op, left.value, right.value, semantics),
     actual: left.value,
@@ -3892,11 +4049,36 @@ type EvaluatedAssertOperand = {
   semantics: "number" | "string";
 };
 
+/**
+ * B209: 大小比較（`<` `<=` `>` `>=` `BETWEEN`）の数値・文字列の判定。
+ *
+ * **数値と文字列が混ざった比較は辞書順に落とさず、エラーで止める**（fail-closed）。
+ * B171 は混在を文字列比較にしていたので、`ASSERT (SELECT COUNT(*) …) <= @limit`（`@limit` は
+ * 文字列の宣言や注入）が**桁の違いで黙って誤判定**した（件数 12 と上限 "2" で成立＝fail-open、
+ * 上限 "10000" で不成立＝止まるべきでないのに止まる）。件数ゲートは黙って誤るより止めるのが正しい。
+ *
+ * 数値として比べたいときは**数値リテラル**（`<= 10000`）か、**数値リテラルで宣言した変数**
+ * （`DECLARE @limit = 10000;` ＋ 注入。B209）を使う。
+ */
 function assertComparisonSemantics(
   left: EvaluatedAssertOperand,
-  right: EvaluatedAssertOperand
+  right: EvaluatedAssertOperand,
+  context: { op: string; leftText: string; rightText: string }
 ): ResolvedFieldSemantics {
-  return syntheticSemantics(left.semantics === "number" && right.semantics === "number" ? "number" : "string");
+  // **空文字は除外**＝「値が無い」の比較には定義済みの規則がある（`WHERE` と同じ −∞ 扱い。
+  // `ASSERT '' < -1000000` が成立する形）。辞書順でも同じ答えになるので、今までの判定を保つ。
+  if (left.semantics !== right.semantics && left.value !== "" && right.value !== "") {
+    const numericSide = left.semantics === "number" ? "左" : "右";
+    const stringSide = left.semantics === "number" ? "右" : "左";
+    throw new Error(
+      `ArgumentError: ${context.op} の大小比較で数値と文字列を比べています`
+      + `（${numericSide}辺は数値「${left.semantics === "number" ? context.leftText : context.rightText}」、`
+      + `${stringSide}辺は文字列「${left.semantics === "number" ? context.rightText : context.leftText}」）。`
+      + "辞書順で比べると桁の違いで誤判定するため止めました。"
+      + "数値リテラル（例: <= 10000）か、数値リテラルで宣言した変数（DECLARE @limit = 10000;）を使ってください。"
+    );
+  }
+  return syntheticSemantics(left.semantics === "number" ? "number" : "string");
 }
 
 /** ASSERT のオペランドを値と provenance に評価する（サブクエリは 1行1列を実行時検証） */
@@ -3911,7 +4093,11 @@ async function evalAssertOperand(
     case "VARIABLE":
       throw new Error(`ParseError: unresolved batch variable @${operand.name}.`);
     case "NUMBER": return { value: numberLiteralText(operand), semantics: "number" };
-    case "STRING": return { value: operand.value, semantics: "string" };
+    case "STRING": return {
+      value: operand.value,
+      // B209: 数値リテラルで宣言した変数（`DECLARE @limit = 10000` と、その注入値）は数値として比べる
+      semantics: isNumericVariableLiteral(operand) ? "number" : "string",
+    };
     case "ARITH":  return { value: String(evalAssertArith(operand)), semantics: "number" };
     case "SCALAR_SUBQUERY": {
       try {
@@ -3951,10 +4137,15 @@ async function scalarSubqueryHasNumericResult(
       && (first.func === "COUNT" || first.func === "SUM" || first.func === "AVG"
         || first.func === "STDDEV_POP" || first.func === "STDDEV_SAMP"
         || first.func === "VAR_POP" || first.func === "VAR_SAMP" || first.func === "MEDIAN"));
-  if ((first?.type === "AGGREGATE" && first.func === "MODE")
-    || (first?.type === "WINDOW_COL" && first.windowKind === "VALUE")
-    || (first?.type === "WINDOW_COL" && first.windowKind === "AGGREGATE"
-      && (first.aggFunc === "MIN" || first.aggFunc === "MAX"))) {
+  if (!numeric) {
+    // B208: 列の種類だけでは数値と分からない形（**ふつうの項目**・`MODE`・ウィンドウの一部・
+    // 一時テーブルの列など）は、**項目の型のメタデータ**で判定する。
+    //
+    // B171 は「実値推測禁止」で辞書順の fail-open を直したが、**列の種類が集計・算術・
+    // ウィンドウのときだけ**数値に昇格していたため、`(SELECT 数値項目 FROM APP…) <= 100` や
+    // `(SELECT 件数 FROM #cnt) <= 10000`（一時テーブルに入れた集計）が**文字列比較**になり、
+    // `12 <= 2` が通る（fail-open）形が残っていた（依頼 KJ-11 の ④）。
+    // **メタデータは値ではなく型**なので、「実値推測禁止」とは両立する（`MODE` の分岐が元からそうしている）。
     const meta = (await inferSelectColumnMeta(
       query, ["__scalar__"], client, cacheContext, tempTables
     )).get("__scalar__");
@@ -3972,7 +4163,13 @@ async function evaluateScalarSubquery(
   tempTables?: Map<string, MaterializedTable>
 ): Promise<string> {
   const { query, probed } = withScalarProbeLimit(sourceQuery);
-  const result = await runSubquery(query, client, options, cacheContext, tempTables);
+  // B207: スカラーサブクエリは**終端**＝呼び側が要るのは値 1 つだけで、元レコードは要らない。
+  // B105（UNION の枝）と同じ理由で `COUNT(*)` の近道（totalCount・limit 1 の 1 回）を許す。
+  // 適用の判定は変えない（`isCountStarTotalCountEligible` ＋ WHERE が完全に押し下がること）。
+  // 依頼 KJ-11 の ①＝ここに印が無いせいで、計画は近道と表示するのに実行は全件読んでいた。
+  const result = await runSubquery(
+    markCountTotalCountRoot(query), client, options, cacheContext, tempTables
+  );
   if (result.columns.length !== 1) {
     throw new ScalarSubqueryError(
       `scalar subquery returned ${result.columns.length} columns (expected 1 column).`
@@ -6525,6 +6722,19 @@ function selectNeedsSourceColumnMeta(stmt: SelectStatement): boolean {
   );
 }
 
+/**
+ * B208 の付随（3 回目のレビューの MINOR）: `$id` / `$revision` のようなシステム列だけを選ぶ SELECT では、
+ * 項目の型のメタデータ（`getFields`）を取らない。`systemColumnMeta` が型を知っているので通信が要らない。
+ * 実行時の項目の検査もシステム列だけなら `getFields` を省くので、ここで取ると**余分な 1 回**になる。
+ */
+function selectUsesOnlySystemColumns(stmt: SelectStatement): boolean {
+  if (stmt.columns.length === 0) return false;
+  return stmt.columns.every((column) => {
+    if (column.type !== "FIELD") return false;
+    return systemColumnMeta(column.field) !== undefined;
+  });
+}
+
 async function inferSelectColumnMeta(
   stmt: SelectStatement,
   outputColumns: readonly string[],
@@ -6534,7 +6744,7 @@ async function inferSelectColumnMeta(
   forLibraryCapture = false
 ): Promise<MaterializedColumnMetaMap> {
   const physicalInfos = new Map<number, Map<string, KintoneFieldInfo>>();
-  if (selectNeedsSourceColumnMeta(stmt)) {
+  if (selectNeedsSourceColumnMeta(stmt) && !selectUsesOnlySystemColumns(stmt)) {
     await Promise.all(physicalSelectTables(stmt).map(async (table) => {
       if (physicalInfos.has(table.appId)) return;
       const infos = await getFieldsCached(table.appId, client, cacheContext);

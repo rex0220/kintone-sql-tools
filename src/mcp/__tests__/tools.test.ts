@@ -2374,7 +2374,8 @@ SELECT n FROM flow_rows`;
 
     expect(result.ok).toBe(false);
     expect(result.statements[0].status).toBe("error");
-    expect(result.statements[0].error?.message).toMatch(/取得件数が上限（1 件）を超えました/);
+    // B197（v3.93.0〜）: tempTableMaxRows は読取ではなく**出来た表の行数**の上限
+    expect(result.statements[0].error?.message).toMatch(/一時テーブル 1 つの上限（1 行）を超えるため/);
     expect(result.statements[1].status).toBe("skipped");
   });
 
@@ -2430,7 +2431,13 @@ SELECT n FROM flow_rows`;
       statements: Array<{ status: string; error?: { message: string } }>;
     };
     expect(defaultResult.ok).toBe(false);
-    expect(defaultResult.statements[0].error?.message).toMatch(/取得件数が上限（10000 件）を超えました/);
+    // B197（v3.93.0〜）: MCP の面は読む量を v3.92.0 と同じに保つ（tempTableReadMaxRecords）。
+    // tempTableMaxRows 未指定なら 10,000 件まで読めて、**10,001 件目で**止まる。
+    // 案内は、効いている上限の名前と**利用者が動かせる設定**の両方を出す
+    //（`tempTableReadMaxRecords` は MCP が内部で渡す口なので、それだけでは動かせない）
+    const defaultMessage = defaultResult.statements[0].error?.message ?? "";
+    expect(defaultMessage).toMatch(/取得件数が上限（10000 件）を超えました/);
+    expect(defaultMessage).toContain("maxRecords と tempTableMaxRows の大きいほう");
 
     // 指定: 10,001 行の実体化が成功する
     const toolsRaised = createKsqlMcpTools({ profile: "prod" }, makePagingDeps());
@@ -2461,7 +2468,8 @@ SELECT n FROM flow_rows`;
     // truncate で 1 行に切り詰められることはなく、実体化は常に error
     expect(result.ok).toBe(false);
     expect(result.statements[0].status).toBe("error");
-    expect(result.statements[0].error?.message).toMatch(/取得件数が上限（1 件）を超えました/);
+    // B197（v3.93.0〜）: tempTableMaxRows は読取ではなく**出来た表の行数**の上限
+    expect(result.statements[0].error?.message).toMatch(/一時テーブル 1 つの上限（1 行）を超えるため/);
   });
 
   test("query: DML 混在バッチは ksql_mutate へ誘導", async () => {
@@ -2820,7 +2828,7 @@ SELECT n FROM flow_rows`;
     expect(result.ok).toBe(false);
     expect(result.statements[0]).toMatchObject({ status: "error" });
     expect((result.statements[0].error as { message: string }).message)
-      .toMatch(/取得件数が上限（2 件）を超えました/);
+      .toMatch(/一時テーブル 1 つの上限（2 行）を超えるため/);
     expect(result.statements[1]).toMatchObject({ status: "skipped" });
     expect(calls.post).toBe(0);
   });

@@ -57,6 +57,8 @@ function makeClient(opts: MockOptions = {}): KintoneClient & {
       if (opts.failApps?.includes(params.app)) {
         throw new Error(`FetchError: mock failure for APP${params.app}`);
       }
+      // このモックは query を解釈しない（絞り込まない）ので、totalCount は返さない。
+      // 返すと「絞り込む前の件数」を COUNT(*) の近道（B94 / B207）に渡して嘘の件数になる。
       return { records: opts.recordsByApp?.[params.app] ?? [] };
     },
     async openCursor() { throw new Error("unexpected cursor call"); },
@@ -556,7 +558,7 @@ test("ON ERROR SKIP の #err 上限超過は prepared plan を書き込まない
     { cacheContext: "on-error-temp-limit", tempTableMaxRows: 0 }
   );
   expect(batch.statements[0]).toMatchObject({ status: "error" });
-  expect(batch.statements[0].error?.message).toMatch(/temp table #err exceeds max rows/);
+  expect(batch.statements[0].error?.message).toMatch(/一時テーブル 1 つの上限（0 行）を超えるため/);
   expect(client.postCalls).toHaveLength(0);
 });
 
@@ -1278,7 +1280,14 @@ test("SET スカラーサブクエリを1回だけ評価し、COUNT結果を複�
 
   expect(r.ok).toBe(true);
   expect(r.statements.map((s) => s.status)).toEqual(["success", "success", "success"]);
-  expect(client.getCalls.filter((call) => call.app === 8101)).toHaveLength(1);
+  // サブクエリの評価は 1 回（2 つの ASSERT は変数を使い回す）。
+  // B207: COUNT(*) の近道を試す GET（`limit 1` ＋ totalCount）が 1 回入る。
+  // このモックは totalCount を返さないので近道は空振りし、全件取得へ落ちる＝合わせて 2 回。
+  // 実機のクライアント（4 本とも totalCount を運ぶ）では近道が効いて 1 回で済む。
+  const calls = client.getCalls.filter((call) => call.app === 8101);
+  expect(calls).toHaveLength(2);
+  expect(calls[0].query).toBe("売上 > 0 limit 1");
+  expect(calls.filter((call) => / limit 1$/.test(call.query))).toHaveLength(1);
 });
 
 test("B64-M04: CASE 集計の型メタを CTE 後段の MIN/MAX・ORDER BY へ伝播する", async () => {

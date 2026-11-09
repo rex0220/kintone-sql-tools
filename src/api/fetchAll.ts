@@ -150,6 +150,18 @@ export async function fetchAll(
         if (!notified && options.onTruncate) { options.onTruncate(maxRecords); notified = true; }
         return allRecords.slice(0, maxRecords);
       }
+      // B197 / 依頼 KJ-11: **上限ちょうど**で止まったときは、続きがあるかを 1 件だけ確かめる。
+      // ここに来るのは「最後のページが満杯（上限が pageSize の倍数）」の場合だけで、
+      // kintone のレスポンスからは**続きの有無が分からない**。
+      // 確かめずに断っていたため、ちょうど上限の件数（既定なら 10,000 件）が
+      // 「上限を超えました」になっていた（1 件の軽い GET で区別する）。
+      if (allRecords.length === maxRecords) {
+        const probe = await fetchPage(
+          fetcher, app, buildCursorQuery(query, cursorId), fetchFields, 1, windowOffset
+        );
+        notifySearchAborted(probe, options);
+        if (probe.records.length === 0) return allRecords;
+      }
       throw new FetchAllLimitError(limitMessage);
     }
 

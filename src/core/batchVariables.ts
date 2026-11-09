@@ -1,4 +1,6 @@
 import type { Statement } from "../types/ast";
+import { isFiniteDecimal } from "./exactDecimal";
+import { expressionSemanticKind } from "./expressionSemantics";
 
 const VARIABLE_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]{0,63}$/;
 
@@ -118,8 +120,50 @@ export function validateDeclaredBatchVariables(
     if (injectedArray) {
       assertArrayLength(name, (value as readonly string[]).length, arrayMaxElements, "injected value");
     }
+    // B209: **宣言が種類を決める**（B203 の配列と同じ考え）。数値で宣言した変数には
+    // 数値として読める文字列だけを注入できる。読めない値は**レコードを 1 件も読む前**に止める。
+    if (!declaredArray && isNumericVariableDeclaration(declaration)
+      && !isNumericVariableText(value as string)) {
+      throw new Error(
+        `ArgumentError: variable @${name} is declared as a number (DECLARE @${name} = <数値>); `
+        + `inject a numeric string (got "${String(value)}").`
+      );
+    }
   }
   return normalized;
+}
+
+/**
+ * B209: 宣言の既定値が**必ず数値になる式**か（数値リテラル・算術式・数値を返す関数）。
+ *
+ * 判定はエンジンの静的な型の分類（`expressionSemanticKind`）に委ねる。
+ * ここを `default.type === "NUMBER"` だけにしていたため、
+ * `DECLARE @x = 10 + 5`（ARITH）や `DECLARE @x = ABS(15)`（数値を返す関数）が
+ * 文字列扱いになり、数値のスカラーサブクエリとの大小比較が**混在のエラー**になっていた
+ * （2 回目のレビューの MAJOR）。
+ * **値は見ない**（B171 の「実値推測禁止」を維持）。注入の検証と実行時の印は同じこの判定を使う。
+ */
+export function isNumericVariableDeclaration(
+  declaration: Statement & { type: "DECLARE_VARIABLE" }
+): boolean {
+  if (declaration.annotation === "RELATIVE_DATE") return false;
+  if (declaration.default.type === "ARRAY") return false;
+  return expressionSemanticKind(declaration.default) === "number";
+}
+
+/**
+ * B209: 数値として読める文字列か（注入された値の検証）。
+ * **値から型を推測するためではなく、宣言した型に合うかを確かめるため**に使う
+ * （B171 の「実値推測禁止」＝宣言や列の種類が無いところで値から型を決めない、とは別の話）。
+ *
+ * 判定は**比較に使う十進のパーサー**（`parseExactDecimal`）に合わせる。
+ * `Number()` で見ると `"0x10"`・`"0b1"`・`"Infinity"` を通してしまい、
+ * 通した後の比較は数値として扱えず**辞書順に落ちる**（fail-open が戻る）。
+ * `"1e3"`・`" 10 "`・`"-0.5"` は比較と同じく数値として読める。
+ */
+export function isNumericVariableText(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  return isFiniteDecimal(value);
 }
 
 function assertArrayLength(name: string, length: number, max: number, source: string): void {

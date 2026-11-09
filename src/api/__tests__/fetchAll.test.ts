@@ -399,6 +399,82 @@ test("maxRecords=3000 + parallel=5（truncate）で余分な先読みページ�
 });
 
 // ----------------------------------------------------------------
+// fetchAll — 上限ちょうど（B197 / 依頼 KJ-11）
+//
+// 最後のページが満杯（上限が pageSize の倍数）だと、kintone のレスポンスからは
+// **続きの有無が分からない**。確かめずに断っていたため、ちょうど上限の件数が
+// 「上限を超えました」になっていた。1 件の GET で区別する。
+// ----------------------------------------------------------------
+
+/** 件数ぶんのレコードを持ち、limit / offset / `$id >` カーソルを実機どおり解釈する Fetcher */
+function sourceFetcher(count: number, calls: string[]): PageFetcher {
+  const rows = makeRecords(count);
+  return async (params): Promise<KintoneGetResponse> => {
+    calls.push(params.query);
+    const query = params.query;
+    const offset = Number(/offset (\d+)/.exec(query)?.[1] ?? 0);
+    const limit = Number(/limit (\d+)/.exec(query)?.[1] ?? 500);
+    const cursor = /\$id > (\d+)/.exec(query);
+    const hit = cursor ? rows.filter((row) => Number(row.$id!.value) > Number(cursor[1])) : rows;
+    return { records: hit.slice(offset, offset + limit) };
+  };
+}
+
+test("上限ちょうどの件数は通る（1 件の probe で続きが無いことを確かめる）", async () => {
+  const calls: string[] = [];
+  const result = await fetchAll(sourceFetcher(1000, calls), 100, "", [], { maxRecords: 1000 });
+  expect(result).toHaveLength(1000);
+  // ページ 2 枚（offset 0 / 500）＋ probe 1 回
+  expect(calls).toHaveLength(3);
+  expect(calls[2]).toBe("order by $id asc limit 1 offset 1000");
+});
+
+test("上限 + 1 件なら FetchAllLimitError（+1 件読んで通す形にしない）", async () => {
+  const calls: string[] = [];
+  await expect(
+    fetchAll(sourceFetcher(1001, calls), 100, "", [], { maxRecords: 1000 })
+  ).rejects.toThrow(FetchAllLimitError);
+  expect(calls[calls.length - 1]).toBe("order by $id asc limit 1 offset 1000");
+});
+
+test("上限ちょうどは parallel > 1 でも通る", async () => {
+  const calls: string[] = [];
+  const result = await fetchAll(sourceFetcher(2000, calls), 100, "", [], {
+    maxRecords: 2000, parallel: 4,
+  });
+  expect(result).toHaveLength(2000);
+  expect(calls.filter((q) => q.includes("limit 1 "))).toHaveLength(1);
+});
+
+test("上限ちょうどは 10,000 件（カーソル切り替えの後）でも通る", async () => {
+  const calls: string[] = [];
+  const result = await fetchAll(sourceFetcher(10_000, calls), 100, "", [], { maxRecords: 10_000 });
+  expect(result).toHaveLength(10_000);
+  // offset 10000 の壁でカーソルへ切り替わるので、probe もカーソル付きで投げる
+  expect(calls[calls.length - 1]).toBe("$id > 10000 order by $id asc limit 1 offset 0");
+});
+
+test("truncate のときは probe しない（打ち切って返すので続きの有無は要らない）", async () => {
+  const calls: string[] = [];
+  const onTruncate = jest.fn();
+  const result = await fetchAll(sourceFetcher(1000, calls), 100, "", [], {
+    maxRecords: 1000, onLimit: "truncate", onTruncate,
+  });
+  expect(result).toHaveLength(1000);
+  expect(calls).toHaveLength(2);
+  expect(onTruncate).toHaveBeenCalledTimes(1);
+});
+
+test("stopAfter が上限と同じなら probe せずに正常終了する", async () => {
+  const calls: string[] = [];
+  const result = await fetchAll(sourceFetcher(1500, calls), 100, "", [], {
+    maxRecords: 1000, stopAfter: 1000,
+  });
+  expect(result).toHaveLength(1000);
+  expect(calls).toHaveLength(2);
+});
+
+// ----------------------------------------------------------------
 // extractIds
 // ----------------------------------------------------------------
 

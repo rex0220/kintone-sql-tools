@@ -511,7 +511,19 @@ Shift_JIS は `encoding: "sjis"` と `encoder: { encoding: "sjis", encode(text) 
 throw する義務を負います（encoding-japanese / iconv-lite は黙って `?` 置換するため、encode → decode → 完全一致検査を
 wrapper で行ってください）。
 
-読取上限は既定 10,000 件（`maxRecords`）です。一時テーブルの実体化には**独立の** `tempTableMaxRows`（既定 10,000 行・超過は常にエラー）が適用されるため、大きなバッチでは両方を併せて指定してください:
+読取上限は既定 10,000 件（`maxRecords`）で、**1 回の読み取りごと**に掛かります（実行やバッチの合計ではありません）。
+一時テーブル（`CREATE TEMP TABLE`）には v3.93.0 から **3 つの上限**が別々に掛かります:
+
+| 何を数えるか | 設定 | 超えたとき |
+|---|---|---|
+| 元の SELECT が**読む件数** | `tempTableReadMaxRecords ?? maxRecords ?? max(10,000, tempTableMaxRows)` | `FetchAllLimitError` |
+| **出来た表の行数** | `tempTableMaxRows`（既定 10,000 行） | `TempTableRowLimitError`（表は登録しません） |
+| 残っている表の行数の**合計** | `tempTablesMaxTotalRows`（既定なし） | `TempTableTotalLimitError` |
+
+集計して 1 行に畳む文は、読む量が収まれば通ります。JOIN・UNION・`GENERATE_SERIES` で増えた行も
+`tempTableMaxRows` の対象です。`tempTableReadMaxRecords` は**実体化の読取だけ**に効くので、
+明細の SELECT の上限を上げずに大きい表を作れます（MCP・CLI は `max(maxRecords, tempTableMaxRows ?? 10,000)` を
+内部で常に渡します）。大きなバッチでは両方を併せて指定してください:
 
 ```ts
 const ctx = createExecutionContext({ client, script: source, maxRecords: 25000, tempTableMaxRows: 25000 });
