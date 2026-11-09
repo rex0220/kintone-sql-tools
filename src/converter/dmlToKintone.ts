@@ -28,7 +28,7 @@ import type {
 import { collectCheckFieldRefs } from "../core/dmlCustomCheck";
 import { numberLiteralText } from "../types/ast";
 import { serializeQueryForApp, type OptionQueryTranslatorSource } from "./queryForApp";
-import { evalWhere, evalCaseWhen, type ProcessRow } from "../engine/evalWhere";
+import { evalWhere, evalCaseWhen, caseFieldResolvers, type ProcessRow } from "../engine/evalWhere";
 import { evalStringFunc, evalArithExpr, evalScalarValueExpr, type EvaluationContext } from "../engine/evalFunc";
 import { whereHasLike } from "../core/like";
 
@@ -658,8 +658,10 @@ export function evalCaseWhenValue(
   fieldType: string | undefined,
   evaluationContext: EvaluationContext = {}
 ): KintoneValue {
+  // B210: 評価の文脈が持つ文の行の型で比べる（無ければ今までどおり文字列）
+  const { resolveFieldType, resolveFieldSemantics } = caseFieldResolvers(undefined, undefined, evaluationContext);
   for (const branch of expr.branches) {
-    if (evalWhere(branch.condition, row, undefined, undefined, undefined, evaluationContext)) {
+    if (evalWhere(branch.condition, row, resolveFieldType, undefined, resolveFieldSemantics, evaluationContext)) {
       return evalCaseResultValue(branch.result, row, fieldType, evaluationContext);
     }
   }
