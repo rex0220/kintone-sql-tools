@@ -181,9 +181,22 @@ test("B197: maxRecords も tempTableMaxRows も省略すれば既定 10,000 で�
   expect(results[0].error?.message).toContain("10000");
 });
 
+test("B197: 読む量の上限 + 1 件でも止める（明示した maxRecords を 1 件も超えない）", async () => {
+  // 「上限 + 1 件読んで区別する」形では、元が**ちょうど上限 + 1 件**のときに
+  // そのまま通ってしまい、明示した maxRecords を 1 件破っていた（2 回目のレビューの MAJOR）。
+  // 区別は fetchAll の probe（1 件の GET）に移したので、上限は 1 件も破らない。
+  const { results } = await run(
+    "CREATE TEMP TABLE #r AS SELECT k, v FROM APP200;\nSELECT COUNT(*) AS c FROM #r;",
+    { maxRecords: 3, tempTableMaxRows: 8 },
+    4
+  );
+  expect(results[0]).toMatchObject({ status: "error", error: { code: "FetchAllLimitError" } });
+  expect(results[0].error?.message).toContain("上限（3 件）");
+});
+
 test("B197: 10,000 行ちょうど（500 の倍数）の表は作れる", async () => {
   // fetchAll は最後のページが満杯だと続きを確かめずに上限超えにしていたので、
-  // 上限ちょうどの表が作れなかった（1 件多く読んで区別するようにした）
+  // 上限ちょうどの表が作れなかった（1 件の probe で区別するようにした）
   const { results } = await run(
     "CREATE TEMP TABLE #r AS SELECT k FROM APP200;\nSELECT COUNT(*) AS c FROM #r;",
     {},

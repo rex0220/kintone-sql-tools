@@ -42,22 +42,34 @@ INNER / LEFT / RIGHT JOIN の出力には別の上限も無い（`src/engine/pro
 
 | 何を数えるか | 設定 | 超えたとき |
 |---|---|---|
-| 元の SELECT が**読む件数** | `maxRecords`（**`tempTableMaxRows` のほうが大きいときはその値まで読む**。下の「互換のための例外」） | `FetchAllLimitError`／効いているのが `tempTableMaxRows` なら `TempTableRowLimitError`（名前を言い分ける） |
+| 元の SELECT が**読む件数** | `tempTableReadMaxRecords`（省略時は `maxRecords`。どちらも省略したときだけ `max(10,000, tempTableMaxRows)`） | `FetchAllLimitError`／効いているのが `tempTableMaxRows` なら `TempTableRowLimitError`（名前を言い分ける） |
 | **出来た表の行数** | `tempTableMaxRows`（既定 10,000） | **`TempTableRowLimitError`**（新規。表は登録しない） |
 | 残っている一時テーブルの**合計** | `tempTablesMaxTotalRows` | `TempTableTotalLimitError`（B196。不変） |
 
-**互換のための例外（回答 §4-2 から変えた点）**: 回答では「読む量は `maxRecords`」と書いたが、
-**`tempTableMaxRows` のほうが大きいときはその値まで読む**形にした。理由は実測で分かった公開の契約で、
+**面の互換（回答 §4-2 から変えた点。1 回目のレビューの MAJOR 3 で作り直した）**:
+回答どおり「**明示した `maxRecords` は必ず効く**」にすると、`maxRecords` を常に解決して渡す面の
+公開の契約が壊れる。
 
-- **MCP の `maxRecords` の既定は 500**（`src/mcp/tools.ts`）。
+- **MCP と CLI の `maxRecords` の既定は 500**（`src/mcp/tools.ts`・`src/cli/index.ts`）。
   `query({ sql, tempTableMaxRows: 20000 })` **だけ**で 10,001 行を実体化できることが
   試験で固定されている（`src/mcp/__tests__/tools.test.ts`）。
 - 純粋に「読む量は `maxRecords`」にすると、この使い方が **500 件で止まる**（回帰）。
 - B196 の試験も `tempTableMaxRows: 20_000` だけで 19,999 行を読んでいた。
 
-そこで **`tempTableMaxRows` を `maxRecords` より大きく指定すること＝「大きい表を作りたい」という
-意思表示**として扱い、その値まで読む。`maxRecords` のほうが大きければ `maxRecords` が効く
-（依頼元は両方 10,000 なので、どちらでも同じ）。**エラー文は必ず効いている上限の名前を言う。**
+最初は `max(maxRecords, tempTableMaxRows)` をエンジンの既定の式にしたが、それでは
+**明示した `maxRecords` が効かない**（1 回目のレビューの MAJOR 3）。そこで
+**実体化の読取だけに効く公開オプション `tempTableReadMaxRecords`** を足し、
+**面（MCP・CLI）が `max(maxRecords, tempTableMaxRows ?? 10,000)` を渡す**形にした
+（式は `materializeReadMaxRecords`（`src/execute.ts`）の 1 か所。面の数だけ渡すことを
+`src/__tests__/b197SurfaceReadLimit.test.ts` で固定）。
+**エラー文は必ず効いている上限の名前を言う**。`tempTableReadMaxRecords` が効いたときは、
+利用者が動かせる設定（`maxRecords` と `tempTableMaxRows` の大きいほう）も添える。
+
+**上限ちょうど（2 回目のレビューの MAJOR）**: 「上限 + 1 件読んで『ちょうど』と『超過』を区別する」形は、
+元データが**ちょうど上限 + 1 件**のときに通ってしまい、上限を 1 件破っていた。区別は `fetchAll` に移し、
+**上限で止まったときだけ 1 件の軽い GET で続きの有無を確かめる**（`src/api/fetchAll.ts`）。
+これで上限は 1 件も超えず、ちょうど上限（500 の倍数）の表も作れる。
+この probe は `onLimit: "error"` のときだけで、`truncate` と `stopAfter` の経路は投げない。
 
 **これで直ったもの**:
 

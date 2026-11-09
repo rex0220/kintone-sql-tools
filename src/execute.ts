@@ -68,6 +68,8 @@ import type { ProcessStatusState } from "./core/processStatus";
 import type { NumberPrecision } from "./core/numberPrecision";
 import {
   DEFAULT_VARIABLE_ARRAY_MAX_ELEMENTS,
+  isNumericVariableDeclaration,
+  isNumericVariableText,
   validateDeclaredBatchVariables,
   type BatchVariableInput,
 } from "./core/batchVariables";
@@ -1831,6 +1833,25 @@ async function executeExistingRecordValidationCore(
 /** 一時テーブル1個の実体化行数上限（仕様 §5.6）。onLimitReached は適用せず常に error */
 export const TEMP_TABLE_MAX_ROWS = 10_000;
 
+/**
+ * B197 / 依頼 KJ-11 の ②: **`maxRecords` を常に解決して渡す面**（MCP・CLI）が
+ * `tempTableReadMaxRecords` に渡す値。
+ *
+ * エンジンは v3.93.0 から「`CREATE TEMP TABLE` の読む件数の上限は（明示した）`maxRecords`」になった。
+ * MCP と CLI は `maxRecords` を**常に**渡す（どちらも既定 500）ので、そのままだと
+ * 「`tempTableMaxRows` だけ上げて 10,000 行超を実体化する」という**両方の面の公開の契約**が
+ * 500 件で止まる。そこで**実体化のための読取だけ**、`tempTableMaxRows` が大きいときは
+ * そこまで読めるようにする（v3.92.0 までとまったく同じ読む量）。
+ * 明細の SELECT の上限は `maxRecords` のまま上がらない。
+ */
+export function materializeReadMaxRecords(
+  maxRecords: number,
+  tempTableMaxRows: number | undefined
+): number {
+  // 未指定のときもエンジン既定（10,000）で数える＝**v3.92.0 とまったく同じ読む量**にする
+  return Math.max(maxRecords, tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS);
+}
+
 export interface BatchExecuteOptions extends ExecuteOptions {
   /**
    * DECLARE されたバッチ変数の外部注入値（キーは @ なし、大文字小文字を区別しない）。
@@ -2938,8 +2959,9 @@ export async function executeBatchStatement(
       return {};
     }
     const injected = options.variables ?? {};
-    // B209: 数値リテラルで宣言した変数は、**数値として比べる**印を付ける（値は文字列のまま）。
-    const numericDeclaration = stmt.annotation !== "RELATIVE_DATE" && stmt.default.type === "NUMBER";
+    // B209: **数値になる式で宣言した**変数は、**数値として比べる**印を付ける（値は文字列のまま）。
+    // 判定は注入の検証（validateDeclaredBatchVariables）と同じ 1 つの関数に委ねる。
+    const numericDeclaration = isNumericVariableDeclaration(stmt);
     if (Object.prototype.hasOwnProperty.call(injected, stmt.name)) {
       const value = injected[stmt.name];
       // B203 / B209: 宣言と注入の種類の一致（配列・数値）は
@@ -2957,10 +2979,13 @@ export async function executeBatchStatement(
         stmt.default as Exclude<ScalarExpr, ScalarSubquery>,
         clock
       );
+      const text = value.type === "number" ? (value.raw ?? String(value.value)) : value.value;
       variables.set(stmt.name, {
         type: "string",
-        value: value.type === "number" ? (value.raw ?? String(value.value)) : value.value,
-        ...(numericDeclaration ? { numericProvenance: true as const } : {}),
+        value: text,
+        // 「印がある値は十進として読める」を保つ（注入は検証済み、既定値はここで確かめる）。
+        // 読めない値（CAST('abc' AS NUMBER) など）は印を付けず、混在の比較としてエラーにする。
+        ...(numericDeclaration && isNumericVariableText(text) ? { numericProvenance: true as const } : {}),
       });
     }
     return {};
@@ -3087,10 +3112,10 @@ export async function executeBatchStatement(
     const readLimit = limitedByTotal ? totalRemainingLimit! : baseReadLimit;
     const materializeOptions: ExecuteOptions = {
       ...options,
-      // **上限ちょうど**と**超過**を区別するため 1 件多く読む。
-      // `fetchAll` は最後のページが満杯（500 の倍数）のとき、続きを確かめずに上限超えにするので、
-      // 10,000 行ちょうどの表が作れなかった（B197 §3 の付随・3 回目のレビューの MAJOR）。
-      maxRecords: readLimit + 1,
+      // 読む量の上限は**そのまま**渡す（1 件多く読んで区別する形は、上限 + 1 件ちょうどの
+      // 元データで上限を 1 件破るため撤回した。上限ちょうどの区別は `fetchAll` が
+      // 1 件の probe で行う）。
+      maxRecords: readLimit,
       onLimitReached: "error",
     };
     let result: SelectResult;
@@ -3112,8 +3137,7 @@ export async function executeBatchStatement(
       // 依頼 KJ-11 の ②: 効いている上限の名前を言う。`tempTableMaxRows` のほうが大きくて
       // そこで止まったときに「maxRecords を引き上げてください」と案内していた。
       if (error instanceof Error && error.name === "FetchAllLimitError") {
-        // 読取は「上限 + 1 件」で回しているので、文には**本当の上限**を出す。
-        // あわせて、効いている上限の名前を言う（依頼 KJ-11 の ②）。
+        // 効いている上限の名前を言う（依頼 KJ-11 の ②）。
         throw readLimitSource === "tempTableMaxRows"
           ? new TempTableRowLimitError(
               `TempTableRowLimitError: ${resolvedStmt.name} の実体化のための読取が、一時テーブル 1 つの上限`
@@ -3122,7 +3146,12 @@ export async function executeBatchStatement(
             )
           : new FetchAllLimitError(
               `取得件数が上限（${callerMaxRecords} 件）を超えました。`
-              + `WHERE 句で絞り込むか、${readLimitSource} を引き上げてください。`
+              // `tempTableReadMaxRecords` は MCP・CLI が内部で渡す口なので、
+              // 名前だけ言っても利用者は動かせない。**利用者が動かせる設定**も添える。
+              + (readLimitSource === "tempTableReadMaxRecords"
+                ? "WHERE 句で絞り込むか、実体化の読み取りの上限（tempTableReadMaxRecords。"
+                  + "MCP・CLI では maxRecords と tempTableMaxRows の大きいほうが入ります）を引き上げてください。"
+                : `WHERE 句で絞り込むか、${readLimitSource} を引き上げてください。`)
             );
       }
       throw error;

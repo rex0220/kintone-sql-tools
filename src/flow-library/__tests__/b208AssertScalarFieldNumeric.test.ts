@@ -297,6 +297,96 @@ test("B208: 選択肢の項目は数値に昇格しない", async () => {
     .toContain("数値と文字列を比べています");
 });
 
+// ============================================================
+// 2 回目のレビュー: 宣言の型の判定を算術・数値関数まで広げる（過剰停止を閉じる）
+// ============================================================
+
+test.each([
+  ["算術式の宣言（12 <= 15）", "DECLARE @limit = 10 + 5;", "success"],
+  ["算術式の宣言（12 <= 5 は不成立）", "DECLARE @limit = 2 + 3;", "error"],
+  ["数値を返す関数の宣言（12 <= 15）", "DECLARE @limit = ABS(-15);", "success"],
+] as const)("B209: %s", async (_label, declare, expected) => {
+  const results = await runWith(`${declare}\nASSERT (SELECT COUNT(*) FROM APP200) <= @limit, 'ng';`);
+  expect(lastStatus(results)).toBe(expected);
+  if (expected === "error") {
+    // **混在のエラーではなく**、数値として比べた結果の不成立であること
+    const message = (results[results.length - 1] as { error?: { message: string } }).error?.message ?? "";
+    expect(message).toContain("assertion failed");
+    expect(message).not.toContain("数値と文字列を比べています");
+  }
+});
+
+test("B209: 算術式で宣言した変数への注入も十進で検証する（0x10 は弾く・1e3 は通す）", async () => {
+  await expect(runWith(
+    "DECLARE @limit = 10 + 5;\nASSERT (SELECT COUNT(*) FROM APP200) <= @limit, 'ng';",
+    { limit: "0x10" }
+  )).rejects.toThrow(/declared as a number/);
+  // 1e3（= 1000）は比較の十進パーサーが読めるので通し、数値として比べる
+  expect(lastStatus(await runWith(
+    "DECLARE @limit = 10 + 5;\nASSERT (SELECT COUNT(*) FROM APP200) <= @limit, 'ng';",
+    { limit: "1e3" }
+  ))).toBe("success");
+});
+
+test("B209: 数値で宣言しても読めない値は数値と言わない（CONCAT で作った文字列）", async () => {
+  // 宣言が文字列を返す関数なら印は付かず、混在の比較として止まる（辞書順に落とさない）
+  const results = await runWith(
+    "DECLARE @limit = CONCAT('1', '0');\nASSERT (SELECT COUNT(*) FROM APP200) <= @limit, 'ng';"
+  );
+  expect(lastStatus(results)).toBe("error");
+  expect((results[results.length - 1] as { error?: { message: string } }).error?.message)
+    .toContain("数値と文字列を比べています");
+});
+
+// ============================================================
+// MINOR 1: システム列だけの SELECT では項目定義を取りに行かない
+// ============================================================
+
+async function runCountingGetFields(sql: string): Promise<{ status: string; getFields: number }> {
+  let getFields = 0;
+  const base = mockClient() as unknown as Record<string, unknown>;
+  const client = {
+    ...base,
+    async getFields(...args: unknown[]) {
+      getFields += 1;
+      return (base.getFields as (...a: unknown[]) => Promise<unknown>)(...args);
+    },
+  } as unknown as FlowKintoneClient;
+  const parsed = parseScript(`${header}${sql}`);
+  const context = createExecutionContext({
+    client, statements: parsed.statements, meta: parsed.meta, maxRecords: 1000,
+  });
+  const results = [];
+  try {
+    for (const statement of parsed.statements) {
+      const result = await executeStatement(statement, context);
+      results.push(result);
+      if (result.status === "error") break;
+    }
+  } finally {
+    await disposeExecutionContext(context);
+  }
+  return { status: results[results.length - 1].status, getFields };
+}
+
+test.each([
+  ["$id だけ", "ASSERT (SELECT $id FROM APP200 WHERE $id = 10) <= 100, 'ng';", 0],
+  ["$revision だけ", "ASSERT (SELECT $revision FROM APP200 WHERE $id = 10) <= 100, 'ng';", 0],
+] as const)("B208: %s の ASSERT は項目定義を取りに行かない（getFields 0 回）", async (_label, sql, expected) => {
+  const { status, getFields } = await runCountingGetFields(sql);
+  expect(status).toBe("success");
+  expect(getFields).toBe(expected);
+});
+
+test("B208: ふつうの項目の ASSERT は項目定義を 1 回だけ取る（キャッシュに乗る）", async () => {
+  const { status, getFields } = await runCountingGetFields(
+    "ASSERT (SELECT 残数 FROM APP200 WHERE $id = 10) <= 100, 'ng';\n"
+    + "ASSERT (SELECT 残数 FROM APP200 WHERE $id = 11) <= 100, 'ng';"
+  );
+  expect(status).toBe("success");
+  expect(getFields).toBe(1);
+});
+
 test("B208: 来歴の分からない一時テーブルの列は数値に昇格しない", async () => {
   // 文字列を連結した列（型が決まらない）を一時テーブルに入れて比べる
   const results = await run(
