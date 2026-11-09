@@ -216,7 +216,7 @@ import {
 } from "./engine/process";
 import { expandSubtableRecords } from "./converter/subtableAdapter";
 import type { ResolvedSubqueryInList, ResolvedExistsExpr, ResolvedScalarSubquery, FieldTypeResolver, FieldSemanticsResolver } from "./engine/evalWhere";
-import { evalWhere, evalCaseWhen, resolveKintoneFunc } from "./engine/evalWhere";
+import { evalWhere, evalCaseWhen, resolveKintoneFunc, bindCaseFieldResolvers } from "./engine/evalWhere";
 import { evalArithExpr, evalStringFunc, type EvaluationContext } from "./engine/evalFunc";
 import { parseSqlStatementsForScript } from "./core/sql";
 import { asOfFunctionNameFromVariable, asOfVariableName, createAsOfClock } from "./core/asOfClock";
@@ -4268,7 +4268,11 @@ async function buildWhereFieldSemanticsResolver(
   };
   collectOrderedFields(stmt.where);
   collectOrderedFields(stmt.having);
+  // B210: 関数・集計・GROUP BY / ORDER BY の式の中の CASE も、ステータスの順を引けるようにする
+  collectOrderedFields(groupingItemsOf(stmt));
+  collectOrderedFields(stmt.orderBy);
   for (const column of stmt.columns) {
+    if (column.type !== "CASE_COL") collectOrderedFields(column);
     if (column.type === "CASE_COL") collectOrderedFields(column.expr);
   }
   const statusOrdersByApp = new Map<number, ReadonlyMap<string, number>>();
@@ -4533,7 +4537,45 @@ function selectCaseConditionsNeedFieldMetadata(stmt: SelectStatement): boolean {
     if (node.type === "CASE_WHEN" && node.branches?.some((branch) => whereNeedsFieldMetadata(branch.condition))) return true;
     return Object.values(node).some(visit);
   };
-  return stmt.columns.some(visit);
+  // B210: 列だけでなく GROUP BY / ORDER BY の式・隠れたウィンドウの中の CASE も見る
+  return stmt.columns.some(visit)
+    || visit(groupingItemsOf(stmt))
+    || visit(stmt.orderBy)
+    || visit(stmt.hiddenWindows ?? []);
+}
+
+/** B210: GROUP BY の項目（ふつうの GROUP BY と GROUPING SETS の両方。B65 の唯一の口を通す）。 */
+function groupingItemsOf(stmt: SelectStatement): readonly unknown[] {
+  const grouping = normalizeGroupingSpec(stmt);
+  return grouping.type === "NONE" ? [] : grouping.allItems;
+}
+
+/** B210: 式の木のどこかに CASE があるか。入れ子の SELECT は見ない。 */
+function containsCaseExpr(value: unknown): boolean {
+  if (value === null || typeof value !== "object") return false;
+  if (Array.isArray(value)) return value.some(containsCaseExpr);
+  const node = value as { type?: string };
+  if (node.type === "SELECT") return false;
+  if (node.type === "CASE_WHEN") return true;
+  return Object.values(node).some(containsCaseExpr);
+}
+
+/** B210: SELECT のどこか（列・GROUP BY・ORDER BY・ウィンドウ）に CASE があるか。 */
+function selectContainsCaseExpr(stmt: SelectStatement): boolean {
+  return containsCaseExpr([stmt.columns, groupingItemsOf(stmt), stmt.orderBy, stmt.hiddenWindows ?? []]);
+}
+
+/**
+ * B210: SELECT の中のすべての CASE（関数・集計・ウィンドウの引数、GROUP BY / ORDER BY の式、
+ * WHERE / HAVING の関数の中）に、行の型の情報を結び付ける。
+ * 型を渡さずに評価する呼び出しでも、数値の項目を数値で比べるため。入れ子の SELECT は除く。
+ */
+function bindSelectCaseFieldResolvers(
+  stmt: SelectStatement,
+  resolveFieldType: FieldTypeResolver | undefined,
+  resolveFieldSemantics: FieldSemanticsResolver | undefined
+): void {
+  bindCaseFieldResolvers(Object.values(stmt), { resolveFieldType, resolveFieldSemantics });
 }
 
 function buildHavingFieldSemanticsResolver(
@@ -5406,11 +5448,13 @@ async function executeSimpleSelect(
   // IN / NOT IN に限って型 resolver を用意する（フィールド定義キャッシュを再利用）。
   const typedInFieldTypes = await loadTypedInFieldTypes(stmt, client, cacheContext);
   const fieldTypeResolvers = buildSelectFieldTypeResolvers(stmt, typedInFieldTypes);
-  const projectionSemanticsResolver = stmt.columns.some((column) => column.type === "CASE_COL")
+  // B210: 関数の中・ORDER BY の式の中の CASE にも型を渡す（列そのものが CASE のときだけでは足りない）
+  const projectionSemanticsResolver = selectContainsCaseExpr(stmt)
     ? await buildWhereFieldSemanticsResolver(
         stmt, client, cacheContext, undefined, selectCaseConditionsNeedFieldMetadata(stmt)
       )
     : undefined;
+  bindSelectCaseFieldResolvers(stmt, fieldTypeResolvers.row, projectionSemanticsResolver);
   const maxRecords = options.maxRecords ?? 10_000;
   const warnings = new Set<string>();
   const onLimit = options.onLimitReached ?? "error";
@@ -7087,6 +7131,7 @@ async function executeFullScanSelect(
     whereNeedsFieldMetadata(stmt.having) || selectCaseConditionsNeedFieldMetadata(stmt)
   );
   const havingFieldSemanticsResolver = buildHavingFieldSemanticsResolver(stmt, fieldSemanticsResolver);
+  bindSelectCaseFieldResolvers(stmt, fieldTypeResolvers.row, fieldSemanticsResolver);
 
   // 同じ計画を検証・fetch・JS 評価で共有する。
   const preboundJoinPlan = boundJoinRuntimePlans.get(stmt);
@@ -8171,6 +8216,7 @@ async function executeFullScanWithCte(
     whereNeedsFieldMetadata(stmt.having) || selectCaseConditionsNeedFieldMetadata(stmt)
   );
   const havingFieldSemanticsResolver = buildHavingFieldSemanticsResolver(stmt, fieldSemanticsResolver);
+  bindSelectCaseFieldResolvers(stmt, fieldTypeResolvers.row, fieldSemanticsResolver);
   const pushdownPlan = buildRuntimeJoinPushdownPlan(stmt, pushdownMeta, optionNameQuerySource(client))
     ?? buildKlikePushdownPlan(stmt, pushdownMeta);
   validateKlikePushdownPlan(pushdownPlan);
@@ -10287,6 +10333,7 @@ async function materializeUpdateValidationCandidates(
     );
   }
   await resolveSetSubqueries(stmt.assignments, client, options, cacheContext);
+  await bindUpdateCaseFieldResolvers(stmt, client, cacheContext);
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
   const checkTargetFields = assertUpdateCheckRefs(stmt, fieldTypes);
   assertCheckComparisonTypes(stmt, updateEvaluationTypes(fieldTypes, stmt.appId));
@@ -10477,6 +10524,7 @@ async function materializeUpdateFromValidationCandidates(
   const matched = await resolveUpdateFromMatchedRecords(
     stmt, from, client, options, cacheContext, tempTables, snapshotFields
   );
+  await bindUpdateCaseFieldResolvers(stmt, client, cacheContext);
   const fieldTypes = await getFieldTypeMap(stmt.appId, client, cacheContext);
   const records = updateFromToPutBatches(
     stmt, matched, fieldTypes, statementEvaluationContext(options)
@@ -11392,6 +11440,8 @@ async function executeUpdate(
   if (stmt.applyBlocks?.length) {
     return executeApplyPatchUpdate(stmt, client, options, cacheContext) as Promise<UpdateResult>;
   }
+  // B210: SET の CASE が数値の項目を数値で比べるよう、対象アプリの型を結び付ける（サブテーブルは対象外）
+  if (!stmt.subtableCode) await bindUpdateCaseFieldResolvers(stmt, client, cacheContext);
   if (stmt.checkGroups?.length && isConstantFalseWhere(stmt.where)) {
     const fieldInfos = await loadWritableTopLevelDmlFields(
       stmt.appId, stmt.assignments.map((assignment) => assignment.field), client, cacheContext
@@ -11822,11 +11872,16 @@ async function selectApplyParentSnapshots(
   for (const field of collectApplyParentWhereFields(stmt.where)) fields.add(field);
   const resolvers = await buildApplyParentFieldResolvers(
     stmt.appId,
-    stmt.where,
+    [stmt.where, stmt.assignments],
     infoByCode,
     client,
     cacheContext
   );
+  // B210: 親の SET の CASE も、同じ型で比べる
+  bindCaseFieldResolvers(stmt.assignments, {
+    resolveFieldType: resolvers.fieldTypeResolver,
+    resolveFieldSemantics: resolvers.fieldSemanticsResolver,
+  });
   const candidates = await fetchAll(
     client.getRecords,
     stmt.appId,
@@ -11862,10 +11917,34 @@ interface ApplyParentFieldResolvers {
   readonly fieldSemanticsResolver: FieldSemanticsResolver;
 }
 
+/**
+ * B210: UPDATE の SET の CASE（関数の中も）に、対象アプリの項目の型を結び付ける。
+ * SET の CASE は型を渡さずに評価していたので、数値の項目の大小を辞書順で比べていた。
+ */
+async function bindUpdateCaseFieldResolvers(
+  stmt: UpdateStatement,
+  client: KintoneClient,
+  cacheContext: string
+): Promise<void> {
+  if (!containsCaseExpr(stmt.assignments)) return;
+  const infos = await getFieldsCached(stmt.appId, client, cacheContext);
+  const resolvers = await buildApplyParentFieldResolvers(
+    stmt.appId,
+    stmt.assignments,
+    new Map(infos.filter((info) => !info.inSubtable).map((info) => [info.code, info])),
+    client,
+    cacheContext
+  );
+  bindCaseFieldResolvers(stmt.assignments, {
+    resolveFieldType: resolvers.fieldTypeResolver,
+    resolveFieldSemantics: resolvers.fieldSemanticsResolver,
+  });
+}
+
 /** SELECT と同じ field type / field semantics primitive を単一の親物理 app に結ぶ。 */
 async function buildApplyParentFieldResolvers(
   appId: number,
-  where: WhereExpr,
+  where: unknown,
   infoByCode: ReadonlyMap<string, KintoneFieldInfo>,
   client: KintoneClient,
   cacheContext: string
@@ -11894,7 +11973,7 @@ async function buildApplyParentFieldResolvers(
   return { fieldTypeResolver, fieldSemanticsResolver };
 }
 
-function collectOrderedWhereFields(where: WhereExpr): ReadonlySet<string> {
+function collectOrderedWhereFields(where: unknown): ReadonlySet<string> {
   const fields = new Set<string>();
   const visit = (node: unknown): void => {
     if (Array.isArray(node)) {

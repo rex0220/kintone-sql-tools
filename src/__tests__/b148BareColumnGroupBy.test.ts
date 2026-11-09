@@ -242,7 +242,9 @@ describe("B148 bare-column aggregate dependency", () => {
       client({ 4228: app4228 }),
       { cacheContext: "b148-aggregate-boundary" }
     ) as SelectResult;
-    expect(result.rows).toEqual([{ 製品名: "パン", 大口合計: "20" }, { 製品名: "米", 大口合計: "5" }]);
+    // B210: 米の個数は 5 なので 5 > 10 は偽で 0。v3.93.0 までは集計の中の CASE を辞書順で比べ
+    // （"5" > "10" が真）、この試験もその値（"5"）を正解として固定していた
+    expect(result.rows).toEqual([{ 製品名: "パン", 大口合計: "20" }, { 製品名: "米", 大口合計: "0" }]);
   });
 
   test("window-only query は aggregate query block にしない", async () => {
