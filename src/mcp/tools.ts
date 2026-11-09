@@ -17,6 +17,7 @@ import {
   type KintoneClient,
   type SelectResult,
   statementHasApplyBlocks,
+  TEMP_TABLE_MAX_ROWS,
 } from "../core";
 import { buildBatchEnvelope } from "../output/batchEnvelope";
 import type { AppBinding } from "../node/appProfiles";
@@ -541,6 +542,23 @@ async function runSafely<T extends object>(
   }
 }
 
+/**
+ * B197 / 依頼 KJ-11 の ②: **MCP の面の互換**（`tempTableReadMaxRecords` に渡す値）。
+ *
+ * エンジンは v3.93.0 から「`CREATE TEMP TABLE` の読む件数の上限は（明示した）`maxRecords`」になった。
+ * MCP は `maxRecords` を**常に解決して渡す**（既定 500）ので、そのままだと
+ * 「`tempTableMaxRows` だけ上げて 10,000 行超を実体化する」という**この面の公開の契約**が 500 件で止まる。
+ * そこで**実体化のための読取だけ**、`tempTableMaxRows` が大きいときはそこまで読めるようにする
+ * （v3.92.0 までと同じ読む量）。明細の SELECT の上限は `maxRecords` のまま。
+ */
+function materializeReadMaxRecords(
+  maxRecords: number,
+  tempTableMaxRows: number | undefined
+): number {
+  // 未指定のときもエンジン既定（10,000）で数える＝**v3.92.0 とまったく同じ読む量**にする
+  return Math.max(maxRecords, tempTableMaxRows ?? TEMP_TABLE_MAX_ROWS);
+}
+
 export function createKsqlMcpTools(
   serverOptions: KsqlRuntimeServerOptions,
   deps: KsqlMcpToolDependencies = {}
@@ -785,6 +803,8 @@ export function createKsqlMcpTools(
       });
       let batchResult = await executeBatchSql(runtime.sql, runtime.client, {
         maxRecords: runtime.maxRecords,
+        // B197: 実体化の読取だけ v3.92.0 と同じ上限に保つ（この面の公開の契約）
+        tempTableReadMaxRecords: materializeReadMaxRecords(runtime.maxRecords, runtime.tempTableMaxRows),
         fetchParallel: runtime.fetchParallel,
         onLimitReached: runtime.onLimit,
         cacheContext: runtime.cacheContext,
@@ -943,6 +963,7 @@ export function createKsqlMcpTools(
     let totalAffected = staticInsertTotal;
     const batchResult = await executeBatchSql(runtime.sql, runtime.client, {
       maxRecords: runtime.maxRecords,
+      tempTableReadMaxRecords: materializeReadMaxRecords(runtime.maxRecords, runtime.tempTableMaxRows),
       fetchParallel: runtime.fetchParallel,
       onLimitReached: runtime.onLimit,
       cacheContext: runtime.cacheContext,

@@ -2288,16 +2288,18 @@ SELECT * FROM APP100 ORDER BY 作成日時 DESC LIMIT 20 OFFSET 40
 
 | 何を数えるか | 設定 | 超えたとき |
 |---|---|---|
-| **元の SELECT が読む件数** | `maxRecords`（`tempTableMaxRows` のほうが大きいときはその値まで読みます） | `FetchAllLimitError`（効いている上限の名前で案内します） |
+| **元の SELECT が読む件数** | `tempTableReadMaxRecords`（省略時は `maxRecords`。どちらも省略したときだけ `max(10,000, tempTableMaxRows)`） | `FetchAllLimitError`（効いている上限の名前で案内します） |
 | **出来た表の行数** | `tempTableMaxRows`（既定 10,000 行） | `TempTableRowLimitError`（表は**登録しません**） |
 | 残っている一時テーブルの行数の**合計** | `tempTablesMaxTotalRows`（既定なし） | `TempTableTotalLimitError` |
 
-**集計して 1 行しか残さない文は、読む量が `maxRecords` に収まれば通ります**
+**集計して 1 行しか残さない文は、読む量が上限に収まれば通ります**
 （v3.92.0 までは `tempTableMaxRows` が読み取りの上限を兼ねていたため、
 `COUNT(*)` や `GROUP BY` でも**読んだ件数**で止まりました）。
-`tempTableMaxRows` を `maxRecords` より大きくすると、その値まで読みます
-（大きい表を作るために上げた、という意思表示として扱います）。
 JOIN・UNION・CTE・`GENERATE_SERIES` で**増えた行**も `tempTableMaxRows` の対象です（v3.92.0 までは通っていました）。
+**上限ちょうどの行数**（500 の倍数を含む）の表も作れます（1 件多く読んで「ちょうど」と「超過」を区別します）。
+`maxRecords` を低く固定している呼び側（MCP・CLI は既定 500）で大きい表を作るときは、
+**`tempTableReadMaxRecords`** を使うと明細の SELECT の上限を上げずに実体化だけ通せます
+（MCP と CLI は、`tempTableMaxRows` を指定したときに内部でこれを渡します＝v3.92.0 と同じ読む量）。
 
 > **`LIMIT`と`maxRecords`は別の値です:** `LIMIT`は返却行数、`maxRecords`は候補取得数を制御します。`LIMIT`を省略しても無制限にはならず、上表の入口別`maxRecords`が適用されます。
 
@@ -4447,6 +4449,26 @@ const canonical = normalize(kintone.app.record.get().record);  // 以降は同�
   `appId` は**物理のアプリ番号**です。
 - `FlowKintoneClient` には足していません（**自作のクライアントには生えません**）。
   戻りの型は `BundledKintoneClient` です。
+
+### 大小比較の型（`ASSERT` / `EXIT SUCCESS IF`。v3.93.0〜）
+
+`<` `<=` `>` `>=` `BETWEEN` は、**両辺が数値のときだけ数値**で比べます。文字列どうしは辞書順です
+（ISO の日付を比べる形はそのまま）。
+
+| 書き方 | 判定 |
+|---|---|
+| `(SELECT COUNT(*) FROM APPn) <= 10000` | 数値（集計は数値） |
+| `(SELECT 数値項目 FROM APPn WHERE $id = 1) <= 100` | **数値**（項目の型で判定。v3.92.0 までは辞書順でした） |
+| `(SELECT 件数 FROM #cnt) <= 10000`（一時テーブルに入れた集計） | **数値**（元の列の型を引き継ぎます） |
+| `DECLARE @limit = 10000;` … `<= @limit` | **数値**（**数値リテラルで宣言**した変数。注入した値も数値として検証します） |
+| `DECLARE @limit = '10000';` … `<= @limit` | **エラー**（数値と文字列の混在。辞書順に落としません） |
+| `(SELECT 文字列項目 …) <= '2026-01-01'` | 文字列（辞書順） |
+
+**数値と文字列が混ざった大小比較はエラーで止まります**（fail-closed）。
+v3.92.0 までは辞書順に落ちていたため、`件数 12` と上限 `'2'` の比較が**成立してしまう**（件数ゲートが素通りする）
+一方、上限 `'10000'` との比較は**成立しない**（止まるべきでないのに止まる）という誤判定がありました。
+数値として比べたいときは**数値リテラル**（`<= 10000`）か、**数値リテラルで宣言した変数**を使ってください。
+等値（`=` / `!=`）と空文字の比較（`WHERE` と同じ −∞ 扱い）は**今までどおり**です。
 
 ### 注意
 

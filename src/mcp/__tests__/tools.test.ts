@@ -2431,11 +2431,11 @@ SELECT n FROM flow_rows`;
       statements: Array<{ status: string; error?: { message: string } }>;
     };
     expect(defaultResult.ok).toBe(false);
-    // B197（v3.93.0〜）: 読む量の上限は maxRecords（ここでは MCP の既定 500）と
-    // tempTableMaxRows（既定 10,000）の大きいほう＝10,000 行で止まり、
-    // **効いている上限の名前**（tempTableMaxRows）で案内する
+    // B197（v3.93.0〜）: MCP の面は読む量を v3.92.0 と同じに保つ（tempTableReadMaxRecords）。
+    // tempTableMaxRows 未指定なら 10,000 行まで読めて、**出来た表の行数**（10,001 行）で止まる
+    // ＝効いている上限の名前で案内する（v3.92.0 は読取の上限として maxRecords を名指ししていた）
     expect(defaultResult.statements[0].error?.message)
-      .toMatch(/一時テーブル 1 つの上限（10000 行・tempTableMaxRows）に達しました/);
+      .toMatch(/一時テーブル 1 つの上限（10000 行）を超えるため/);
 
     // 指定: 10,001 行の実体化が成功する
     const toolsRaised = createKsqlMcpTools({ profile: "prod" }, makePagingDeps());

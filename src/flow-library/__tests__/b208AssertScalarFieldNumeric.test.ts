@@ -20,6 +20,8 @@ import {
 const FIELDS = [
   { code: "残数", label: "残数", fieldType: "NUMBER", writable: true },
   { code: "文字", label: "文字", fieldType: "SINGLE_LINE_TEXT", writable: true },
+  { code: "受注日", label: "受注日", fieldType: "DATE", writable: true },
+  { code: "区分", label: "区分", fieldType: "DROP_DOWN", writable: true, optionOrder: { A: 0, B: 1 } },
 ];
 
 /** $id = 10 の行は 残数 = 9（9 <= 100 は数値なら真・辞書順なら偽） */
@@ -27,6 +29,8 @@ const rows = Array.from({ length: 12 }, (_, index) => ({
   $id: { type: "__ID__", value: String(index + 1) },
   残数: { type: "NUMBER", value: String(index) },
   文字: { type: "SINGLE_LINE_TEXT", value: String(index) },
+  受注日: { type: "DATE", value: "2026-11-09" },
+  区分: { type: "DROP_DOWN", value: index % 2 ? "A" : "B" },
 }));
 
 function mockClient() {
@@ -154,4 +158,152 @@ test("B208: SET のスカラーサブクエリも同じヘルパーを通る（�
     + "SET @cnt = (SELECT n FROM #c);\nASSERT @cnt <= 100, 'ng';"
   );
   expect(lastStatus(results)).toBe("success");
+});
+
+// ============================================================
+// B209（案 ア）: 変数の型を効かせ、数値と文字列の混在は止める
+// ============================================================
+
+async function runWith(sql: string, variables?: Record<string, string | string[]>) {
+  const parsed = parseScript(`${header}${sql}`);
+  const errors = parsed.diagnostics.filter((item) => item.severity === "error");
+  if (errors.length > 0) throw new Error(`parse error: ${errors[0].message}`);
+  const context = createExecutionContext({
+    client: mockClient(), statements: parsed.statements, meta: parsed.meta, maxRecords: 1000,
+    ...(variables ? { variables } : {}),
+  });
+  const results = [];
+  try {
+    for (const statement of parsed.statements) {
+      const result = await executeStatement(statement, context);
+      results.push(result);
+      if (result.status === "error") break;
+    }
+  } finally {
+    await disposeExecutionContext(context);
+  }
+  return results;
+}
+
+test("B209: 数値リテラルで宣言した変数は数値として比べる（12 <= 10000 が成立）", async () => {
+  const results = await runWith(
+    "DECLARE @limit = 10000;\nASSERT (SELECT COUNT(*) FROM APP200) <= @limit, 'ng';"
+  );
+  expect(lastStatus(results)).toBe("success");
+});
+
+test("B209: 同じ形で上限が小さければ止まる（12 <= 2 は不成立）", async () => {
+  const results = await runWith(
+    "DECLARE @limit = 2;\nASSERT (SELECT COUNT(*) FROM APP200) <= @limit, 'ng';"
+  );
+  expect(lastStatus(results)).toBe("error");
+  expect((results[results.length - 1] as { error?: { message: string } }).error?.message)
+    .toContain("assertion failed");
+});
+
+test("B209: 注入した値も宣言の型で解釈する（文字列 \"10000\" が数値になる）", async () => {
+  const results = await runWith(
+    "DECLARE @limit = 1;\nASSERT (SELECT COUNT(*) FROM APP200) <= @limit, 'ng';",
+    { limit: "10000" }
+  );
+  expect(lastStatus(results)).toBe("success");
+});
+
+test("B209: 数値の宣言に数値でない値を注入したら、レコードを読む前に ArgumentError", async () => {
+  await expect(runWith(
+    "DECLARE @limit = 10000;\nASSERT (SELECT COUNT(*) FROM APP200) <= @limit, 'ng';",
+    { limit: "たくさん" }
+  )).rejects.toThrow(/declared as a number/);
+});
+
+test("B209: 文字列で宣言した変数との大小比較は止める（辞書順に落とさない）", async () => {
+  const results = await runWith(
+    "DECLARE @limit = '2';\nASSERT (SELECT COUNT(*) FROM APP200) <= @limit, 'ng';"
+  );
+  expect(lastStatus(results)).toBe("error");
+  const message = (results[results.length - 1] as { error?: { message: string } }).error?.message ?? "";
+  expect(message).toContain("数値と文字列を比べています");
+  expect(message).toContain("DECLARE @limit = 10000");
+});
+
+test("B209: BETWEEN の混在も止める", async () => {
+  const results = await runWith(
+    "DECLARE @high = '100';\nASSERT (SELECT COUNT(*) FROM APP200) BETWEEN 0 AND @high, 'ng';"
+  );
+  expect(lastStatus(results)).toBe("error");
+  expect((results[results.length - 1] as { error?: { message: string } }).error?.message)
+    .toContain("数値と文字列を比べています");
+});
+
+test("B209: 等値は混在でも今までどおり（止めない）", async () => {
+  const results = await runWith(
+    "DECLARE @n = '12';\nASSERT (SELECT COUNT(*) FROM APP200) = @n, 'ng';"
+  );
+  expect(lastStatus(results)).toBe("success");
+});
+
+test("B209: 文字列どうしの辞書順は不変（ISO の日付）", async () => {
+  const results = await runWith("ASSERT '2026-08-22' >= '2026-01-01', 'ng';");
+  expect(lastStatus(results)).toBe("success");
+});
+
+test("B209: 空文字の比較は定義済みの規則のまま（WHERE と同じ −∞）", async () => {
+  expect(lastStatus(await runWith("ASSERT '' < -1000000, 'ng';"))).toBe("success");
+  expect(lastStatus(await runWith("ASSERT '' >= -1000000, 'ng';"))).toBe("error");
+});
+
+test("B209: WHERE の変数の置換は変わらない（押し下げの形を変えていない）", async () => {
+  const calls: string[] = [];
+  const base = mockClient() as unknown as { getRecords: (p: { query: string }) => Promise<unknown> };
+  const original = base.getRecords.bind(base);
+  const client = { ...base, async getRecords(params: { query: string }) { calls.push(params.query); return original(params); } };
+  const parsed = parseScript(
+    `${header}DECLARE @limit = 5;\nSELECT $id FROM APP200 WHERE 残数 > @limit;`
+  );
+  const context = createExecutionContext({
+    client: client as never, statements: parsed.statements, meta: parsed.meta, maxRecords: 1000,
+  });
+  for (const statement of parsed.statements) await executeStatement(statement, context);
+  await disposeExecutionContext(context);
+  // 数値リテラルの宣言でも STRING ノードのまま置換する＝クエリの形は今までと同じ。
+  // どんな形で送っているかをそのまま出して固定する（押し下げの有無が変わっていないこと）
+  expect(calls.length).toBeGreaterThan(0);
+  expect(calls.join(" | ")).toMatchSnapshot("WHERE の変数の置換（B209 で変えていない）");
+});
+
+// ============================================================
+// レビュー（Codex）が求めた負例と、システム列の扱い
+// ============================================================
+
+test("B208: $revision と $id は数値（engine 全体の systemColumnMeta と一貫）", async () => {
+  // 依頼文で「$revision は文字列のシステム項目」と例示したのは誤りで、
+  // systemColumnMeta は $revision も $id も number と宣言している（ORDER BY なども数値で扱う）
+  expect(lastStatus(await run("ASSERT (SELECT $revision FROM APP200 WHERE $id = 10) <= 100, 'ng';"))).toBe("success");
+  expect(lastStatus(await run("ASSERT (SELECT $id FROM APP200 WHERE $id = 10) <= 100, 'ng';"))).toBe("success");
+});
+
+test("B208: 日付の項目は文字列のまま（辞書順が正しい形）", async () => {
+  // DATE / DATETIME は文字列なので、数値リテラルとの大小比較は混在エラー（B209）
+  const results = await run("ASSERT (SELECT 受注日 FROM APP200 WHERE $id = 1) <= 20260101, 'ng';");
+  expect(lastStatus(results)).toBe("error");
+  expect((results[results.length - 1] as { error?: { message: string } }).error?.message)
+    .toContain("数値と文字列を比べています");
+});
+
+test("B208: 選択肢の項目は数値に昇格しない", async () => {
+  const results = await run("ASSERT (SELECT 区分 FROM APP200 WHERE $id = 1) <= 100, 'ng';");
+  expect(lastStatus(results)).toBe("error");
+  expect((results[results.length - 1] as { error?: { message: string } }).error?.message)
+    .toContain("数値と文字列を比べています");
+});
+
+test("B208: 来歴の分からない一時テーブルの列は数値に昇格しない", async () => {
+  // 文字列を連結した列（型が決まらない）を一時テーブルに入れて比べる
+  const results = await run(
+    "CREATE TEMP TABLE #m AS SELECT CONCAT('1', '2') AS mix FROM APP200 WHERE $id = 1;\n"
+    + "ASSERT (SELECT mix FROM #m) <= 100, 'ng';"
+  );
+  expect(lastStatus(results)).toBe("error");
+  expect((results[results.length - 1] as { error?: { message: string } }).error?.message)
+    .toContain("数値と文字列を比べています");
 });

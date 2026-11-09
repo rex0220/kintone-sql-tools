@@ -261,10 +261,17 @@ export interface CreateExecutionContextOptions extends ParseScriptOptions {
   dmlMaxRows?: number;
   dmlMaxSubtableRows?: number;
   /**
+   * B197（v3.93.0〜）: `CREATE TEMP TABLE … AS SELECT` の**元の読み取り**だけに効く上限（省略時は `maxRecords`）。
+   * `maxRecords` を低く固定している呼び側で、大きい表を作るときだけ読む量を上げるために使う。
+   * 明細の SELECT や DML のソースの上限は `maxRecords` のまま。
+   */
+  tempTableReadMaxRecords?: number;
+  /**
    * 一時テーブル 1 つの**行数**の上限（既定 10,000 行。超過は常にエラー＝`onLimitReached` を見ない）。
    *
    * B197 / 依頼 KJ-11 の ②（v3.93.0〜）: **読む量ではなく、出来た表の行数**の上限です。
-   * `CREATE TEMP TABLE … AS SELECT` が読む件数の上限は `maxRecords`（読み取りごと）で、
+   * `CREATE TEMP TABLE … AS SELECT` が読む件数の上限は `tempTableReadMaxRecords` か `maxRecords`
+   * （どちらも省略したときだけ `max(10,000, tempTableMaxRows)`）で、
    * 出来た行数がこの値を超えると `TempTableRowLimitError` で**登録しません**
    * （JOIN・UNION・CTE・`GENERATE_SERIES` で増えた行も対象）。
    * v3.92.0 までは**読み取りの上限として** `maxRecords` に差し替えていたため、
@@ -275,7 +282,7 @@ export interface CreateExecutionContextOptions extends ParseScriptOptions {
    * いま残っている一時テーブルの行数の合計の上限（B196。正の安全な整数。省略時は上限なし）。
    * CREATE TEMP TABLE とエラー表（VALIDATE / ON ERROR SKIP の INTO）を数え、DROP TEMP TABLE で外した表は数えない。
    * 登録・追加の前に確かめ、超える文は TempTableTotalLimitError（表は登録・追加しない・書込 0 回）。
-   * CREATE TEMP TABLE の読取は min(maxRecords, 残り) で止める（集計なども読む行数で数える）。
+   * CREATE TEMP TABLE の読取は min(読む量の上限, 残り) で止める（集計なども読む行数で数える）。
    */
   tempTablesMaxTotalRows?: number;
   timeoutMs?: number;

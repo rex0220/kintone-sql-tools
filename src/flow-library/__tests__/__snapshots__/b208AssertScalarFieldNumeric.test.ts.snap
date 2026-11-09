@@ -1,0 +1,3 @@
+// Jest Snapshot v1, https://goo.gl/fbAQLP
+
+exports[`B209: WHERE の変数の置換は変わらない（押し下げの形を変えていない）: WHERE の変数の置換（B209 で変えていない） 1`] = `"残数 > "5" order by $id asc limit 500 offset 0"`;

@@ -118,8 +118,27 @@ export function validateDeclaredBatchVariables(
     if (injectedArray) {
       assertArrayLength(name, (value as readonly string[]).length, arrayMaxElements, "injected value");
     }
+    // B209: **宣言が種類を決める**（B203 の配列と同じ考え）。数値リテラルで宣言した変数には
+    // 数値として読める文字列だけを注入できる。読めない値は**レコードを 1 件も読む前**に止める。
+    if (!declaredArray && declaration.annotation !== "RELATIVE_DATE"
+      && declaration.default.type === "NUMBER" && !isNumericVariableText(value as string)) {
+      throw new Error(
+        `ArgumentError: variable @${name} is declared as a number (DECLARE @${name} = <数値>); `
+        + `inject a numeric string (got "${String(value)}").`
+      );
+    }
   }
   return normalized;
+}
+
+/**
+ * B209: 数値として読める文字列か（注入された値の検証）。
+ * **値から型を推測するためではなく、宣言した型に合うかを確かめるため**に使う
+ * （B171 の「実値推測禁止」＝宣言や列の種類が無いところで値から型を決めない、とは別の話）。
+ */
+export function isNumericVariableText(value: unknown): boolean {
+  if (typeof value !== "string" || value.trim() === "") return false;
+  return Number.isFinite(Number(value));
 }
 
 function assertArrayLength(name: string, length: number, max: number, source: string): void {

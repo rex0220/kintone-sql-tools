@@ -38,7 +38,11 @@ function mockClient(count: number) {
       const limit = /limit (\d+)/.exec(query)?.[1];
       // 押し下げた `v < N` だけ真似る（JOIN の試験で元の表を小さくするため）
       const lt = /v < (\d+)/.exec(query);
-      const hit = lt ? rows.filter((row) => Number(row.v.value) < Number(lt[1])) : rows;
+      let hit = lt ? rows.filter((row) => Number(row.v.value) < Number(lt[1])) : rows;
+      // **offset 10,000 の壁で `$id >` のカーソルに切り替わる**（実機の fetchAll の動き）。
+      // ここを真似ないと同じページを返して重複し、上限の試験が嘘になる
+      const cursor = /\$id > (\d+)/.exec(query);
+      if (cursor) hit = hit.filter((row) => Number(row.$id.value) > Number(cursor[1]));
       const page = hit.slice(offset, limit === undefined ? undefined : offset + Number(limit));
       readRows += page.length;
       return params.totalCount === true
@@ -147,25 +151,45 @@ test("B197: 読む量が maxRecords で止まったら、maxRecords の名前で
   expect(results[0].error?.message).toContain("maxRecords");
 });
 
-test("B197: tempTableMaxRows のほうが大きいときはそこまで読み、その名前で案内する", async () => {
-  const { results, readRows } = await run(
+test("B197: 明示した maxRecords は必ず効く（tempTableMaxRows が大きくても）", async () => {
+  const { results } = await run(
     "CREATE TEMP TABLE #r AS SELECT k, v FROM APP200;\nSELECT COUNT(*) AS c FROM #r;",
     { maxRecords: 3, tempTableMaxRows: 8 }
   );
-  // 読む量の上限は max(3, 8) = 8 行＝8 行まで読んで止まる
-  expect(results[0]).toMatchObject({ status: "error", error: { code: "TempTableRowLimitError" } });
-  expect(results[0].error?.message).toContain("8 行・tempTableMaxRows");
-  expect(results[0].error?.message).toContain("maxRecords は 3 行");
-  expect(readRows()).toBeLessThanOrEqual(12);
+  expect(results[0]).toMatchObject({ status: "error", error: { code: "FetchAllLimitError" } });
+  expect(results[0].error?.message).toContain("上限（3 件）");
+  expect(results[0].error?.message).toContain("maxRecords");
 });
 
-test("B197: tempTableMaxRows だけ上げれば大きい表が作れる（MCP の公開の契約と同じ使い方）", async () => {
+test("B197: maxRecords を省略すれば tempTableMaxRows まで読む（10,001 行）", async () => {
+  // MCP / CLI の公開の契約（tempTableMaxRows だけ上げて大きい表を作る）と同じ形を /flow で固定する
   const { results } = await run(
-    "CREATE TEMP TABLE #r AS SELECT k, v FROM APP200;\nSELECT COUNT(*) AS c FROM #r;",
-    { maxRecords: 5, tempTableMaxRows: 20 }
+    "CREATE TEMP TABLE #r AS SELECT k FROM APP200;\nSELECT COUNT(*) AS c FROM #r;",
+    { tempTableMaxRows: 20_000 },
+    10_001
   );
-  expect(results[0]).toMatchObject({ status: "success", rowCount: 12 });
-  expect((results[1].result as { rows: Array<Record<string, string>> }).rows).toEqual([{ c: "12" }]);
+  expect(results[0]).toMatchObject({ status: "success", rowCount: 10_001 });
+});
+
+test("B197: maxRecords も tempTableMaxRows も省略すれば既定 10,000 で止まる", async () => {
+  const { results } = await run(
+    "CREATE TEMP TABLE #r AS SELECT k FROM APP200;\nSELECT COUNT(*) AS c FROM #r;",
+    {},
+    10_001
+  );
+  expect(results[0]).toMatchObject({ status: "error" });
+  expect(results[0].error?.message).toContain("10000");
+});
+
+test("B197: 10,000 行ちょうど（500 の倍数）の表は作れる", async () => {
+  // fetchAll は最後のページが満杯だと続きを確かめずに上限超えにしていたので、
+  // 上限ちょうどの表が作れなかった（1 件多く読んで区別するようにした）
+  const { results } = await run(
+    "CREATE TEMP TABLE #r AS SELECT k FROM APP200;\nSELECT COUNT(*) AS c FROM #r;",
+    {},
+    10_000
+  );
+  expect(results[0]).toMatchObject({ status: "success", rowCount: 10_000 });
 });
 
 test("B197: 上限ちょうどの行数は通る", async () => {

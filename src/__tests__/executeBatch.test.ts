@@ -558,7 +558,7 @@ test("ON ERROR SKIP の #err 上限超過は prepared plan を書き込まない
     { cacheContext: "on-error-temp-limit", tempTableMaxRows: 0 }
   );
   expect(batch.statements[0]).toMatchObject({ status: "error" });
-  expect(batch.statements[0].error?.message).toMatch(/temp table #err exceeds max rows/);
+  expect(batch.statements[0].error?.message).toMatch(/一時テーブル 1 つの上限（0 行）を超えるため/);
   expect(client.postCalls).toHaveLength(0);
 });
 
