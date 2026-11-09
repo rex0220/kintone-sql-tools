@@ -2001,8 +2001,31 @@ function buildDefaultCaseOutputKeys(columns: SelectColumn[]): Map<number, string
  * 行のオブジェクトで後の列が前の列を上書きして黙って消えていた（再帰 CTE では 2 列とも同じ値）。
  * - 重なっていない列の名前は変えない（今の名前を使っている SQL・設定を壊さない）
  * - 中身が同じ式どうし（`ROUND(x), ROUND(x)`）は値も同じなので、今までどおり同じ名前
+ *   （UNION で後の枝の値を受けるときは、UNION の側で番号を付ける＝`withUniqueColumnNames`）
  * - 番号は、別名とほかの列の既定の名前に使われていないものを選ぶ（列そのものの CASE の case_2 と同じ形）
  */
+/**
+ * B211: 式が同じかを比べるための文字列。数値の書き方（`raw`。`2` と `2e0`）は名前に出ないので比べない。
+ */
+export function expressionSignature(value: unknown): string {
+  return JSON.stringify(value, (key, entry: unknown) => (key === "raw" ? undefined : entry));
+}
+
+/**
+ * B211: SELECT の各列の出力の名前（射影と同じ規則。ワイルドカードの列は undefined）。
+ * EXPLAIN の列名の推定や、一時テーブルの列の型を、実行と同じ名前で作るために使う。
+ */
+export function selectColumnOutputKeys(columns: SelectColumn[]): Array<string | undefined> {
+  const defaultFieldKeys = buildDefaultFieldOutputKeys(columns);
+  const defaultCaseKeys = buildDefaultCaseOutputKeys(columns);
+  const defaultExpressionKeys = buildDefaultExpressionOutputKeys(columns);
+  return columns.map((column, index) => (
+    column.type === "WILDCARD" || column.type === "PARENT_WILDCARD"
+      ? undefined
+      : computeOutputKey(column, index, defaultFieldKeys, defaultCaseKeys, defaultExpressionKeys)
+  ));
+}
+
 function buildDefaultExpressionOutputKeys(columns: SelectColumn[]): Map<number, string> {
   const baseOf = (column: SelectColumn): string | undefined => {
     if (!("alias" in column) || column.alias !== null) return undefined;
@@ -2023,7 +2046,7 @@ function buildDefaultExpressionOutputKeys(columns: SelectColumn[]): Map<number, 
   for (const [index, column] of columns.entries()) {
     const base = bases[index];
     if (base === undefined) continue;
-    const signature = JSON.stringify((column as { expr: unknown }).expr);
+    const signature = expressionSignature((column as { expr: unknown }).expr);
     for (let suffix = 1; ; suffix++) {
       const name = suffix === 1 ? base : `${base}_${suffix}`;
       const owner = owners.get(name);

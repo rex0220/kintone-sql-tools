@@ -213,6 +213,8 @@ import {
   OptionOrderMap,
   FieldSortKindMap,
   type AggregateSortKindResolver,
+  selectColumnOutputKeys,
+  expressionSignature,
 } from "./engine/process";
 import { expandSubtableRecords } from "./converter/subtableAdapter";
 import type { ResolvedSubqueryInList, ResolvedExistsExpr, ResolvedScalarSubquery, FieldTypeResolver, FieldSemanticsResolver } from "./engine/evalWhere";
@@ -6885,9 +6887,12 @@ async function inferSelectColumnMeta(
   const explicitColumns = stmt.columns.filter(
     (column) => column.type !== "WILDCARD" && column.type !== "PARENT_WILDCARD"
   );
+  // B211: ワイルドカードと一緒のときも、別名の無い式の列（番号を付けた `_2` を含む）に実行と同じ名前で型を付ける
+  const explicitOutputKeys = selectColumnOutputKeys(stmt.columns)
+    .filter((key): key is string => key !== undefined);
   explicitColumns.forEach((column, index) => {
       const output = hasWildcard
-        ? ("alias" in column && column.alias ? column.alias : undefined)
+        ? explicitOutputKeys[index]
         : outputColumns[index];
       if (!output) return;
       let meta: MaterializedColumnMeta | undefined;
@@ -7381,12 +7386,55 @@ function alignSelectResultByPosition(
   return aligned;
 }
 
+/**
+ * B211: UNION の 1 つ目の枝の列名が重なっていたら（`SELECT x, x` や中身が同じ式を 2 列）、2 つ目から番号を付けて位置どおりに持つ。
+ * 重なったままだと、後の枝の値を位置どおりに写すときに同じキーへ入り、片方が消えていた（`… UNION ALL SELECT 7, 8` の 7）。
+ * 1 つ目の枝の値は、重なった列どうし同じキーから読むので変わらない。
+ */
+function withUniqueColumnNames(result: SelectResult): SelectResult {
+  if (new Set(result.columns).size === result.columns.length) return result;
+  const used = new Set(result.columns);
+  const seen = new Set<string>();
+  const columns = result.columns.map((name) => {
+    if (!seen.has(name)) {
+      seen.add(name);
+      return name;
+    }
+    for (let suffix = 2; ; suffix++) {
+      const candidate = `${name}_${suffix}`;
+      if (used.has(candidate)) continue;
+      used.add(candidate);
+      seen.add(candidate);
+      return candidate;
+    }
+  });
+  const rows = result.rows.map((row) => {
+    const mapped: ProcessRow = { ...row };
+    columns.forEach((column, index) => {
+      mapped[column] = row[result.columns[index]] ?? "";
+    });
+    return mapped;
+  });
+  const renamed: SelectResult = { ...result, rows, columns };
+  const meta = materializedMetaBySelectResult.get(result);
+  if (meta) {
+    const remapped = new Map<string, MaterializedColumnMeta>();
+    columns.forEach((column, index) => {
+      const inferred = meta.get(result.columns[index]);
+      if (inferred) remapped.set(column, column === result.columns[index] ? inferred : { ...inferred, displayName: column });
+    });
+    materializedMetaBySelectResult.set(renamed, remapped);
+  }
+  return renamed;
+}
+
 function combineUnionResults(
-  leftResult: SelectResult,
+  rawLeftResult: SelectResult,
   rightResult: SelectResult,
   all: boolean,
   captureColumnMeta: boolean
 ): SelectResult {
+  const leftResult = withUniqueColumnNames(rawLeftResult);
   const alignedRight = alignSelectResultByPosition(rightResult, leftResult.columns);
   const combined = [...leftResult.rows, ...alignedRight.rows];
   const rows = all ? combined : deduplicateRows(combined, leftResult.columns);
@@ -7496,39 +7544,29 @@ function recursiveOutputColumns(cte: CteDefinition): string[] {
 }
 
 /**
- * B211: 再帰 CTE の seed と再帰項を、列名リスト（または seed の出力名）の名前で**位置どおり**受ける。
- * 別名の無い式の列に、その位置の名前を別名として付けてから実行する（項目の列と、書いた別名はそのまま）。
- * 以前は SELECT の結果の行を名前で写していたので、既定の名前が重なる列（`CAST(case,'NUMBER')` を 2 つ）は
- * 写す前に値が上書きされ、2 列とも同じ値になっていた。
+ * B211: 再帰 CTE の seed と再帰項は、出力の列を**位置どおり**に列名リストの名前へ写す（`alignSelectResultByPosition`）。
+ * 写せるのは、SELECT の結果の行で列の名前が重ならないときだけ（重なると、写す前に行のオブジェクトで値が上書きされる）。
+ * 別名の無い式の列の既定の名前は B211 の案 B で重ならなくなったので、残るのは**書いた名前**（項目の名前・書いた別名）が
+ * 中身の違う列と重なる形。そのときは、どちらの値を受けるか決められないので実行の前に止める。
+ * 中身が同じ列どうし（`SELECT x, x`）は値も同じなので通す。
  */
-function withRecursivePositionalAliases(stmt: SelectStatement, outputColumns: readonly string[]): SelectStatement {
-  if (stmt.columns.length !== outputColumns.length) return stmt;
-  if (stmt.columns.some((column) => column.type === "WILDCARD" || column.type === "PARENT_WILDCARD")) return stmt;
-  let changed = false;
-  const columns = stmt.columns.map((column, index) => {
-    if (column.type === "FIELD" || !("alias" in column) || column.alias !== null) return column;
-    changed = true;
-    return { ...column, alias: outputColumns[index] } as SelectColumn;
-  });
-  return changed ? { ...stmt, columns } : stmt;
-}
-
-/** B211: 書いた別名が重なり、式が違う列があれば止める（どちらの値を受けるか決められない）。 */
-function assertRecursiveAliasesDistinct(cteName: string, part: string, stmt: SelectStatement): void {
+function assertRecursiveOutputNamesDistinct(cteName: string, part: string, stmt: SelectStatement): void {
+  const keys = selectColumnOutputKeys(stmt.columns);
   const seen = new Map<string, { index: number; signature: string }>();
   stmt.columns.forEach((column, index) => {
-    if (!("alias" in column) || typeof column.alias !== "string") return;
-    const { alias: _alias, aliasDisplay: _display, ...rest } = column as { alias: string; aliasDisplay?: unknown };
-    const signature = JSON.stringify(rest);
-    const first = seen.get(column.alias);
+    const key = keys[index];
+    if (key === undefined) return;
+    const { alias: _alias, aliasDisplay: _display, ...rest } = column as { alias?: unknown; aliasDisplay?: unknown };
+    const signature = expressionSignature(rest);
+    const first = seen.get(key);
     if (!first) {
-      seen.set(column.alias, { index, signature });
+      seen.set(key, { index, signature });
       return;
     }
     if (first.signature !== signature) {
       throw new Error(
-        `PlanningError: 再帰 CTE「${cteName}」の${part}の第 ${first.index + 1} 列と第 ${index + 1} 列の別名が同じ（${column.alias}）で、式が違います。`
-        + "列名リストで名前を付けるときも、SELECT の中の別名は分けてください"
+        `PlanningError: 再帰 CTE「${cteName}」の${part}の第 ${first.index + 1} 列と第 ${index + 1} 列が同じ名前（${key}）で、式が違います。`
+        + "どちらの値を受けるか決められないので、別名を分けてください（列名リストで名前を付けるときも、SELECT の中の名前は重ねない）"
       );
     }
   });
@@ -7879,8 +7917,8 @@ async function executeRecursiveCte(
 ): Promise<SelectResult> {
   const spec = cte.recursiveSpec!;
   const outputColumns = recursiveOutputColumns(cte);
-  assertRecursiveAliasesDistinct(cte.name, "seed", spec.seed);
-  assertRecursiveAliasesDistinct(cte.name, "再帰項", spec.recursiveTerm);
+  assertRecursiveOutputNamesDistinct(cte.name, "seed", spec.seed);
+  assertRecursiveOutputNamesDistinct(cte.name, "再帰項", spec.recursiveTerm);
   const seedMeta = await inferRecursiveProjectionMeta(
     spec.seed, outputColumns, client, cacheContext, cteCache
   );
@@ -7919,10 +7957,8 @@ async function executeRecursiveCte(
   );
   const runtimeCache = new Map(cteCache);
   for (const source of sources.values()) runtimeCache.set(source.name, source.table);
-  const seedQuery = withRecursivePositionalAliases(rewriteRecursivePhysicalSources(spec.seed, sources), outputColumns);
-  const termQuery = withRecursivePositionalAliases(
-    rewriteRecursivePhysicalSources(spec.recursiveTerm, sources), outputColumns
-  );
+  const seedQuery = rewriteRecursivePhysicalSources(spec.seed, sources);
+  const termQuery = rewriteRecursivePhysicalSources(spec.recursiveTerm, sources);
   const rawSeed = await executeQueryWithCte(seedQuery, client, options, runtimeCache, cacheContext, true, true);
   const seed = alignSelectResultByPosition(rawSeed, outputColumns, seedMeta);
   const cycle = spec.cycle;
@@ -13551,12 +13587,14 @@ async function buildExplainWhereAnalysis(
         return sourceColumns;
       }
       const output: string[] = [];
-      for (const column of select.columns) {
+      // B211: 名前の重なりの番号は列の並び全体で決まるので、列をまとめて実行と同じ名前にする
+      const outputKeys = selectColumnOutputKeys(select.columns);
+      for (const [columnIndex, column] of select.columns.entries()) {
         if (column.type === "WILDCARD") output.push(...sourceColumns);
         else if (column.type === "PARENT_WILDCARD") {
           output.push(...sourceColumns.filter((name) => name.startsWith("_p.")));
         } else {
-          output.push(...project([], [column]).columns);
+          output.push(outputKeys[columnIndex] ?? project([], [column]).columns[0]);
         }
       }
       return output;
@@ -14472,12 +14510,14 @@ function inferStaticExplainSchema(
     return schema?.status === "STATIC" ? [...schema.columns] : [];
   });
   const columns: string[] = [];
-  for (const column of node.columns) {
+  // B211: 名前の重なりの番号は列の並び全体で決まるので、列をまとめて実行と同じ名前にする
+  const outputKeys = selectColumnOutputKeys(node.columns);
+  for (const [columnIndex, column] of node.columns.entries()) {
     if (column.type === "WILDCARD") columns.push(...sourceColumns);
     else if (column.type === "PARENT_WILDCARD") {
       columns.push(...sourceColumns.filter((name) => name.startsWith("_p.")));
     } else {
-      columns.push(...project([], [column]).columns);
+      columns.push(outputKeys[columnIndex] ?? project([], [column]).columns[0]);
     }
   }
   return { status: "STATIC", columns };
