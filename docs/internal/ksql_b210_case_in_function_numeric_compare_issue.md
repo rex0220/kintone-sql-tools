@@ -1,10 +1,10 @@
 # B210 関数・集計の引数や UPDATE の SET に置いた `CASE` が、数値の項目の大小を辞書順で比べる（黙って誤る）
 
-- 状態: 🚧 **v3.94.0 に同梱（PR #423 でマージ）・タグと公開待ち（2026-11-10）**
+- 状態: ✅ **v3.94.0 で公開済み（2026-11-10）**＝npm latest 3.94.0・GitHub Release。公開した tarball の dist-flow で再現スクリプト（`work-link/ksql-case-in-function-probe.cjs` ほか）が全部正しい値になることを確かめた
 - 種別: 正しさ（**黙って誤る**。エラーにならず値が違う。**UPDATE / DELETE では誤った行・誤った値を書く**）。**結果が変わる**
 - 優先: 高（言語リファレンス §8 が勧める `SUM(CASE WHEN 売上 > 0 THEN 1 ELSE 0 END)` がこの形。`> 0` は正の数ならたまたま合うが、`> 5` のような比較で誤る）
 - 版: minor（v3.94.0）。**規模 M**
-- 見つけ方: kSQL アクションの次の事例（在庫・発注ロット）を試していて、`CAST(CASE … AS NUMBER)` を 2 列並べた再帰の結果が手計算と合わず、切り分けた（`work-link/ksql-case-in-function-probe.cjs`。エンジンのライブラリ 3.93.0 ＋ 型を持つ代役のアプリ）
+- 見つけ方: kSQL アクションの次の事例（在庫・発注ロット）を試していて、`CAST(CASE … AS NUMBER)` を 2 列並べた再帰の結果が手計算と合わず、切り分ける途中で見つけた（`work-link/ksql-case-in-function-probe.cjs`。エンジンのライブラリ 3.93.0 ＋ 型を持つ代役のアプリ）。**その再帰の誤りの本体は別の不具合だった**（別名の無い関数の列の既定名が重なる＝[B211](ksql_b211_function_column_default_key_collision_issue.md)。公開した v3.94.0 で確かめ直して分かった）
 - 関連: [B171](https://github.com/rex0220/kintone-sql-tools/releases/tag/v3.72.0)（型 provenance 方式・実値推測禁止）、[B208](ksql_b208_assert_scalar_field_numeric_issue.md) / [B209](ksql_b209_variable_numeric_provenance_issue.md)（同じ種類の残りを `ASSERT` で直した）、[B141](ksql_b141_doc_sql_unverified_issue.md)（文書の例）
 
 ## 1. 現象（v3.93.0 の実測）
