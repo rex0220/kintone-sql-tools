@@ -42,7 +42,7 @@
 | エンジンのライブラリの `runQuery`（Dashboard Pro が使う） | `columns` は `r` の 1 件だけ（型の情報も `r` だけ） |
 | kSQL Dashboard Pro の表・CSV ダウンロード | `src/desktop/PaneView.tsx` が `result.columns` の名前で描く・書き出すので、`*` の列が欠ける（コードを読んで確かめた。実機は見ていない） |
 
-再現のスクリプト（kintone-plugin の work-link）: `ksql-b212-wildcard-probe.cjs`（表の 1〜9。`/flow`）、`ksql-b212-wildcard-runquery-probe.cjs`（`runQuery`）、`ksql-b212-wildcard-cli-probe.ts`（CLI の `buildOutput`。esbuild で束ねて実行）。
+再現のスクリプト（kintone-plugin の work-link）: `ksql-b212-wildcard-probe.cjs`（表の 1〜9。`/flow`。2026-11-10 に代役が `番号 = N` で絞るように直し、9 を本当に 0 行にして同じ結果を確かめた）、`ksql-b212-wildcard-dml-probe.cjs`（§3.1 の D1〜D21。書き込みは代役が受けるだけ）、`ksql-b212-wildcard-runquery-probe.cjs`（`runQuery`）、`ksql-b212-wildcard-cli-probe.ts`（CLI の `buildOutput`。esbuild で束ねて実行）。
 
 ## 2. 原因（確定）
 
@@ -60,10 +60,33 @@
 
 ## 3. 直し方の案（再開するとき）
 
-- **案 A（推奨）**: `project()` で直す。1 行以上は `SELECT *` と同じく行のキーの順を列一覧にする（`*` の位置に展開した列、明示した列はその位置。`SELECT *, 番号` のように名前が重なる列は 1 列）。0 行は、元の表の列が分かるとき（B88 で戻した `sourceColumns`）はそれで展開し、分からないときは今どおり明示した列だけ。一時テーブル・CTE の列の型（`inferSelectColumnMeta` のワイルドカード混在の分岐）も、`*` の列に元の項目の型を付ける（1.2 の 7 を数値で比べるため）。固定した試験 2 件を直す。列が増えるのは挙動の変化なので minor で CHANGELOG に書く。
+- **案 A（推奨）**: `project()` で直す。1 行以上は `SELECT *` と同じく行のキーの順を列一覧にする（`*` の位置に展開した列、明示した列はその位置。`SELECT *, 番号` のように名前が重なる列は 1 列）。0 行は、元の表の列が分かるとき（B88 で戻した `sourceColumns`）はそれで展開し、分からないときは今どおり明示した列だけ。一時テーブル・CTE の列の型（`inferSelectColumnMeta` のワイルドカード混在の分岐）も、`*` の列に元の項目の型を付ける（1.2 の 7 を数値で比べるため）。固定した試験 2 件を直す。**サブクエリの 4 つの口（`IN`・`WHERE` のスカラー・`SET` のスカラー・`SELECT` の列のスカラー）に「列は 1 つ」の検査を同時に入れる**（入れないと先頭の `*` の列を黙って使う。§3.1）。列が増えるのは挙動の変化なので minor で CHANGELOG に書く。
 - 案 B: 一時テーブル・CTE の検査だけ行のキーで通す。範囲は狭いが、CLI と Dashboard Pro で列が欠けるのが残るので採らない。
 
-案 A の前に確かめること: `INSERT/UPSERT … SELECT *, 式` は元の列一覧の位置で値を移す。今は `INSERT INTO X (a) SELECT *, r` が `a ← r` として通っているとみられ、直すと列の数が合わなくなって止まる側に変わる（誤った値は書かない）。kSQL アクションの事例と契約の試験、Dashboard Pro の設定にこの形が無いかを先に洗う。
+### 3.1 案 A の前の洗い出し（2026-11-10。v3.95.0、代役のアプリ。再現は work-link の `ksql-b212-wildcard-dml-probe.cjs`）
+
+列一覧（`columns`）の**位置**で値を取る口が、ほかにもある。混ぜる形では今はどこも**明示した列**を使っていて、案 A で `*` の列が先頭に入ると次のように変わる。
+
+| 口 | 今（3.95.0） | 案 A の後 | 変わり方 |
+|---|---|---|---|
+| `INSERT/UPSERT … SELECT *, 式`（execute.ts:11468・11491 ほか） | `INSERT INTO X (a) SELECT *, r` が `a ← r` で書く（D1・D3・D4） | 列の数が合わず止まる | 止まる側 |
+| `UNION`（execute.ts:7344） | `SELECT *, 番号 AS y … UNION ALL SELECT 番号 …` が 1 列どうしで通る（D11） | 列の数が合わず止まる | 止まる側 |
+| `ASSERT` のスカラー（execute.ts:4175 で列は 1 つか検査） | 1 列として通る（D15） | 止まる | 止まる側 |
+| `IN (SELECT *, 式 …)`（execute.ts:13290） | 明示した列で比べる（D10・D16） | **先頭の `*` の列（`$id` など）で比べる** | **黙って結果が変わる** |
+| `WHERE` のスカラー（execute.ts:13299） | 明示した列の値（D12） | **先頭の `*` の列の値** | **黙って結果が変わる** |
+| `UPDATE … SET a = (SELECT *, 式 …)`（execute.ts:13342） | 明示した列の値を書く（D13） | **先頭の `*` の列の値を書く** | **黙って誤った値を書く** |
+| `SELECT` の列のスカラー（execute.ts:13374） | 明示した列の値（D14） | **先頭の `*` の列の値** | **黙って結果が変わる** |
+
+- 下の 4 つは**列が 1 つかを確かめていない**。ワイルドカードが無くても、2 列のサブクエリ（`IN (SELECT 増減, 番号 …)` など）が先頭の列で黙って続く（D17〜D20）。止めるのは `ASSERT` だけ（構文で `scalar subquery in ASSERT must return exactly 1 column.`。D21）。
+- **案 A には、この 4 つの口に「列は 1 つ」の検査（`ASSERT` と同じ）を一緒に入れることが要る**。入れずに直すと fail-open になる。入れると今の 2 列のサブクエリも止まる側に変わる（これ自体が別の穴なので、別の番号で起票して同時に直すのがよい）。
+- 0 行の `INSERT … SELECT *, 式` は、今は書かずに通る（D6）。案 A で 0 行も `sourceColumns` で展開すると、列の数が合わず止まる側に変わる。
+
+使っている所（2026-11-10 に検索。`SELECT *,`・`, * FROM`・`SELECT t.*,`。JSON の中の `\n` も空白として探した）:
+
+- **0 件**: kSQL アクション（src・docs・試験・事例）、kSQL ジョブ実行、kSQL アクションのオーサリング、kSQL Dashboard Pro（本体・サンプル・資料）とそのオーサリング、ksql・ksql-flow 系、work-link の設定ファイル（開発環境のアプリから読んだもの）。
+- 公開中の Qiita「rex0220 kSQL 言語リファレンス」（e089fddf4229d74be699）に、§4 で直した例 `SELECT *, CURRENT_DATE() AS 今日` が 2 か所残っていた（Qiita 側は 2026-08-23 の 58480985 の写しだった）。**同日に 1a97adc5 の言語仕様で出し直した**（非推奨の記載も入った）。「その５（サブテーブル）」（d7a720aadd484757e9ca）の `SELECT _p.*, 商品コード, 数量` は `_p.*` なので当たらない。
+- エンジンの試験: 直すのは `process.test.ts` の固定した 2 件（`*, _p.*, extra` を含む）と `b88EmptyWildcardSchemaRestore.test.ts:310`（混ぜる形で項目の定義を取らない）。`executeBatch.test.ts:1589`（一時テーブルに無い `extra` は拒否）は変わらない。B211 の試験（`b211DefaultKeyCollision.test.ts:139`）は直した後に名前で読む形にできる。
+- 利用者の設定（kSQL アクション・Dashboard Pro のペイン）は見られない。上の「止まる側」の変化は、利用者の設定でも誤った値は書かない。
 
 ## 4. 当面の扱い（2026-11-10。Takashi「OK」）
 

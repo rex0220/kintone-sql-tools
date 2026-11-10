@@ -758,7 +758,7 @@ SELECT * FROM APP100 WHERE 担当組織 in (PRIMARY_ORGANIZATION())
 **優先組織が未設定のユーザーでは、kintone がこの条件を無視し、
 他の条件を満たす全レコードを返します**（kintone 公式の記述。2026-07-31 に実機で再現を確認）。
 
-**エンジンからは、条件が無視されたかどうかを判別できません。**そのため扱いが分かれます。
+**エンジンからは、条件が無視されたかどうかを判別できません**。そのため扱いが分かれます。
 
 | | |
 |---|---|
@@ -956,7 +956,7 @@ WHERE 担当者 != '山田'
 
 ### 相対日付関数
 
-`YESTERDAY()`、`FROM_TODAY(...)`、週・月・年の相対日付関数は、4つの日付系フィールド型に対する比較右辺と `BETWEEN` 境界で使用できます。これらは server-only で、相対日付関数そのものを client 評価へ切り替えることはありません。単一 APP では、**その SELECT の `WHERE` 全体を exact pushdown できる形**（`OR` を含んでいても全体が押し下げ可能なら可。`GROUP BY` / `SELECT DISTINCT` / 集計 / ウィンドウ関数 / 通常の `ORDER BY`、実体化 CTE 本体、`WITH` の最終 SELECT、一時テーブル source、単一 CTE のインライン展開でも可）と、**相対日付 leaf が「相対日付を含まない残余」と AND で結ばれたトップレベルの単一物理アプリ SELECT**（相対日付 leaf だけを prefilter に載せ残余を client 評価・v3.21.0）で使えます。INNER JOIN では、全 source が alias 付き物理 APP のとき、**単一 alias の whole-WHERE exact（第5-W）**または**AND スパイン上の exact 関数 leaf を alias ごとに採用する形（第5-L）**で使えます。複数 alias へ分散した関数 leaf も各 APP へ押し下げ、関数を含まない残余だけを client 評価します。`LEFT` / `RIGHT JOIN`、cross-alias `OR`、関数を含む cross-table 述語、whole-WHERE exact でない KLIKE-containing `OR`、JOIN 入力がサブテーブル・入れ子 SELECT・派生表・CTE・一時テーブルの形は fail-closed です。単一 APP の prefilter＋残余は CTE 本体・`WITH` の最終 SELECT・一時テーブル source では使えません。`VALIDATE`、および**実体化 CTE 本体 / `WITH` 最終クエリ / 一時テーブル source が `UNION` の場合**も fail-closed です（トップレベルの `UNION` は枝ごとに判定します）。**`KORDER BY` と DML（`UPDATE` / `DELETE` の対象選択、`INSERT` / `UPSERT ... SELECT` の source）は whole-WHERE exact の形だけが使え、prefilter＋client 残余や FULL_SCAN_EXACT では使えません。** 関数一覧、引数、型・演算子、reason code、残る非対称、soft keyword とバッククォート退避は [§5「kintone クエリ関数」](#kintone-クエリ関数server-only) を参照してください。
+`YESTERDAY()`、`FROM_TODAY(...)`、週・月・年の相対日付関数は、4つの日付系フィールド型に対する比較右辺と `BETWEEN` 境界で使用できます。これらは server-only で、相対日付関数そのものを client 評価へ切り替えることはありません。単一 APP では、**その SELECT の `WHERE` 全体を exact pushdown できる形**（`OR` を含んでいても全体が押し下げ可能なら可。`GROUP BY` / `SELECT DISTINCT` / 集計 / ウィンドウ関数 / 通常の `ORDER BY`、実体化 CTE 本体、`WITH` の最終 SELECT、一時テーブル source、単一 CTE のインライン展開でも可）と、**相対日付 leaf が「相対日付を含まない残余」と AND で結ばれたトップレベルの単一物理アプリ SELECT**（相対日付 leaf だけを prefilter に載せ残余を client 評価・v3.21.0）で使えます。INNER JOIN では、全 source が alias 付き物理 APP のとき、**単一 alias の whole-WHERE exact**（第5-W）または**AND スパイン上の exact 関数 leaf を alias ごとに採用する形**（第5-L）で使えます。複数 alias へ分散した関数 leaf も各 APP へ押し下げ、関数を含まない残余だけを client 評価します。`LEFT` / `RIGHT JOIN`、cross-alias `OR`、関数を含む cross-table 述語、whole-WHERE exact でない KLIKE-containing `OR`、JOIN 入力がサブテーブル・入れ子 SELECT・派生表・CTE・一時テーブルの形は fail-closed です。単一 APP の prefilter＋残余は CTE 本体・`WITH` の最終 SELECT・一時テーブル source では使えません。`VALIDATE`、および**実体化 CTE 本体 / `WITH` 最終クエリ / 一時テーブル source が `UNION` の場合**も fail-closed です（トップレベルの `UNION` は枝ごとに判定します）。**`KORDER BY` と DML（`UPDATE` / `DELETE` の対象選択、`INSERT` / `UPSERT ... SELECT` の source）は whole-WHERE exact の形だけが使え、prefilter＋client 残余や FULL_SCAN_EXACT では使えません。** 関数一覧、引数、型・演算子、reason code、残る非対称、soft keyword とバッククォート退避は [§5「kintone クエリ関数」](#kintone-クエリ関数server-only) を参照してください。
 
 ### 型付き比較（v3.0.0）
 
@@ -968,7 +968,7 @@ WHERE 担当者 != '山田'
 - DROP_DOWN / RADIO_BUTTON / STATUS等は、取得できた定義順を使用します
 - 文字列（1行）等でkintone RESTが受理しない`<` / `>`は、SELECTでは自動的にローカル評価へ切り替えます。DMLは対象集合を暗黙に広げず、実行前にエラーにします
 
-v2までは数字だけの文字列を値ベースで数値比較する経路がありました。v3ではこのペア単位の自動切替を廃止したため、WHEREの結果行、集計値、DML候補が変わる場合があります。詳細は[v3.0.0 移行ガイド](ksql_v3_migration_guide.md)を参照してください。
+v2までは数字だけの文字列を値ベースで数値比較する経路がありました。v3ではこのペア単位の自動切替を廃止したため、WHEREの結果行、集計値、DML候補が変わる場合があります。詳細は[v3.0.0 移行ガイド](https://github.com/rex0220/kintone-sql-tools/blob/main/docs/ksql_v3_migration_guide.md)を参照してください。
 
 ### WHERE の REST 押し下げ
 
@@ -1116,7 +1116,7 @@ plain decimal に正規化し、安全整数外も元の10進字句を保持し�
 
 #### 押し下がる形への書き換え
 
-**結果は同じでも、書き方で取得件数が変わります。**下表は同じ意味のまま押し下がる形へ
+**結果は同じでも、書き方で取得件数が変わります**。下表は同じ意味のまま押し下がる形へ
 書き換える例です（`fetch:` は `EXPLAIN` の表示。→ [§24 出力の読み方](#出力の読み方)）。
 
 | 全件取得になる書き方 | なぜ | 押し下がる書き方 |
@@ -1154,7 +1154,7 @@ WHERE 件名 NOT KLIKE '保留'
 ```
 
 - `LIKE` はkSQLのワイルドカード／部分一致をJavaScriptで評価します。`KLIKE` はkintoneのキーワード検索であり、半角・全角、大小文字、単語分割などの一致規則はkintoneに準拠します。**SQLの部分一致とは異なる**点に注意してください。
-  - **一致挙動は文字種・用字系によって異なります**（詳細はkintoneの検索仕様に準拠）。**今回の実機観測**では次のとおりでした。**英数字例は空白区切りの語（トークン）単位**で一致し語の一部では一致せず、**日本語例は2文字以上の部分一致（中間を含む）**で一致し1文字では一致しませんでした。
+  - **一致挙動は文字種・用字系によって異なります**（詳細はkintoneの検索仕様に準拠）。**今回の実機観測**では次のとおりでした。**英数字例は空白区切りの語（トークン）単位**で一致し語の一部では一致せず、**日本語例は2文字以上の部分一致**（中間を含む）で一致し1文字では一致しませんでした。
 
     | 検索 | 対象の値 | 一致（観測例） |
     |---|---|---|
@@ -4067,9 +4067,9 @@ kintone から取得するソースが 1 つも無い文（一時テーブルだ
 
 #### 機械的に読む場合
 
-**計画本文の文字列を解析しないでください。**engine ライブラリでは
+**計画本文の文字列を解析しないでください**。engine ライブラリでは
 `explainQuery()` の結果の `plan` に同じ内容が構造で入ります
-（→ [エンジン・ライブラリ利用ガイド](ksql_engine_library.md)）。
+（→ [エンジン・ライブラリ利用ガイド](https://github.com/rex0220/kintone-sql-tools/blob/main/docs/ksql_engine_library.md)）。
 
 `fetch:` / `fetch summary:` / `mode:` / `kintone query:` は安定した読みどころですが、
 **それ以外の診断行は実装の詳細**であり、予告なく増減します。
@@ -4082,9 +4082,9 @@ kintone から取得するソースが 1 つも無い文（一時テーブルだ
 > `ksql_mutate` / `ksql_explain`）、engine ライブラリの `runBatch()` で利用可能**です。
 > プラグイン UI もバッチに対応し（DML を含むバッチも実行可能）、最後に結果セットを
 > 返した文（通常は最終 SELECT）だけを表示します。詳細仕様は
-> [ksql_batch_temp_table_spec.md](internal/ksql_batch_temp_table_spec.md) を参照してください。
+> [ksql_batch_temp_table_spec.md](https://github.com/rex0220/kintone-sql-tools/blob/main/docs/internal/ksql_batch_temp_table_spec.md) を参照してください。
 >
-> **リラン可能な差分更新バッチの設計パターン**（ステータス駆動・件数ゲート・スナップショット・バッチ変数の活用）は [ksql_batch_recipes.md](ksql_batch_recipes.md) にまとめています。
+> **リラン可能な差分更新バッチの設計パターン**（ステータス駆動・件数ゲート・スナップショット・バッチ変数の活用）は [ksql_batch_recipes.md](https://github.com/rex0220/kintone-sql-tools/blob/main/docs/ksql_batch_recipes.md) にまとめています。
 
 ### engine ライブラリで利用できる構文
 
@@ -4102,7 +4102,7 @@ engine ライブラリは read-only 専用です。書き込み DML、DML `VALID
 
 `results[]` の各 `metrics` は文別計測ではなく、同一の**バッチ全体集計値**です。
 文ごとの性能コストとして解釈しないでください。API と型の詳細は
-[エンジン・ライブラリ利用ガイド](ksql_engine_library.md)を参照してください。
+[エンジン・ライブラリ利用ガイド](https://github.com/rex0220/kintone-sql-tools/blob/main/docs/ksql_engine_library.md)を参照してください。
 
 ### 複文（バッチ）
 
@@ -4665,7 +4665,7 @@ EXIT SUCCESS IF (SELECT COUNT(*) FROM #summary) = 0, @m_done;
 - 実行結果の `message` は**解決後の文**です。空に解決したときは `""` を返すので、
   呼び出し側で自分の既定の文に落としてください（CLI は `終了条件成立: <条件>` と表示します）。
 
-> **ASSERT との書き分け（設計上の理由）**: 「対象 0 件」を ASSERT で止めると、月初や休日のたびに誤アラートが出て監視が形骸化します。**業務異常＝`ASSERT`（失敗・通知対象）／対象なし＝`EXIT SUCCESS IF`（成功・通知不要）**と語彙を分けてください。
+> **ASSERT との書き分け（設計上の理由）**: 「対象 0 件」を ASSERT で止めると、月初や休日のたびに誤アラートが出て監視が形骸化します。**業務異常は `ASSERT`**（失敗・通知対象）、**対象なしは `EXIT SUCCESS IF`**（成功・通知不要）と語彙を分けてください。
 
 ### 27.4 構文エイリアス — 既存構文への正規化
 
@@ -4688,7 +4688,7 @@ EXIT SUCCESS IF (SELECT COUNT(*) FROM #summary) = 0, @m_done;
 
 ### 27.5 `@NOW()` / `@TODAY()` / `@MONTH_START()` / `@NEXT_MONTH_START()` — as-of 固定の時刻関数
 
-**スクリプト全体で単一の基準時刻（as-of）**から導出される時刻関数です（引数なしの `()` 固定）。実行のたびに時計を読み直さないため、日跨ぎの長時間実行でも文の間で基準がズレず、基準時刻を注入すれば**過去日付での再集計（バックフィル）を同じスクリプトで再現**できます。
+**スクリプト全体で単一の基準時刻**（as-of）から導出される時刻関数です（引数なしの `()` 固定）。実行のたびに時計を読み直さないため、日跨ぎの長時間実行でも文の間で基準がズレず、基準時刻を注入すれば**過去日付での再集計（バックフィル）を同じスクリプトで再現**できます。
 
 | 関数 | 値 | 例 |
 |---|---|---|
