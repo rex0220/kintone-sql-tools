@@ -210,6 +210,14 @@ SELECT 'ABC' as a;
 SELECT * FROM APP100
 ```
 
+> **`*` と他の列を混ぜる形は非推奨です**（`SELECT *, CURRENT_DATE() AS 今日`・`SELECT *, ROUND(金額, 0)`・`SELECT *, 顧客名 AS 名前` など）。
+> 結果の行には `*` の列も入りますが、結果の列一覧（`columns`）には `*` 以外の列しか載りません（v3.95.0 で実測・B212）。そのため次のことが起きます。
+>
+> - CLI の CSV・表・Markdown の出力と、kSQL Dashboard Pro の表・CSV ダウンロードで、`*` の列が欠けます（JSON の `rows` には入ります）。
+> - 一時テーブル・CTE に入れると、`*` で入った列を名前で読めず `unknown field code(s)` で止まります（`SELECT * FROM #t` では読めます）。
+>
+> 使う列を明示するか（`SELECT 顧客名, 金額, CURRENT_DATE() AS 今日`）、`SELECT *` だけで書いてください。
+
 ### 特定フィールド指定
 
 ```sql
@@ -687,7 +695,7 @@ SELECT DATE_ADD(期限日, -1, 'MONTH') AS 前月, LAST_DAY(期限日) AS 月末
 
 -- SELECT 列で現在日時を付加（常に JS 評価）
 SELECT 顧客名, 金額, CURRENT_TIMESTAMP() AS 取得日時 FROM APP100
-SELECT *, CURRENT_DATE() AS 今日 FROM APP100
+SELECT 顧客名, CURRENT_DATE() AS 今日 FROM APP100
 
 -- WHERE でも使用可能（FULL_SCAN）
 SELECT * FROM APP100 WHERE 作成日 = CURRENT_DATE()
@@ -4965,7 +4973,7 @@ WHERE ステータス = '完了'
 
 -- CURRENT_DATE() / CURRENT_TIMESTAMP()（SELECT 列で使用）
 SELECT 顧客名, 金額, CURRENT_TIMESTAMP() AS 取得日時 FROM APP100
-SELECT *, CURRENT_DATE() AS 今日 FROM APP100
+SELECT 顧客名, CURRENT_DATE() AS 今日 FROM APP100
 
 -- 日付関数
 SELECT YEAR(作成日時) AS 年, MONTH(作成日時) AS 月, DAY(作成日時) AS 日 FROM APP100
