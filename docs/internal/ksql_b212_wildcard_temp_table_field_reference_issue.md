@@ -4,7 +4,7 @@
 - 種別: 正しさ（値は誤らない。出力では列が**黙って欠け**、一時テーブル・CTE では止まる側＝fail-closed）
 - 優先: 中（起票のときは「低〜中」。一時テーブルで止まるだけでなく、CLI の CSV・表と Dashboard Pro の表で列が黙って欠けると分かった）
 - 見つけ方: B211 の Codex レビューの試験の不足（ワイルドカードと一緒の一時テーブルの `_2` を数値で比べる）を書いていて、`SELECT 番号 FROM #t` が止まった。v3.94.0 でも同じで、B211 とは別
-- 関連: [B211](ksql_b211_function_column_default_key_collision_issue.md)、B86（実体化ソースの列の実在の検査）、B88（0 行の `SELECT *` の列）
+- 関連: [B213](ksql_b213_subquery_multi_column_first_column_issue.md)（サブクエリの列の数。案 A の前提）、[B211](ksql_b211_function_column_default_key_collision_issue.md)、B86（実体化ソースの列の実在の検査）、B88（0 行の `SELECT *` の列）
 
 ## 1. 現象
 
@@ -78,7 +78,7 @@
 | `SELECT` の列のスカラー（execute.ts:13374） | 明示した列の値（D14） | **先頭の `*` の列の値** | **黙って結果が変わる** |
 
 - 下の 4 つは**列が 1 つかを確かめていない**。ワイルドカードが無くても、2 列のサブクエリ（`IN (SELECT 増減, 番号 …)` など）が先頭の列で黙って続く（D17〜D20）。止めるのは `ASSERT` だけ（構文で `scalar subquery in ASSERT must return exactly 1 column.`。D21）。
-- **案 A には、この 4 つの口に「列は 1 つ」の検査（`ASSERT` と同じ）を一緒に入れることが要る**。入れずに直すと fail-open になる。入れると今の 2 列のサブクエリも止まる側に変わる（これ自体が別の穴なので、別の番号で起票して同時に直すのがよい）。
+- **案 A には、この 4 つの口に「列は 1 つ」の検査（`ASSERT` と同じ）を一緒に入れることが要る**。入れずに直すと fail-open になる。入れると今の 2 列のサブクエリも止まる側に変わる（これ自体が別の穴なので、[B213](ksql_b213_subquery_multi_column_first_column_issue.md) で起票した＝保留。B212 を進めるなら先か同時に直す）。
 - 0 行の `INSERT … SELECT *, 式` は、今は書かずに通る（D6）。案 A で 0 行も `sourceColumns` で展開すると、列の数が合わず止まる側に変わる。
 
 使っている所（2026-11-10 に検索。`SELECT *,`・`, * FROM`・`SELECT t.*,`。JSON の中の `\n` も空白として探した）:
