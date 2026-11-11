@@ -30,9 +30,10 @@ import { validateStatementStatic } from "./statementValidation";
 import { validateGroupingStatic } from "./groupingValidation";
 import { asOfFunctionNameFromVariable } from "./asOfClock";
 
-/** バッチ内で同時に存在できる一時テーブル数の上限（仕様 §5.6） */
-export const MAX_TEMP_TABLES = 16;
-/** バッチ内で定義できる変数の総数上限。現行の文数上限20では実質的な将来予約。 */
+/** バッチ内で同時に存在できる一時テーブル数の上限の既定（仕様 §5.6。B217: /flow は maxTempTables で変えられる） */
+import { MAX_TEMP_TABLES } from "./batchLimits";
+export { MAX_TEMP_TABLES };
+/** バッチ内で定義できる変数の総数上限。既定の文数上限 20 では実質的な将来予約。 */
 export const MAX_BATCH_VARIABLES = 64;
 
 // ------------------------------------------------------------
@@ -229,9 +230,13 @@ function validateGroupingStaticQueries(node: unknown): void {
  * 実行順に一時テーブルの定義状態（live セット）を追跡する:
  *   - 未定義（または DROP 済み）の参照 → エラー
  *   - live な同名の再 CREATE → エラー（DROP 後の再 CREATE は許容）
- *   - live 数が MAX_TEMP_TABLES を超過 → エラー
+ *   - live 数が上限（既定 MAX_TEMP_TABLES。B217: options.maxTempTables）を超過 → エラー
  */
-export function analyzeBatch(statements: Statement[]): BatchAnalysis {
+export function analyzeBatch(
+  statements: Statement[],
+  options: { readonly maxTempTables?: number } = {}
+): BatchAnalysis {
+  const maxTempTables = options.maxTempTables ?? MAX_TEMP_TABLES;
   // 空バッチ（空入力・セミコロンのみ）は拒否する。
   // parseStatements() は空配列を返す設計のため、ここで止めないと
   // 「有効なバッチ」として下流（S4 実行器 / S5 validate）に流れてしまう
@@ -427,8 +432,8 @@ export function analyzeBatch(statements: Statement[]): BatchAnalysis {
         validationSchemas.set(validationTable, signature);
         createdOrder.push(validationTable);
         created.push(validationTable);
-        if (defined.size > MAX_TEMP_TABLES) {
-          throw new BatchAnalysisError(`ParseError: batch exceeds ${MAX_TEMP_TABLES} temp tables.`, index);
+        if (defined.size > maxTempTables) {
+          throw new BatchAnalysisError(`ParseError: batch exceeds ${maxTempTables} temp tables.`, index);
         }
       } else {
         if (validationSchemas.get(validationTable) !== signature) {
@@ -451,9 +456,9 @@ export function analyzeBatch(statements: Statement[]): BatchAnalysis {
       defined.set(stmt.name, index);
       createdOrder.push(stmt.name);
       created.push(stmt.name);
-      if (defined.size > MAX_TEMP_TABLES) {
+      if (defined.size > maxTempTables) {
         throw new BatchAnalysisError(
-          `ParseError: batch exceeds ${MAX_TEMP_TABLES} temp tables.`,
+          `ParseError: batch exceeds ${maxTempTables} temp tables.`,
           index
         );
       }

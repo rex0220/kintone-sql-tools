@@ -4119,7 +4119,7 @@ engine ライブラリは read-only 専用です。書き込み DML、DML `VALID
 
 ### 複文（バッチ）
 
-`;` 区切りで複数の SQL 文を1回の呼び出しで**順次**実行できます（最大 20 文）。
+`;` 区切りで複数の SQL 文を1回の呼び出しで**順次**実行できます（最大 20 文。公式 API `/flow` の呼び出し側は `maxBatchStatements` で 100 文まで変えられます＝§27.9）。
 
 ```sql
 SELECT 部門 FROM APP100;
@@ -4183,7 +4183,7 @@ INNER JOIN #latest t ON a.顧客ID = t.顧客ID;
 | 名前 | `#` + 識別子（例: `#temp` / `#集計`）。`#` は一時テーブル名の先頭のみで有効。エイリアスには使用不可 |
 | 寿命 | **バッチ内のみ**。呼び出し終了で自動破棄（呼び出しをまたぐ参照は不可） |
 | 破棄 | `DROP TEMP TABLE #名前`（主にメモリの早期解放用。DROP 後の同名再 CREATE は可） |
-| 上限 | 同時 16 個・1個あたり既定 10,000 行（超過は常にエラー）。通常の取得上限 `maxRecords` ではなく専用の `tempTableMaxRows` で変更可能（MCP ツール引数 / CLI `--temp-table-max-rows` / env `KSQL_TEMP_TABLE_MAX_ROWS` / profile `query.tempTableMaxRows` / プラグインは「⚙ オプション → 取得」の「一時テーブル上限(行)」。空欄 = 既定）。変更しても超過時は truncate されず常にエラーで、日付リテラルと相対日付で扱いは同一 |
+| 上限 | 同時 16 個（`/flow` の呼び出し側は `maxTempTables` で 64 個まで変えられる。16 個より多くするなら合計の上限 `tempTablesMaxTotalRows` が必須＝§27.9）・1個あたり既定 10,000 行（超過は常にエラー）。通常の取得上限 `maxRecords` ではなく専用の `tempTableMaxRows` で変更可能（MCP ツール引数 / CLI `--temp-table-max-rows` / env `KSQL_TEMP_TABLE_MAX_ROWS` / profile `query.tempTableMaxRows` / プラグインは「⚙ オプション → 取得」の「一時テーブル上限(行)」。空欄 = 既定）。変更しても超過時は truncate されず常にエラーで、日付リテラルと相対日付で扱いは同一 |
 | DML | 一時テーブルへの INSERT / UPDATE / DELETE は非対応 |
 | 実行 | 参照は常にインメモリ FULL_SCAN（kintone クエリへの WHERE プッシュダウンは効かない） |
 
@@ -4246,7 +4246,7 @@ WHERE 処理ステータス = '未処理';
 | スコープ | **1 バッチ内のみ**（一時テーブルと同じ寿命）。バッチをまたがない |
 | バッチ必須 | **2 文以上のバッチでのみ使用可**。単文の `SET`・単文での `@参照` はエラー |
 | 静的検査 | **未定義参照・前方参照・再代入はエラー**（実行前に検出）。未使用は警告。`SET` の評価に失敗した場合は `continueOnError` に関わらずバッチを停止 |
-| 上限 | 変数の防御上限は **64 個**。ただしバッチ全体の**最大 20 文**（§25 冒頭）が先に効くため、`SET` も 1 文ずつ数える現状の実効上限は **20 個以下** |
+| 上限 | 変数の防御上限は **64 個**。ただしバッチ全体の**最大 20 文**（§25 冒頭。`/flow` の `maxBatchStatements` で変えた場合はその数）が先に効くため、`SET` も 1 文ずつ数える実効上限は **文の数の上限以下** |
 | 演算 | 式内の `+` は**数値加算**。文字列連結は `CONCAT()` を使う。**SET の右辺から別の変数は参照できません**（`SET @b = @a + 1` は不可） |
 | 束縛 | 値としてバインド（文字列連結ではない）ため、**SQL インジェクションは発生しません**。変数に入るのは値のみで、アプリ ID・フィールドコード・演算子など識別子のパラメータ化はできません |
 
@@ -4782,7 +4782,8 @@ KEY (顧客コード);
 - **一時テーブル実体化上限 `tempTableMaxRows`（既定 10,000・独立）**: **出来た表の行数**の上限です（v3.93.0〜。B197）。超過は `onLimitReached` にかかわらず常にエラー（`error.code = "TempTableRowLimitError"`）で、表は**登録しません**。JOIN・UNION・CTE・`GENERATE_SERIES`・FROM の無い SELECT・別の一時テーブルからの SELECT で**増えた行**も対象です（v3.92.0 までは読取の上限を兼ねていたため、これらは通っていました）。**集計して 1 行しか残さない文は、読む量が収まれば通ります**
 - **実体化の読取上限 `tempTableReadMaxRecords`（省略時は `maxRecords`。どちらも省略したときだけ `max(10,000, tempTableMaxRows)`。v3.93.0〜）**: `CREATE TEMP TABLE` の元の SELECT が**読む件数**の上限です。超過は `FetchAllLimitError`（効いている上限の名前で案内します）。**明細の SELECT の上限は上がりません**（実体化だけに効きます）。MCP・CLI は `max(maxRecords, tempTableMaxRows ?? 10,000)` を内部で常に渡すので、どちらの面でも v3.92.0 と同じ量を読みます。**上限ちょうどの行数**（500 の倍数を含む）は、上限で止まったときだけ 1 件の軽い取得で「ちょうど」と「超過」を区別して通します（上限は 1 件も超えません）。3 つの上限の表は [§11 LIMIT / OFFSET](#11-limit--offset) にあります
 - **一時テーブルの合計の上限 `tempTablesMaxTotalRows`（省略時は上限なし・v3.87.0〜）**: いま残っている一時テーブル（`CREATE TEMP TABLE` と、`VALIDATE` / `ON ERROR SKIP` の `INTO` のエラー表）の行数の合計の上限です。`DROP TEMP TABLE` で外した表は数えません。どの形の SELECT でも**出来た行数**で数え、表の登録・エラー表への追加の前に止めます（超える文は `error.code = "TempTableTotalLimitError"`・表は登録・追加しない・書込 0 回・後続は fail-fast）。あわせて `CREATE TEMP TABLE` の読取を `min(読取上限, 合計の残り)` で途中で止めます（集計なども読む行数で数えます）。文の結果の `metrics.tempTableRows` に、文が終わった時点の合計が入ります
-- **値の上限は設けていません**（正の整数を受理）。ただし読取は fetch-all 方式で候補行が全件メモリに載るため、「受理される」ことと「その規模で動作が実測済みである」ことは別です。大きな値を常用する場合は、呼び出し側（ランナー等）で運用上の上限を検証することを推奨します
+- **文の数 `maxBatchStatements`（既定 20・1〜100）と、同時に残っている一時テーブルの数 `maxTempTables`（既定 16・1〜64）（v3.96.0〜。B217）**: `parseScript` / `validateScript` / `explainScript` / `createExecutionContext` の options で指定します。**4 つに同じ値を渡してください**。解析済みの文を `createExecutionContext` に渡す形でも文の数を確かめるので、渡し忘れはレコードを読む前に `batch exceeds 20 statements.`（`KSQL1202`）で止まります。**`maxTempTables` を 16 より大きくするなら `tempTablesMaxTotalRows` も必須**です（無ければ `ArgumentError`。既定の 16 個は、合計の上限が無いときのメモリの事実上の上限のため）。範囲外の値は `RangeError`。CLI・MCP・engine ライブラリは 20 / 16 のままです。`validateScript` は v3.96.0 から一時テーブルの数・未定義の参照など、実行の入口と同じバッチの検査も返します（B218。それまでは検査を通り、実行の入口で止まっていました）
+- **値の上限は設けていません**（文の数・一時テーブルの数を除き、正の整数を受理）。ただし読取は fetch-all 方式で候補行が全件メモリに載るため、「受理される」ことと「その規模で動作が実測済みである」ことは別です。大きな値を常用する場合は、呼び出し側（ランナー等）で運用上の上限を検証することを推奨します
 
 ---
 

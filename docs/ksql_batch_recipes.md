@@ -851,7 +851,7 @@ ORDER BY 深さ, 親コード, 子コード
 ## 注意
 
 - **トランザクションはありません**。非アトミックで、途中失敗時に前半のみ反映され得ます（だからこそ R1 の「復旧・確保・冪等」設計にします）。
-- 一時テーブルは**同時 16 個・1 個あたり既定 10,000 行**（`tempTableMaxRows` で変更可）。バッチは**最大 20 文**。
+- 一時テーブルは**同時 16 個・1 個あたり既定 10,000 行**（`tempTableMaxRows` で変更可）。バッチは**最大 20 文**（公式 API `/flow` の呼び出し側だけ `maxBatchStatements` / `maxTempTables` で変えられる＝言語リファレンス §27.9）。
 - DML バッチは常に **fail-fast**（`ASSERT` 失敗・エラーで停止）。`continueOnError` は read-only バッチのみ。
 - **サブクエリ参照の非対称**: `UPDATE` / `DELETE` の `WHERE` に `IN (SELECT …)` は書けず、**実行時**に `KintoneQueryError: IN (SELECT ...) は kintone クエリに変換できません` となる（一時テーブル・実アプリのどちらのサブクエリでも同じ）。**`ksql_validate` は `ok` を返す**ため静的検査では検出できない。一方 `INSERT … SELECT` / `UPSERT … SELECT`、および `CREATE TEMP TABLE … AS SELECT` や `ASSERT` のサブクエリからは参照できる（R3 が成立する根拠）。一時テーブルの値で更新したい場合は **`UPDATE … FROM`（v2.12.0 / 業務キー結合は v2.13.0・R6）** を使う。
 - **検索打ち切り（10 万件）の扱い（v2.10.0 以降）**: kintone は `like` / `not like` の一致候補が **10 万件に達すると検索を打ち切る**。現行の挙動を整理すると:

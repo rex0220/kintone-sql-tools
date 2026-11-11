@@ -2342,12 +2342,14 @@ export function createManagedStatementExecutionContext(
   onChunkWritten?: (info: ManagedChunkWrittenInfo) => void | Promise<void>,
   enableNativeUpsert = false,
   onImportSourceMaterialized?: (info: ManagedImportSourceMaterializedInfo) => void | Promise<void>,
-  exportSinks: ReadonlySet<string> = new Set()
+  exportSinks: ReadonlySet<string> = new Set(),
+  /** B217: /flow の createExecutionContext が渡す一時テーブルの数の上限（省略時は既定 16） */
+  maxTempTables?: number
 ): ManagedStatementExecutionContext {
   resolveRecursiveCteLimits(options);
   assertTempTablesMaxTotalRows(options.tempTablesMaxTotalRows);
   const mutableStatements = [...statements];
-  const analysis = analyzeBatch(mutableStatements);
+  const analysis = analyzeBatch(mutableStatements, { maxTempTables });
   mutableStatements.forEach((statement) => assertApplyExecutionScope("phase16a", statement));
   if (options.allowApplyMutation !== true && mutableStatements.some((statement) =>
     statementHasMultiValueApply(statement)
@@ -14693,7 +14695,9 @@ export async function buildBatchExplainPlans(
   timezone?: string,
   nativeUpsertOptions: NativeUpsertExplainOptions = { surface: "DOCUMENT_ONLY" },
   /** B203: 配列変数の要素数の上限（省略時は既定 500） */
-  variableArrayMaxElements?: number
+  variableArrayMaxElements?: number,
+  /** B217: /flow の explainScript が渡す文の数・一時テーブルの数の上限（省略時は既定 20 / 16） */
+  batchLimits: { readonly maxStatements?: number; readonly maxTempTables?: number } = {}
 ): Promise<BatchExplainResult> {
   // executeBatch と同じく、parse / metadata API より前に呼出単位で一度だけ固定する。
   const asOfClock = createAsOfClock(asOf ?? new Date(), timezone);
@@ -14702,8 +14706,12 @@ export async function buildBatchExplainPlans(
   });
   const invocationCacheContext = createInvocationCacheContext(cacheContext);
   try {
-    const { statements, meta } = parseSqlStatementsForScript(sql, { import: enableImport });
-    const analysis = analyzeBatch(statements); // 未定義参照等はここで拒否
+    const { statements, meta } = parseSqlStatementsForScript(sql, {
+      import: enableImport,
+      maxStatements: batchLimits.maxStatements,
+    });
+    // 未定義参照等はここで拒否
+    const analysis = analyzeBatch(statements, { maxTempTables: batchLimits.maxTempTables });
     const normalizedInjectedVariables = validateDeclaredBatchVariables(
       statements, injectedVariables, { arrayMaxElements: variableArrayMaxElements }
     );
