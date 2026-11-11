@@ -43,6 +43,7 @@ import type {
   CaseResult,
   AggregateRef,
   WindowPartitionKey,
+  TableRef,
 } from "../types/ast";
 import { planCrossJoinRows } from "../core/optimization/crossJoinRowPlan";
 import { isAggregateWindow, isRankingWindow, isValueWindow, numberLiteralText } from "../types/ast";
@@ -258,6 +259,17 @@ export function applyJoin(
   columns: {
     leftColumns?: readonly string[];
     rightColumns?: readonly string[];
+    /**
+     * B214: SQL 上の左右の帰属（左 = FROM と先行 JOIN の別名、右 = この JOIN の別名）。
+     * 行や列の一覧が無い 0 件の物理 APP でも ON の向きを決められるように、行より先に見る。
+     */
+    sideAliases?: { readonly left: ReadonlySet<string>; readonly right: ReadonlySet<string> };
+    /**
+     * B214: 取得が 0 件だった物理 APP の別名 → 項目定義で在ると確かめた項目コード。
+     * 行からは列の有無を確かめられないので、ここにある JOIN キーだけ行で検査しない
+     * （無い列・項目定義が取れない表は従来どおり検査して止める）。
+     */
+    rowlessVerifiedFields?: ReadonlyMap<string, ReadonlySet<string>>;
   } = {}
 ): ProcessRow[] {
   if (join.type === "CROSS") {
@@ -279,13 +291,18 @@ export function applyJoin(
     leftRows,
     rightRows,
     columns.leftColumns,
-    columns.rightColumns
+    columns.rightColumns,
+    columns.sideAliases
   );
   const leftKey = joinFieldKey(normalizedOn.left);
   const rightKey = joinFieldKey(normalizedOn.right);
 
-  assertJoinKeyAvailable(leftRows, leftKey, columns.leftColumns);
-  assertJoinKeyAvailable(rightRows, rightKey, columns.rightColumns);
+  if (!isRowlessVerifiedRef(normalizedOn.left, columns.rowlessVerifiedFields)) {
+    assertJoinKeyAvailable(leftRows, leftKey, columns.leftColumns);
+  }
+  if (!isRowlessVerifiedRef(normalizedOn.right, columns.rowlessVerifiedFields)) {
+    assertJoinKeyAvailable(rightRows, rightKey, columns.rightColumns);
+  }
 
   // ── RIGHT JOIN ──────────────────────────────────────────────
   if (joinType === "RIGHT") {
@@ -360,7 +377,8 @@ function normalizeJoinConditionSides(
   leftRows: readonly ProcessRow[],
   rightRows: readonly ProcessRow[],
   leftColumns?: readonly string[],
-  rightColumns?: readonly string[]
+  rightColumns?: readonly string[],
+  sideAliases?: { readonly left: ReadonlySet<string>; readonly right: ReadonlySet<string> }
 ): typeof on {
   const leftSchema = leftColumns ?? Object.keys(leftRows[0] ?? {});
   const rightSchema = rightColumns ?? Object.keys(rightRows[0] ?? {});
@@ -368,6 +386,12 @@ function normalizeJoinConditionSides(
   const rightAliases = qualifiedAliases(rightSchema);
 
   const sideFor = (ref: JoinFieldRef): JoinSide => {
+    // B214: 別名の帰属は SQL から決まる。行・列の一覧（0 件だと空）より先に見る。
+    if (ref.tableAlias && sideAliases) {
+      const inLeft = sideAliases.left.has(ref.tableAlias);
+      const inRight = sideAliases.right.has(ref.tableAlias);
+      if (inLeft !== inRight) return inLeft ? "LEFT" : "RIGHT";
+    }
     if (ref.tableAlias) {
       const inLeft = leftAliases.has(ref.tableAlias);
       const inRight = rightAliases.has(ref.tableAlias);
@@ -393,6 +417,14 @@ function qualifiedAliases(columns: readonly string[]): ReadonlySet<string> {
     if (separator > 0) aliases.add(column.slice(0, separator));
   }
   return aliases;
+}
+
+function isRowlessVerifiedRef(
+  ref: JoinFieldRef,
+  verified: ReadonlyMap<string, ReadonlySet<string>> | undefined
+): boolean {
+  if (ref.tableAlias === null || ref.tableAlias === undefined) return false;
+  return verified?.get(ref.tableAlias)?.has(ref.field) === true;
 }
 
 /** JOIN キーの空文字値は許可し、プロパティ自体の欠落だけを拒否する。 */
@@ -2320,6 +2352,11 @@ export interface FullScanInput {
   sourceColumns?: readonly string[];
   /** 0 行でも JOIN キーを検証するための、alias ごとの保存済みソース列。 */
   tableColumns?: ReadonlyMap<string | null, readonly string[]>;
+  /**
+   * B214: 取得が 0 件だった物理 APP の alias ごとに、項目定義で在ると確かめた項目コード
+   * （`$id` / `$revision` を含む）。0 件の表の JOIN キーは、ここにあるときだけ行の検査を飛ばす。
+   */
+  rowlessPhysicalFields?: ReadonlyMap<string, ReadonlySet<string>>;
   /** 実行時だけ補った alias。SELECT * の出力には修飾キーを露出させない。 */
   hiddenQualifiedAliases?: ReadonlySet<string>;
   /** Metadata-resolved B65 identity. Public execution remains gated until Step 3. */
@@ -2497,6 +2534,20 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
   );
 
   // 2. join
+  // B214: ON の左右と「行で列を確かめられない表」は SQL と取得件数から決める
+  // （0 件の物理 APP は行も列の一覧も持たないため、行からは帰属も列の有無も分からない）。
+  // 行の検査を飛ばすのは、呼び出し側が項目定義で在ると確かめた列だけ（rowlessPhysicalFields）。
+  const leftAliases = new Set<string>();
+  const rowlessVerifiedFields = new Map<string, ReadonlySet<string>>();
+  const markRowless = (table: TableRef, recordCount: number) => {
+    if (!table.alias || table.cteName != null || table.subtableCode || recordCount > 0) return;
+    const verified = input.rowlessPhysicalFields?.get(table.alias);
+    if (verified) rowlessVerifiedFields.set(table.alias, verified);
+  };
+  if (mainAlias) {
+    leftAliases.add(mainAlias);
+    markRowless(stmt.from, mainRecords.length);
+  }
   for (const join of stmt.joins) {
     const rightAlias = join.table.alias;
     const rightRecords = tables.get(rightAlias) ?? [];
@@ -2506,10 +2557,17 @@ export function runFullScan(input: FullScanInput): { rows: ProcessRow[]; columns
       undefined,
       rightRows
     );
+    markRowless(join.table, rightRecords.length);
     rows = applyJoin(rows, rightRows, join, {
       leftColumns: knownColumns,
       rightColumns,
+      sideAliases: {
+        left: leftAliases,
+        right: rightAlias ? new Set([rightAlias]) : new Set<string>(),
+      },
+      rowlessVerifiedFields,
     });
+    if (rightAlias) leftAliases.add(rightAlias);
     knownColumns = mergeKnownColumns(knownColumns, rightColumns, rows);
   }
 
