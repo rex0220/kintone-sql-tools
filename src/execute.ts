@@ -2342,12 +2342,14 @@ export function createManagedStatementExecutionContext(
   onChunkWritten?: (info: ManagedChunkWrittenInfo) => void | Promise<void>,
   enableNativeUpsert = false,
   onImportSourceMaterialized?: (info: ManagedImportSourceMaterializedInfo) => void | Promise<void>,
-  exportSinks: ReadonlySet<string> = new Set()
+  exportSinks: ReadonlySet<string> = new Set(),
+  /** B217: /flow の createExecutionContext が渡す一時テーブルの数の上限（省略時は既定 16） */
+  maxTempTables?: number
 ): ManagedStatementExecutionContext {
   resolveRecursiveCteLimits(options);
   assertTempTablesMaxTotalRows(options.tempTablesMaxTotalRows);
   const mutableStatements = [...statements];
-  const analysis = analyzeBatch(mutableStatements);
+  const analysis = analyzeBatch(mutableStatements, { maxTempTables });
   mutableStatements.forEach((statement) => assertApplyExecutionScope("phase16a", statement));
   if (options.allowApplyMutation !== true && mutableStatements.some((statement) =>
     statementHasMultiValueApply(statement)
@@ -7299,11 +7301,13 @@ async function executeFullScanSelect(
 
   // 並行解決していた ORDER BY メタ情報を回収
   const { optionOrders, sortKinds, semantics } = await orderByMetaPromise;
+  const rowlessPhysicalFields = await loadRowlessPhysicalJoinFields(stmt, tables, client, cacheContext);
 
   // JS 集計パイプライン
   const { rows, columns: projectedColumns } = runFullScan({
     tables,
     stmt,
+    rowlessPhysicalFields,
     scalarCache,
     optionOrders,
     sortKinds,
@@ -8393,9 +8397,11 @@ async function executeFullScanWithCte(
   const sourceColumns = stmt.joins.length === 0 && stmt.from.cteName != null
     ? requireMaterializedTable(stmt.from.cteName).columns
     : undefined;
+  const rowlessPhysicalFields = await loadRowlessPhysicalJoinFields(stmt, tables, client, cacheContext);
   const { rows, columns: projectedColumns } = runFullScan({
     tables,
     stmt,
+    rowlessPhysicalFields,
     scalarCache,
     optionOrders,
     sortKinds,
@@ -9026,6 +9032,73 @@ function splitChunks<T>(items: T[], size: number): T[][] {
 const JOIN_IN_MAX_CHUNKS = 6;
 const JOIN_IN_MAX_KEYS = JOIN_KEY_IN_CHUNK_SIZE * JOIN_IN_MAX_CHUNKS;
 
+/**
+ * B215: 結合キーの元の表が、この JOIN より前の外部結合で空文字に埋められ、その行がこの JOIN まで残りうるか
+ * （前の `LEFT JOIN` の右の表・前の `RIGHT JOIN` より左の表）。
+ * 埋められた行の結合キーは空文字になり、メモリ上の結合では空文字のキーと一致する（B153）。
+ * 元の表の行だけからキーを集めるとその空文字が抜けて、当たる行を取り落とす。
+ *
+ * 件数が分かる表（取得済み・実体化済み）が 0 件なら、その JOIN までの行は残らない（`INNER` / `CROSS` の相手、
+ * `RIGHT JOIN` の右）。残らない行のために空文字を足すと、`in ("")` を受けない型で要らない全件取得になるので足さない。
+ * 件数が分からない表は「行がありうる」とみなす（結果を誤らない側）。
+ */
+function joinKeySourceMayBeNullExtended(
+  stmt: SelectStatement,
+  join: SelectStatement["joins"][number],
+  sourceAlias: string,
+  knownRowCount: (table: TableRef) => number | undefined
+): boolean {
+  const index = stmt.joins.indexOf(join);
+  const mayHaveRows = (table: TableRef) => {
+    const count = knownRowCount(table);
+    return count === undefined || count > 0;
+  };
+  let prefixMayHaveRows = mayHaveRows(stmt.from);
+  let nullExtended = new Set<string>();
+  const prefixAliases: string[] = [];
+  const fromAlias = effectiveTableAlias(stmt.from);
+  if (fromAlias) prefixAliases.push(fromAlias);
+  for (let position = 0; position < index; position += 1) {
+    const prior = stmt.joins[position];
+    const alias = effectiveTableAlias(prior.table);
+    const rightMayHaveRows = mayHaveRows(prior.table);
+    if (prior.type === "LEFT") {
+      if (prefixMayHaveRows && alias) nullExtended.add(alias);
+    } else if (prior.type === "RIGHT") {
+      if (rightMayHaveRows) for (const leftAlias of prefixAliases) nullExtended.add(leftAlias);
+      prefixMayHaveRows = rightMayHaveRows;
+    } else {
+      prefixMayHaveRows = prefixMayHaveRows && rightMayHaveRows;
+    }
+    if (!prefixMayHaveRows) nullExtended = new Set();
+    if (alias) prefixAliases.push(alias);
+  }
+  return prefixMayHaveRows && nullExtended.has(sourceAlias);
+}
+
+/**
+ * B214: 取得が 0 件だった物理 APP（サブテーブルの仮想表を除く）ごとに、項目定義で在ると確かめた項目コード
+ * （`$id` / `$revision` を足す）。0 件の表の JOIN キーは、ここにある列だけ行の検査を飛ばす。
+ * 項目定義は B86 の検査で読み込み済みのことが多い（キャッシュ）。空なら入れない＝従来どおり行で検査する。
+ */
+async function loadRowlessPhysicalJoinFields(
+  stmt: SelectStatement,
+  tables: ReadonlyMap<string | null, readonly KintoneRecord[]>,
+  client: KintoneClient,
+  cacheContext: string
+): Promise<Map<string, ReadonlySet<string>> | undefined> {
+  if (stmt.joins.length === 0) return undefined;
+  const result = new Map<string, ReadonlySet<string>>();
+  for (const table of [stmt.from, ...stmt.joins.map((join) => join.table)]) {
+    if (!table.alias || table.cteName != null || table.subtableCode) continue;
+    if ((tables.get(table.alias)?.length ?? 0) > 0) continue;
+    const defs = await getFieldsCached(table.appId, client, cacheContext);
+    if (defs.length === 0) continue;
+    result.set(table.alias, new Set([...defs.map((def) => def.code), "$id", "$revision"]));
+  }
+  return result;
+}
+
 async function tryFetchJoinRecordsBySourceKeys(
   stmt: SelectStatement,
   join: SelectStatement["joins"][number],
@@ -9093,10 +9166,22 @@ async function tryFetchJoinRecordsBySourceKeys(
     if (raw === null || raw === undefined || txt.length === 0) hasEmptyValue = true;
     keys.push(txt);
   }
+  // B215: 前の外部結合で空文字に埋められうる表は、空文字のキーも候補に入れる
+  // （元の表が 0 件でも、埋められた行は残る）。`in ("")` を受けない型は全件取得になる。
+  const nullExtended = joinKeySourceMayBeNullExtended(
+    stmt,
+    join,
+    sourceAlias,
+    (table) => (table.alias ? tables.get(table.alias)?.length : undefined)
+  );
+  if (nullExtended) {
+    keys.push("");
+    hasEmptyValue = true;
+  }
   const keyPlan = planJoinKeyPrefilter({
     fieldType: targetMeta?.fieldType,
     sourceSemantics: sourceMeta?.semantics,
-    sourceRowCount: sourceRows.length,
+    sourceRowCount: sourceRows.length + (nullExtended ? 1 : 0),
     values: keys,
     hasEmptyValue,
     maxInKeys: JOIN_IN_MAX_KEYS,
@@ -13786,6 +13871,17 @@ async function buildExplainWhereAnalysis(
             sourceRowCount = relation.rows.length;
             values = relation.rows.map((row) => toScalarText(row[sourceField]));
             hasEmptyValue = values.some((value) => value.length === 0);
+            // B215: 実行（tryFetchJoinRecordsBySourceKeys）と同じく、外部結合で埋められうる空文字を足す
+            // 件数は静的な実体化の元だけ分かる（物理 APP は records API を呼ばないので分からない＝行がありうる）
+            if (joinKeySourceMayBeNullExtended(select, join, sourceAlias, (table) =>
+              table.cteName !== null && table.cteName !== undefined && staticExplainRelations.has(table.cteName)
+                ? explainRelations.get(table.cteName)?.rows.length
+                : undefined
+            )) {
+              values.push("");
+              hasEmptyValue = true;
+              sourceRowCount += 1;
+            }
           }
         } else if (sourceTable) {
           const info = (await getFieldsCached(sourceTable.appId, tracedClient, cacheContext))
@@ -14599,7 +14695,9 @@ export async function buildBatchExplainPlans(
   timezone?: string,
   nativeUpsertOptions: NativeUpsertExplainOptions = { surface: "DOCUMENT_ONLY" },
   /** B203: 配列変数の要素数の上限（省略時は既定 500） */
-  variableArrayMaxElements?: number
+  variableArrayMaxElements?: number,
+  /** B217: /flow の explainScript が渡す文の数・一時テーブルの数の上限（省略時は既定 20 / 16） */
+  batchLimits: { readonly maxStatements?: number; readonly maxTempTables?: number } = {}
 ): Promise<BatchExplainResult> {
   // executeBatch と同じく、parse / metadata API より前に呼出単位で一度だけ固定する。
   const asOfClock = createAsOfClock(asOf ?? new Date(), timezone);
@@ -14608,8 +14706,12 @@ export async function buildBatchExplainPlans(
   });
   const invocationCacheContext = createInvocationCacheContext(cacheContext);
   try {
-    const { statements, meta } = parseSqlStatementsForScript(sql, { import: enableImport });
-    const analysis = analyzeBatch(statements); // 未定義参照等はここで拒否
+    const { statements, meta } = parseSqlStatementsForScript(sql, {
+      import: enableImport,
+      maxStatements: batchLimits.maxStatements,
+    });
+    // 未定義参照等はここで拒否
+    const analysis = analyzeBatch(statements, { maxTempTables: batchLimits.maxTempTables });
     const normalizedInjectedVariables = validateDeclaredBatchVariables(
       statements, injectedVariables, { arrayMaxElements: variableArrayMaxElements }
     );

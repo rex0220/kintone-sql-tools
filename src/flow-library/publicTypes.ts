@@ -173,6 +173,20 @@ export interface ParseScriptOptions {
   apps?: Readonly<Record<string, number>>;
   /** Omitted/false keeps IMPORT unavailable and preserves KSQL1202. */
   enableImport?: boolean;
+  /**
+   * 1 回に書ける文の数の上限（B217。1〜100 の整数。省略時 20）。範囲外は `RangeError`。
+   * **`parseScript` / `validateScript` / `explainScript` / `createExecutionContext` に同じ値を渡してください**。
+   * 解析済みの文を `createExecutionContext` に渡す形でも数を確かめるので、渡し忘れはレコードを読む前に
+   * `batch exceeds 20 statements.`（KSQL1202）で止まります。CLI・MCP は 20 のまま。
+   */
+  maxBatchStatements?: number;
+  /**
+   * 同時に残っている一時テーブルの数の上限（B217。1〜64 の整数。省略時 16。`DROP TEMP TABLE` で外した表は数えない）。
+   * 範囲外は `RangeError`。4 つの入口に同じ値を渡してください（`validateScript` も B218 から数えます）。
+   * **16 より大きくするなら `createExecutionContext` に `tempTablesMaxTotalRows` も必須**
+   * （無ければ `ArgumentError`。行数の合計でメモリを抑えるため）。CLI・MCP は 16 のまま。
+   */
+  maxTempTables?: number;
 }
 
 export interface ParseScriptResult {

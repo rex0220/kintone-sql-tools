@@ -1,5 +1,7 @@
-import { diagnosticAt } from "../core/diagnostics";
+import { DiagnosticCodes, diagnosticAt } from "../core/diagnostics";
 import { validateScriptCore } from "../core/dialect1Validation";
+import { analyzeBatch, BatchAnalysisError } from "../core/batch";
+import { MAX_TEMP_TABLES, resolveBatchLimits } from "../core/batchLimits";
 import {
   canonicalizeLogicalAppName,
   collectAppProfileTokens,
@@ -82,7 +84,32 @@ export async function validateScript(
       ...(item.statementIndex !== undefined ? { statementIndex: item.statementIndex } : {}),
     });
   });
-  return [...parsed.diagnostics, ...positioned];
+  return [...parsed.diagnostics, ...positioned, ...batchAnalysisDiagnostics(source, parsed, opts)];
+}
+
+/**
+ * B218: createExecutionContext / explainScript と同じバッチの検査（`analyzeBatch`。一時テーブルの数・
+ * 未定義の参照・同じ表の作り直し・変数など）を診断で返す。ここで見ないと、検査は通るのに実行の入口で止まる。
+ */
+function batchAnalysisDiagnostics(
+  source: string,
+  parsed: ParseScriptResult,
+  opts: ParseScriptOptions
+): Diagnostic[] {
+  try {
+    analyzeBatch([...parsed.statements], { maxTempTables: resolveBatchLimits(opts).maxTempTables });
+    return [];
+  } catch (error) {
+    if (!(error instanceof Error)) throw error;
+    const statementIndex = error instanceof BatchAnalysisError ? error.statementIndex : undefined;
+    const offset = parsed.statementRanges[statementIndex ?? 0]?.start ?? 0;
+    return [diagnosticAt(source, offset, {
+      severity: "error",
+      code: DiagnosticCodes.PARSE_ERROR,
+      message: error.message,
+      ...(statementIndex !== undefined ? { statementIndex } : {}),
+    })];
+  }
 }
 
 export async function explainScript(
@@ -129,7 +156,8 @@ export async function explainScript(
         clientHasNativeUpsert: "upsertRecords" in explainClient
           && typeof explainClient.upsertRecords === "function",
       },
-      opts.variableArrayMaxElements
+      opts.variableArrayMaxElements,
+      resolveBatchLimits(opts)
     );
   } catch (error) {
     throw normalizeFlowError(error);
@@ -143,6 +171,7 @@ export function createExecutionContext(opts: CreateExecutionContextOptions): Exe
     if (fromScript === fromStatements) {
       throw new TypeError("Provide exactly one of script or statements+meta.");
     }
+    const limits = resolveBatchLimits(opts);
     let statements: readonly Statement[];
     let dialect: 0 | 1;
     if (fromScript) {
@@ -157,6 +186,19 @@ export function createExecutionContext(opts: CreateExecutionContextOptions): Exe
       }
       statements = opts.statements;
       dialect = opts.meta.dialect;
+      // B217: 解析済みの文を渡す形でも文の数を確かめる（解析と実行で上限を渡し忘れた食い違いを、
+      // レコードを読む前に解析と同じ文で止める）
+      if (statements.length > limits.maxStatements) {
+        throw new KsqlFlowError("KSQL1202", `batch exceeds ${limits.maxStatements} statements.`);
+      }
+    }
+    // B217: 一時テーブルの数を既定より増やすなら、合計の行数の上限でメモリを抑えることを求める
+    if (limits.maxTempTables > MAX_TEMP_TABLES && opts.tempTablesMaxTotalRows === undefined) {
+      throw new KsqlFlowError(
+        "ArgumentError",
+        `ArgumentError: maxTempTables above ${MAX_TEMP_TABLES} requires tempTablesMaxTotalRows; `
+        + "the total row cap keeps memory bounded while more temp tables are live."
+      );
     }
     if (opts.enableImport !== true && statements.some(statementUsesImport)) {
       throw new KsqlFlowError(
@@ -167,6 +209,7 @@ export function createExecutionContext(opts: CreateExecutionContextOptions): Exe
     const handle = {} as ExecutionContext;
     const {
       client, script: _script, statements: _statements, meta: _meta, apps: _apps,
+      maxBatchStatements: _maxBatchStatements, maxTempTables: _maxTempTables,
       onChunkWritten, onImportSourceMaterialized, enableNativeUpsert, exportSinks, confirm, ...executeOptions
     } = opts;
     if (confirm !== undefined && typeof confirm !== "function") {
@@ -231,7 +274,8 @@ export function createExecutionContext(opts: CreateExecutionContextOptions): Exe
         routedOnChunkWritten,
         enableNativeUpsert !== false,
         onImportSourceMaterialized,
-        normalizedExportSinks
+        normalizedExportSinks,
+        limits.maxTempTables
       );
     handles.set(handle as object, managed);
     registerExportSinkContext(handle, managed);

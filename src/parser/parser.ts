@@ -135,8 +135,8 @@ import {
   isRelativeDateFunctionName,
 } from "../core/relativeDateFunction";
 
-/** バッチ(複文)の文数上限 */
-const MAX_BATCH_STATEMENTS = 20;
+/** バッチ(複文)の文数上限の既定（B217: /flow は ParserCapabilities.maxStatements で変えられる） */
+import { MAX_BATCH_STATEMENTS } from "../core/batchLimits";
 
 // BETWEEN 展開用の型エイリアス（ローカル）
 type ExpandedBetween = LogicalExpr;
@@ -365,7 +365,7 @@ export const ORDER_BY_AGGREGATE_KEY_MESSAGE = [
 // Parser クラス
 // ------------------------------------------------------------
 
-export interface ParserCapabilities { import?: boolean; dialect1?: boolean; }
+export interface ParserCapabilities { import?: boolean; dialect1?: boolean; maxStatements?: number; }
 
 export interface StatementRange {
   /** Inclusive UTF-16 character offset of the statement's first token. */
@@ -468,9 +468,9 @@ export class Parser {
 
       const startTok = this.peek();
       stmts.push(this.parseStatement());
-      if (stmts.length > MAX_BATCH_STATEMENTS) {
+      if (stmts.length > (this.capabilities.maxStatements ?? MAX_BATCH_STATEMENTS)) {
         throw new ParseError(
-          `batch exceeds ${MAX_BATCH_STATEMENTS} statements.`,
+          `batch exceeds ${this.capabilities.maxStatements ?? MAX_BATCH_STATEMENTS} statements.`,
           startTok
         );
       }

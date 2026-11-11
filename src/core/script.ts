@@ -11,8 +11,9 @@ import {
 import { validateStatementStatic } from "./statementValidation";
 import { DiagnosticCodes, diagnosticAt, type Diagnostic } from "./diagnostics";
 import { parseScriptHeader, type ScriptHeaderMeta } from "./scriptHeader";
+import { resolveBatchLimits, type BatchLimitOptions } from "./batchLimits";
 
-export interface ParseScriptOptions {
+export interface ParseScriptOptions extends BatchLimitOptions {
   /** Logical application name to physical kintone application ID. */
   apps?: Readonly<Record<string, number>>;
   /** Omitted/false keeps IMPORT unavailable. */
@@ -27,6 +28,8 @@ export interface ParseScriptResult {
 }
 
 export function parseScript(source: string, opts: ParseScriptOptions = {}): ParseScriptResult {
+  // B217: 範囲外の上限は呼び出し側の誤り（RangeError）。診断にはしない
+  const limits = resolveBatchLimits(opts);
   const header = parseScriptHeader(source);
   const diagnostics = [...header.diagnostics];
   let sql = source;
@@ -67,6 +70,7 @@ export function parseScript(source: string, opts: ParseScriptOptions = {}): Pars
     const parsed = new Parser(new Lexer(sql).tokenize(), {
       dialect1: header.meta.dialect === 1,
       import: opts.enableImport === true,
+      maxStatements: limits.maxStatements,
     }).parseStatementsWithRanges();
     const statementRanges = parsed.statementRanges.map((range) => ({
       start: sourceOffsetForNormalizedOffset(range.start, rewriteSegments, "start"),
